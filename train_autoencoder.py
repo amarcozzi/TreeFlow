@@ -354,7 +354,7 @@ if __name__ == '__main__':
     # Data
     parser.add_argument('--data_path', type=str, default='./FOR-species20K',
                         help='Path to FOR-species20K dataset')
-    parser.add_argument('--batch_size', type=int, default=1,
+    parser.add_argument('--batch_size', type=int, default=256,
                         help='Batch size (number of point clouds per batch)')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')
