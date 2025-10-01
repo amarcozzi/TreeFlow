@@ -64,44 +64,57 @@ def save_visualization(epoch, output_dir, ground_truth, reconstruction, file_id,
     gt_colors = ground_truth[:, 2]
     rec_colors = reconstruction[:, 2]
 
+    # Use oblique view to show 3D structure
+    view_elev = 25  # Look down at 25 degrees
+    view_azim = 45  # Diagonal view
+
     # Ground Truth
     ax1 = fig.add_subplot(131, projection='3d')
     scatter1 = ax1.scatter(ground_truth[:, 0], ground_truth[:, 1], ground_truth[:, 2],
-                           c=gt_colors, cmap='viridis', s=1, alpha=0.6)
+                           c=gt_colors, cmap='viridis', s=2, alpha=0.3)
     ax1.set_title(f'Ground Truth\n{file_id}\nPoints: {len(ground_truth)}', fontsize=10)
     ax1.set_xlabel('X')
     ax1.set_ylabel('Y')
     ax1.set_zlabel('Z')
-
-    # Set consistent view angle
-    ax1.view_init(elev=20, azim=45)
+    ax1.view_init(elev=view_elev, azim=view_azim)
 
     # Reconstruction
     ax2 = fig.add_subplot(132, projection='3d')
     scatter2 = ax2.scatter(reconstruction[:, 0], reconstruction[:, 1], reconstruction[:, 2],
-                           c=rec_colors, cmap='viridis', s=1, alpha=0.6)
+                           c=rec_colors, cmap='viridis', s=2, alpha=0.3)
     ax2.set_title(f'Reconstruction\nPoints: {len(reconstruction)}', fontsize=10)
     ax2.set_xlabel('X')
     ax2.set_ylabel('Y')
     ax2.set_zlabel('Z')
-
-    # Match view angle
-    ax2.view_init(elev=20, azim=45)
+    ax2.view_init(elev=view_elev, azim=view_azim)
 
     # Overlay comparison
     ax3 = fig.add_subplot(133, projection='3d')
     ax3.scatter(ground_truth[:, 0], ground_truth[:, 1], ground_truth[:, 2],
-                c='blue', s=1, alpha=0.3, label='Ground Truth')
+                c='blue', s=2, alpha=0.2, label='Ground Truth')
     ax3.scatter(reconstruction[:, 0], reconstruction[:, 1], reconstruction[:, 2],
-                c='red', s=1, alpha=0.3, label='Reconstruction')
+                c='red', s=2, alpha=0.3, label='Reconstruction')
     ax3.set_title(f'Overlay Comparison', fontsize=10)
     ax3.set_xlabel('X')
     ax3.set_ylabel('Y')
     ax3.set_zlabel('Z')
     ax3.legend(markerscale=5)
+    ax3.view_init(elev=view_elev, azim=view_azim)
 
-    # Match view angle
-    ax3.view_init(elev=20, azim=45)
+    # Set consistent axis limits and aspect ratios
+    x_lim = (min(ground_truth[:, 0].min(), reconstruction[:, 0].min()),
+             max(ground_truth[:, 0].max(), reconstruction[:, 0].max()))
+    y_lim = (min(ground_truth[:, 1].min(), reconstruction[:, 1].min()),
+             max(ground_truth[:, 1].max(), reconstruction[:, 1].max()))
+    z_lim = (min(ground_truth[:, 2].min(), reconstruction[:, 2].min()),
+             max(ground_truth[:, 2].max(), reconstruction[:, 2].max()))
+
+    for ax in [ax1, ax2, ax3]:
+        ax.set_xlim(x_lim)
+        ax.set_ylim(y_lim)
+        ax.set_zlim(z_lim)
+        # Force equal aspect ratio to see true proportions
+        ax.set_box_aspect([x_lim[1]-x_lim[0], y_lim[1]-y_lim[0], z_lim[1]-z_lim[0]])
 
     # Add colorbars
     fig.colorbar(scatter1, ax=ax1, label='Z elevation', shrink=0.5, pad=0.1)
@@ -115,7 +128,7 @@ def save_visualization(epoch, output_dir, ground_truth, reconstruction, file_id,
     plt.close(fig)
 
 
-def train_epoch(model, dataloader, optimizer, device, epoch, vis_dir=None, visualize_freq=100):
+def train_epoch(model, dataloader, optimizer, device, epoch):
     model.train()
     total_loss = 0
     num_batches = len(dataloader)
@@ -153,22 +166,6 @@ def train_epoch(model, dataloader, optimizer, device, epoch, vis_dir=None, visua
             'loss': f'{batch_loss.item():.6f}',
             'avg_loss': f'{avg_loss:.6f}'
         })
-
-        # Visualize periodically
-        if vis_dir is not None and batch_idx % visualize_freq == 0:
-            with torch.no_grad():
-                sample = batch[0]  # First sample in batch
-                points = sample['points'].to(device)
-                reconstructed, _ = model(points)
-
-                save_visualization(
-                    epoch=epoch,
-                    output_dir=vis_dir,
-                    ground_truth=points.cpu(),
-                    reconstruction=reconstructed.cpu(),
-                    file_id=sample['file_id'],
-                    prefix=f'train_batch_{batch_idx}'
-                )
 
     return total_loss / num_batches
 
@@ -241,8 +238,8 @@ def main(args):
 
     # Create datasets
     data_path = Path(args.data_path)
-    train_dataset = PointCloudDataset(data_path, split="train")
-    test_dataset = PointCloudDataset(data_path, split="test")
+    train_dataset = PointCloudDataset(data_path, split="train", voxel_size=args.voxel_size)
+    test_dataset = PointCloudDataset(data_path, split="test", voxel_size=args.voxel_size)
 
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Test dataset size: {len(test_dataset)}")
@@ -253,7 +250,10 @@ def main(args):
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        pin_memory=True,
+        prefetch_factor=4,
+        persistent_workers=True if args.num_workers > 0 else False
     )
 
     test_loader = DataLoader(
@@ -261,6 +261,9 @@ def main(args):
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
+        pin_memory=True,
+        prefetch_factor=4,
+        persistent_workers=True if args.num_workers > 0 else False,
         collate_fn=collate_fn
     )
 
@@ -302,8 +305,6 @@ def main(args):
         # Train
         train_loss = train_epoch(
             model, train_loader, optimizer, device, epoch,
-            vis_dir=vis_dir if epoch % args.vis_freq == 0 else None,
-            visualize_freq=args.vis_train_freq
         )
 
         # Validate
@@ -366,17 +367,19 @@ if __name__ == '__main__':
                         help='Batch size (number of point clouds per batch)')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')
+    parser.add_argument('--voxel_size', type=float, default=0.5,
+                        help='Voxel size in meters for downsampling (default: 0.1). Set to 0 or None for no voxelization')
 
     # Model
-    parser.add_argument('--latent_dim', type=int, default=512,
+    parser.add_argument('--latent_dim', type=int, default=32,
                         help='Dimension of latent space')
-    parser.add_argument('--num_latents', type=int, default=256,
+    parser.add_argument('--num_latents', type=int, default=64,
                         help='Number of latent vectors')
-    parser.add_argument('--num_encoder_layers', type=int, default=1,
+    parser.add_argument('--num_encoder_layers', type=int, default=2,
                         help='Number of encoder layers')
-    parser.add_argument('--num_processor_layers', type=int, default=1,
+    parser.add_argument('--num_processor_layers', type=int, default=0,
                         help='Number of processor layers')
-    parser.add_argument('--num_decoder_layers', type=int, default=1,
+    parser.add_argument('--num_decoder_layers', type=int, default=2,
                         help='Number of decoder layers')
     parser.add_argument('--num_heads', type=int, default=4,
                         help='Number of attention heads')
@@ -394,13 +397,11 @@ if __name__ == '__main__':
     # Logging and visualization
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints',
                         help='Directory to save checkpoints')
-    parser.add_argument('--save_freq', type=int, default=10,
+    parser.add_argument('--save_freq', type=int, default=100,
                         help='Save checkpoint every N epochs')
-    parser.add_argument('--vis_freq', type=int, default=5,
+    parser.add_argument('--vis_freq', type=int, default=1,
                         help='Visualize results every N epochs')
-    parser.add_argument('--vis_train_freq', type=int, default=200,
-                        help='Visualize training batch every N batches')
-    parser.add_argument('--num_vis', type=int, default=5,
+    parser.add_argument('--num_vis', type=int, default=10,
                         help='Number of visualizations to save per validation')
 
     args = parser.parse_args()
