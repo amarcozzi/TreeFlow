@@ -136,35 +136,26 @@ def train_epoch(model, dataloader, optimizer, device, epoch):
     pbar = tqdm(dataloader, desc=f"Epoch {epoch} [Train]")
 
     for batch_idx, batch in enumerate(pbar):
+        optimizer.zero_grad()
+
         batch_loss = 0
-
         for sample in batch:
-            points = sample['points'].to(device)  # (N, 3)
-
-            # Forward pass
-            reconstructed, latent = model(points)
-
-            # Compute loss
+            points = sample['points'].to(device)
+            reconstructed, latent = model(points)  # Forward pass
             loss = chamfer_distance(reconstructed, points)
 
-            batch_loss += loss
+            (loss / len(batch)).backward()  # Accumulate gradients
+            batch_loss += loss.item()
 
-        # Average loss over batch
-        batch_loss = batch_loss / len(batch)
-
-        # Backward pass
-        optimizer.zero_grad()
-        batch_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
         optimizer.step()
 
-        # Update running average
-        total_loss += batch_loss.item()
-        avg_loss = total_loss / (batch_idx + 1)
+        batch_loss /= len(batch)
+        total_loss += batch_loss
 
         pbar.set_postfix({
-            'loss': f'{batch_loss.item():.6f}',
-            'avg_loss': f'{avg_loss:.6f}'
+            'loss': f'{batch_loss:.6f}',
+            'avg_loss': f'{total_loss / (batch_idx + 1):.6f}'
         })
 
     return total_loss / num_batches
