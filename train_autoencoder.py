@@ -48,8 +48,8 @@ def chamfer_distance(pred, target):
         loss: Chamfer distance
     """
     if len(pred) == 0:
-        # If no valid points, return large penalty
-        return torch.tensor(10.0, device=target.device)
+        # If no valid points, return large penalty scaled by target size
+        return torch.tensor(float(len(target)), device=target.device)
 
     # Compute pairwise distances
     dist_matrix = torch.cdist(pred.unsqueeze(0), target.unsqueeze(0)).squeeze(0)  # (N, M)
@@ -66,42 +66,52 @@ def chamfer_distance(pred, target):
     return chamfer_loss
 
 
-def soft_chamfer_distance_with_validity(all_coords, validity_scores, target_points):
+def soft_chamfer_distance(all_coords, validity_scores, target_points, temperature=0.1):
     """
-    Chamfer distance where validity scores act as soft weights.
-    Fully differentiable - gradients flow from coordinates to validity!
+    Soft Chamfer Distance where predictions are weighted by validity scores.
+    This allows gradients to flow from coordinate loss to validity scores.
+
+    Key insight: Instead of hard thresholding (validity > 0.5) which blocks gradients,
+    we use soft selection where each slot's contribution is weighted by its validity.
 
     Args:
-        all_coords: (num_slots, 3) - all slot coordinates
-        validity_scores: (num_slots,) - validity in [0,1]
-        target_points: (N, 3) - ground truth points
+        all_coords: All slot coordinates, shape (num_slots, 3)
+        validity_scores: Validity scores for each slot, shape (num_slots,)
+        target_points: Ground truth points, shape (N, 3)
+        temperature: Temperature for soft-minimum in backward direction (default: 0.1)
+                    Lower = sharper (closer to min), Higher = smoother
 
     Returns:
-        loss: scalar
+        chamfer_loss: Weighted Chamfer distance (differentiable w.r.t. validity_scores)
     """
-    num_target = len(target_points)
+    # Compute pairwise distances: (num_slots, N)
+    dist_matrix = torch.cdist(all_coords.unsqueeze(0), target_points.unsqueeze(0)).squeeze(0)
 
-    # Normalize validity scores to sum to num_target
-    # This makes the weighted sum comparable to regular chamfer
-    validity_normalized = validity_scores * (num_target / (validity_scores.sum() + 1e-8))
+    # Forward: each slot's contribution weighted by its validity
+    # For each slot, find distance to nearest target, weight by validity
+    min_dist_per_slot, _ = dist_matrix.min(dim=1)  # (num_slots,)
 
-    # Compute pairwise distances
-    dist_matrix = torch.cdist(
-        all_coords.unsqueeze(0),
-        target_points.unsqueeze(0)
-    ).squeeze(0)  # (num_slots, N)
+    # Weight by validity and normalize
+    # Slots with high validity should have low distance to targets
+    validity_sum = validity_scores.sum() + 1e-8  # Avoid division by zero
+    forward_loss = (validity_scores * min_dist_per_slot).sum() / validity_sum
 
-    # Forward direction: each slot weighted by its validity
-    # Slots with high validity contribute more to the loss
-    min_dist_forward, _ = dist_matrix.min(dim=1)  # (num_slots,)
-    forward_loss = (min_dist_forward * validity_normalized).sum() / num_target
+    # Backward: each target finds nearest valid prediction
+    # Use soft-minimum weighted by validity scores
+    # For each target, compute weighted distance considering validity
+    # exp(-dist/temp) gives higher weight to closer slots
+    # Multiplying by validity gives higher weight to valid slots
+    weights = torch.exp(-dist_matrix / temperature) * validity_scores.unsqueeze(1)  # (num_slots, N)
+    weights = weights / (weights.sum(dim=0, keepdim=True) + 1e-8)  # Normalize per target
 
-    # Backward direction: each target finds nearest slot
-    # This encourages at least one slot near each target
-    min_dist_backward, _ = dist_matrix.min(dim=0)  # (N,)
-    backward_loss = min_dist_backward.mean()
+    # Weighted distance for each target (close + valid slots contribute more)
+    weighted_dist_per_target = (weights * dist_matrix).sum(dim=0)  # (N,)
+    backward_loss = weighted_dist_per_target.mean()
 
-    return forward_loss + backward_loss
+    chamfer_loss = forward_loss + backward_loss
+
+    return chamfer_loss
+
 
 def compute_validity_loss(validity_scores, num_target_points, validity_loss_type='count'):
     """
@@ -146,34 +156,36 @@ def compute_validity_loss(validity_scores, num_target_points, validity_loss_type
         raise ValueError(f"Unknown validity_loss_type: {validity_loss_type}")
 
 
-def compute_loss(all_coords, validity_scores, target_points,
-                 validity_loss_weight=0.1):
+def compute_loss(all_coords, validity_scores, target_points, coord_loss_weight=1.0,
+                 validity_loss_weight=1.0, validity_loss_type='count'):
     """
-    Combined loss with soft chamfer distance.
+    Combined loss for parallel slots decoder with soft selection.
 
     Args:
-        all_coords: (num_slots, 3)
-        validity_scores: (num_slots,)
-        target_points: (N, 3)
-        validity_loss_weight: Weight for count regularization
+        all_coords: All slot coordinates, shape (num_slots, 3)
+        validity_scores: Validity scores, shape (num_slots,)
+        target_points: Ground truth points, shape (N, 3)
+        coord_loss_weight: Weight for coordinate loss
+        validity_loss_weight: Weight for validity loss
+        validity_loss_type: Type of validity loss
+
+    Returns:
+        total_loss: Combined loss
+        coord_loss: Coordinate loss component
+        valid_loss: Validity loss component
     """
-    # Main loss: soft chamfer (fully differentiable!)
-    coord_loss = soft_chamfer_distance_with_validity(
-        all_coords, validity_scores, target_points
-    )
+    # Coordinate loss: Soft Chamfer distance weighted by validity
+    # This allows gradients to flow to validity_scores!
+    coord_loss = soft_chamfer_distance(all_coords, validity_scores, target_points)
 
-    # Optional: count regularization (helps stability)
-    # Encourage total validity mass to match target count
+    # Validity loss: encourage correct number of active slots
     num_target = len(target_points)
-    total_validity = validity_scores.sum()
-    count_loss = F.l1_loss(total_validity,
-                           torch.tensor(num_target, dtype=torch.float32,
-                                        device=validity_scores.device))
+    valid_loss = compute_validity_loss(validity_scores, num_target, validity_loss_type)
 
-    # Combine
-    total_loss = coord_loss + validity_loss_weight * count_loss
+    # Combined loss
+    total_loss = coord_loss_weight * coord_loss + validity_loss_weight * valid_loss
 
-    return total_loss, coord_loss, count_loss
+    return total_loss, coord_loss, valid_loss
 
 
 def save_visualization(epoch, output_dir, ground_truth, reconstruction, file_id, num_valid, prefix='reconstruction'):
@@ -606,9 +618,9 @@ if __name__ == '__main__':
                         help='Shuffle test dataloader')
 
     # Model
-    parser.add_argument('--latent_dim', type=int, default=128,
+    parser.add_argument('--latent_dim', type=int, default=32,
                         help='Dimension of latent space')
-    parser.add_argument('--num_latents', type=int, default=264,
+    parser.add_argument('--num_latents', type=int, default=64,
                         help='Number of latent vectors')
     parser.add_argument('--num_encoder_layers', type=int, default=2,
                         help='Number of encoder layers')
@@ -628,7 +640,7 @@ if __name__ == '__main__':
                         help='Weight for coordinate loss')
     parser.add_argument('--validity_loss_weight', type=float, default=1.0,
                         help='Weight for validity loss')
-    parser.add_argument('--validity_loss_type', type=str, default='bce',
+    parser.add_argument('--validity_loss_type', type=str, default='count',
                         choices=['count', 'bce'],
                         help='Type of validity loss')
 
@@ -641,7 +653,7 @@ if __name__ == '__main__':
                         help='Weight decay')
 
     # Logging and visualization
-    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints_parallel_slots',
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints',
                         help='Directory to save checkpoints')
     parser.add_argument('--save_freq', type=int, default=100,
                         help='Save checkpoint every N epochs')
