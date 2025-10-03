@@ -1,11 +1,10 @@
-# train_autoencoder.py
+# train_generative_perceiver.py
 import matplotlib
 
 matplotlib.use('Agg')  # Use non-interactive backend for thread-safe plotting
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from pathlib import Path
 import argparse
@@ -17,340 +16,180 @@ import numpy as np
 import random
 
 from dataset import PointCloudDataset, collate_fn
-from model_autoencoder import PerceiverIOAutoencoder
+from model_autoencoder import GenerativePerceiver
 
 
 def set_seed(seed):
-    """
-    Set random seed for reproducibility across random, numpy, and pytorch.
-
-    Args:
-        seed: Random seed value
-    """
+    """ Set random seed for reproducibility across random, numpy, and pytorch. """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    # For deterministic behavior (may impact performance)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
 
-def chamfer_distance(pred, target):
-    """
-    Compute Chamfer Distance between two point clouds.
-
-    Args:
-        pred: Predicted points, shape (N, 3)
-        target: Target points, shape (M, 3)
-
-    Returns:
-        loss: Chamfer distance
-    """
-    # Compute pairwise distances
-    dist_matrix = torch.cdist(pred.unsqueeze(0), target.unsqueeze(0)).squeeze(0)  # (N, M)
-
-    # Forward direction: for each predicted point, find nearest target
-    min_dist_pred_to_target = dist_matrix.min(dim=1)[0]  # (N,)
-
-    # Backward direction: for each target point, find nearest prediction
-    min_dist_target_to_pred = dist_matrix.min(dim=0)[0]  # (M,)
-
-    # Chamfer distance is sum of both directions
-    chamfer_loss = min_dist_pred_to_target.mean() + min_dist_target_to_pred.mean()
-
-    return chamfer_loss
-
-
-def sample_points(points, num_samples):
-    """
-    Randomly sample a fixed number of points from a point cloud.
-
-    Args:
-        points: Input points, shape (N, 3)
-        num_samples: Number of points to sample
-
-    Returns:
-        sampled_points: shape (num_samples, 3)
-    """
-    num_points = points.size(0)
-
-    if num_points >= num_samples:
-        # Randomly sample without replacement
-        indices = torch.randperm(num_points)[:num_samples]
-        return points[indices]
-    else:
-        # If not enough points, sample with replacement
-        indices = torch.randint(0, num_points, (num_samples,))
-        return points[indices]
-
-
 def save_visualization(epoch, output_dir, ground_truth, reconstruction, file_id, prefix='reconstruction'):
-    """
-    Save side-by-side visualization of ground truth and reconstruction.
-
-    Args:
-        epoch: Current epoch number
-        output_dir: Directory to save visualizations
-        ground_truth: Ground truth point cloud, shape (N, 3)
-        reconstruction: Reconstructed point cloud, shape (M, 3)
-        file_id: File identifier
-        prefix: Prefix for saved filename
-    """
+    """ Save side-by-side visualization of ground truth and generative reconstruction. """
     fig = plt.figure(figsize=(18, 6))
 
-    # Convert to numpy if needed
     if torch.is_tensor(ground_truth):
         ground_truth = ground_truth.cpu().numpy()
     if torch.is_tensor(reconstruction):
         reconstruction = reconstruction.cpu().numpy()
 
-    # Compute elevation (Z) for coloring
-    gt_colors = ground_truth[:, 2]
-    rec_colors = reconstruction[:, 2]
-
-    # Use oblique view to show 3D structure
-    view_elev = 25  # Look down at 25 degrees
-    view_azim = 45  # Diagonal view
+    view_elev, view_azim = 25, 45
 
     # Ground Truth
     ax1 = fig.add_subplot(131, projection='3d')
-    scatter1 = ax1.scatter(ground_truth[:, 0], ground_truth[:, 1], ground_truth[:, 2],
-                           c=gt_colors, cmap='viridis', s=2, alpha=0.3)
+    ax1.scatter(ground_truth[:, 0], ground_truth[:, 1], ground_truth[:, 2], c='blue', s=2, alpha=0.3)
     ax1.set_title(f'Ground Truth\n{file_id}\nPoints: {len(ground_truth)}', fontsize=10)
-    ax1.set_xlabel('X')
-    ax1.set_ylabel('Y')
-    ax1.set_zlabel('Z')
     ax1.view_init(elev=view_elev, azim=view_azim)
 
-    # Reconstruction
+    # Generative Reconstruction
     ax2 = fig.add_subplot(132, projection='3d')
-    scatter2 = ax2.scatter(reconstruction[:, 0], reconstruction[:, 1], reconstruction[:, 2],
-                           c=rec_colors, cmap='viridis', s=2, alpha=0.3)
-    ax2.set_title(f'Reconstruction\nPoints: {len(reconstruction)}', fontsize=10)
-    ax2.set_xlabel('X')
-    ax2.set_ylabel('Y')
-    ax2.set_zlabel('Z')
+    ax2.scatter(reconstruction[:, 0], reconstruction[:, 1], reconstruction[:, 2], c='red', s=2, alpha=0.3)
+    ax2.set_title(f'Generative Reconstruction\nPoints: {len(reconstruction)}', fontsize=10)
     ax2.view_init(elev=view_elev, azim=view_azim)
 
-    # Overlay comparison
+    # Overlay
     ax3 = fig.add_subplot(133, projection='3d')
-    ax3.scatter(ground_truth[:, 0], ground_truth[:, 1], ground_truth[:, 2],
-                c='blue', s=2, alpha=0.2, label='Ground Truth')
-    ax3.scatter(reconstruction[:, 0], reconstruction[:, 1], reconstruction[:, 2],
-                c='red', s=2, alpha=0.3, label='Reconstruction')
-    ax3.set_title(f'Overlay Comparison', fontsize=10)
-    ax3.set_xlabel('X')
-    ax3.set_ylabel('Y')
-    ax3.set_zlabel('Z')
+    ax3.scatter(ground_truth[:, 0], ground_truth[:, 1], ground_truth[:, 2], c='blue', s=2, alpha=0.2,
+                label='Ground Truth')
+    ax3.scatter(reconstruction[:, 0], reconstruction[:, 1], reconstruction[:, 2], c='red', s=2, alpha=0.3,
+                label='Reconstruction')
+    ax3.set_title('Overlay Comparison', fontsize=10)
     ax3.legend(markerscale=5)
     ax3.view_init(elev=view_elev, azim=view_azim)
 
-    # Set consistent axis limits and aspect ratios
-    x_lim = (min(ground_truth[:, 0].min(), reconstruction[:, 0].min()),
-             max(ground_truth[:, 0].max(), reconstruction[:, 0].max()))
-    y_lim = (min(ground_truth[:, 1].min(), reconstruction[:, 1].min()),
-             max(ground_truth[:, 1].max(), reconstruction[:, 1].max()))
-    z_lim = (min(ground_truth[:, 2].min(), reconstruction[:, 2].min()),
-             max(ground_truth[:, 2].max(), reconstruction[:, 2].max()))
-
+    # Set consistent axis limits
+    x_lim = (ground_truth[:, 0].min(), ground_truth[:, 0].max())
+    y_lim = (ground_truth[:, 1].min(), ground_truth[:, 1].max())
+    z_lim = (ground_truth[:, 2].min(), ground_truth[:, 2].max())
     for ax in [ax1, ax2, ax3]:
-        ax.set_xlim(x_lim)
-        ax.set_ylim(y_lim)
+        ax.set_xlim(x_lim);
+        ax.set_ylim(y_lim);
         ax.set_zlim(z_lim)
-        # Force equal aspect ratio to see true proportions
         ax.set_box_aspect([x_lim[1] - x_lim[0], y_lim[1] - y_lim[0], z_lim[1] - z_lim[0]])
 
-    # Add colorbars
-    fig.colorbar(scatter1, ax=ax1, label='Z elevation', shrink=0.5, pad=0.1)
-    fig.colorbar(scatter2, ax=ax2, label='Z elevation', shrink=0.5, pad=0.1)
-
     plt.suptitle(f'Epoch {epoch}', fontsize=12, y=0.98)
-    plt.tight_layout()
-
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     filepath = output_dir / f'{prefix}_epoch_{epoch:03d}_{file_id}.png'
-    plt.savefig(filepath, dpi=150, bbox_inches='tight')
+    plt.savefig(filepath, dpi=150)
     plt.close(fig)
 
 
-def train_epoch(model, dataloader, optimizer, device, epoch, min_output_points, max_output_points, count_loss_weight):
-    """
-    Train for one epoch with variable-length generation and count prediction.
-    """
+def train_epoch(model, dataloader, optimizer, device, epoch, loss_weights):
+    """ New training loop for the autoregressive model. """
     model.train()
-    total_loss, total_recon_loss, total_count_loss = 0, 0, 0
-    num_batches = len(dataloader)
+    total_loss, total_coord_loss, total_stop_loss = 0, 0, 0
+
+    coord_loss_fn = nn.MSELoss()
+    stop_loss_fn = nn.BCEWithLogitsLoss()
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch} [Train]")
 
     for batch_idx, batch in enumerate(pbar):
         optimizer.zero_grad()
 
-        batch_loss = 0
+        # This loop handles cases where batch items have different numbers of points
+        # and accumulates gradients before the optimizer step.
         for sample in batch:
             points = sample['points'].to(device)
+            if len(points) < 2: continue  # Need at least two points to form a sequence
 
-            # Sample variable number of target points for teacher forcing
-            actual_min = min(min_output_points, len(points))
-            actual_max = min(max_output_points, len(points))
-            num_target = random.randint(actual_min, actual_max)
-            target_points = sample_points(points, num_target)
-            target_count = torch.tensor(len(target_points), dtype=torch.float32, device=device)
+            # Forward pass using teacher forcing
+            pred_coords, stop_logits = model(points)
 
-            # Forward pass with teacher forcing
-            reconstructed, predicted_count, _ = model(points, target_points=target_points)
+            # --- Prepare Targets ---
+            # 1. Target coordinates are the original sorted sequence
+            target_coords = points[torch.argsort(points[:, 0])]
 
-            # Compute losses
-            recon_loss = chamfer_distance(reconstructed, target_points)
-            count_loss = F.mse_loss(predicted_count, target_count)
-            loss = recon_loss + count_loss_weight * count_loss
+            # 2. Target for stop logits: 0 for all points, 1 for the very last one
+            stop_targets = torch.zeros_like(stop_logits)
+            stop_targets[-1] = 1.0
 
-            (loss / len(batch)).backward()  # Accumulate gradients
-            batch_loss += loss.item()
-            total_recon_loss += recon_loss.item()
-            total_count_loss += count_loss.item()
+            # --- Calculate Losses ---
+            coord_loss = coord_loss_fn(pred_coords, target_coords)
+            stop_loss = stop_loss_fn(stop_logits, stop_targets)
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+            # Combine with weights
+            loss = (loss_weights['coord'] * coord_loss +
+                    loss_weights['stop'] * stop_loss)
+
+            # Scale loss by number of samples in batch to average gradients
+            (loss / len(batch)).backward()
+
+            # Log individual loss components
+            total_coord_loss += coord_loss.item()
+            total_stop_loss += stop_loss.item()
+            total_loss += loss.item()
+
+        # Clip gradients and step optimizer
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        total_loss += batch_loss
-
         pbar.set_postfix({
-            'loss': f'{batch_loss / len(batch):.4f}',
-            'recon': f'{total_recon_loss / (batch_idx + 1) / len(batch):.4f}',
-            'count': f'{total_count_loss / (batch_idx + 1) / len(batch):.4f}'
+            'avg_loss': f'{total_loss / (batch_idx + 1) / len(batch):.4f}',
+            'coord_l': f'{total_coord_loss / (batch_idx + 1) / len(batch):.4f}',
+            'stop_l': f'{total_stop_loss / (batch_idx + 1) / len(batch):.4f}'
         })
 
-    return total_loss / num_batches / len(batch)
+    return total_loss / len(dataloader.dataset)
 
 
-def validate(model, dataloader, device, count_loss_weight, epoch=None, vis_dir=None, num_visualizations=5):
-    """
-    Validate the model using learned autoregressive generation.
-    """
+def validate(model, dataloader, device, epoch, vis_dir, num_visualizations):
+    """ New validation loop for generative visualization. """
     model.eval()
-    total_loss, total_recon_loss, total_count_loss = 0, 0, 0
-    num_batches = len(dataloader)
     visualized_count = 0
+    print(f"\nRunning generative validation for epoch {epoch}...")
+    pbar = tqdm(dataloader, desc=f"Epoch {epoch} [Val]")
 
     with torch.no_grad():
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch} [Val]" if epoch else "Validating")
-
-        for batch_idx, batch in enumerate(pbar):
-            batch_loss = 0
+        for batch in pbar:
+            if visualized_count >= num_visualizations:
+                break
 
             for sample in batch:
+                if visualized_count >= num_visualizations:
+                    break
+
                 points = sample['points'].to(device)
-                target_count = torch.tensor(len(points), dtype=torch.float32, device=device)
+                if len(points) < 2: continue
 
-                # Use learned generation (model predicts num_points internally)
-                reconstructed, predicted_count, _ = model(points)
+                # Generate a new point cloud based on the latent representation of the input
+                reconstruction = model.generate(points, max_len=len(points) + 500)
 
-                # Compute losses against the full ground truth
-                recon_loss = chamfer_distance(reconstructed, points)
-                count_loss = F.mse_loss(predicted_count, target_count)
-                loss = recon_loss + count_loss_weight * count_loss
-
-                batch_loss += loss.item()
-                total_recon_loss += recon_loss.item()
-                total_count_loss += count_loss.item()
-
-            total_loss += batch_loss
-
-            pbar.set_postfix({
-                'loss': f'{batch_loss / len(batch):.4f}',
-                'recon': f'{total_recon_loss / (batch_idx + 1) / len(batch):.4f}',
-                'count': f'{total_count_loss / (batch_idx + 1) / len(batch):.4f}'
-            })
-
-            # Save visualizations for first few batches
-            if vis_dir is not None and visualized_count < num_visualizations:
-                for sample in batch:
-                    if visualized_count >= num_visualizations:
-                        break
-
-                    points = sample['points'].to(device)
-                    reconstructed, _, _ = model(points)
-
-                    save_visualization(
-                        epoch=epoch if epoch is not None else 0,
-                        output_dir=vis_dir,
-                        ground_truth=points.cpu(),
-                        reconstruction=reconstructed.cpu(),
-                        file_id=sample['file_id'],
-                        prefix='val'
-                    )
-                    visualized_count += 1
-
-    return total_loss / num_batches / len(batch)
+                save_visualization(
+                    epoch=epoch, output_dir=vis_dir,
+                    ground_truth=points.cpu(),
+                    reconstruction=reconstruction.cpu(),
+                    file_id=sample['file_id'], prefix='val_generative'
+                )
+                visualized_count += 1
+    print(f"Saved {visualized_count} visualizations to {vis_dir}")
 
 
 def main(args):
-    # Set random seed for reproducibility
-    if args.seed is not None:
-        print(f"Setting random seed to {args.seed}")
-        set_seed(args.seed)
-
-    # Setup
+    set_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # Create output directories
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
     vis_dir = checkpoint_dir / 'visualizations'
     vis_dir.mkdir(exist_ok=True)
 
-    # Create datasets
     data_path = Path(args.data_path)
     train_dataset = PointCloudDataset(data_path, split="train", voxel_size=args.voxel_size)
     test_dataset = PointCloudDataset(data_path, split="test", voxel_size=args.voxel_size)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+                              collate_fn=collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
+                             collate_fn=collate_fn)
 
-    print(f"Train dataset size: {len(train_dataset)}")
-    print(f"Test dataset size: {len(test_dataset)}")
-
-    # Check if resuming from checkpoint
-    resume_checkpoint = None
-    if args.resume:
-        resume_path = Path(args.resume)
-        if resume_path.exists():
-            print(f"\nLoading checkpoint from: {resume_path}")
-            resume_checkpoint = torch.load(resume_path, map_location=device)
-            print(f"Resuming from epoch {resume_checkpoint['epoch']}")
-            print(f"Previous train loss: {resume_checkpoint['train_loss']:.6f}")
-            print(f"Previous val loss: {resume_checkpoint['val_loss']:.6f}")
-        else:
-            print(f"\nWarning: Checkpoint not found at {resume_path}")
-            print("Starting training from scratch...")
-            resume_checkpoint = None
-
-    # Create dataloaders
-    print("Create train loader with shuffle=True")
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        collate_fn=collate_fn,
-        pin_memory=True,
-        prefetch_factor=4,
-        persistent_workers=True if args.num_workers > 0 else False
-    )
-    print(f"Create test loader with shuffle={args.shuffle_test}")
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=args.batch_size,
-        shuffle=args.shuffle_test,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        prefetch_factor=4,
-        persistent_workers=True if args.num_workers > 0 else False,
-        collate_fn=collate_fn
-    )
-
-    # Create model
-    model = PerceiverIOAutoencoder(
+    model = GenerativePerceiver(
         input_dim=3,
         latent_dim=args.latent_dim,
         num_latents=args.num_latents,
@@ -358,168 +197,80 @@ def main(args):
         num_processor_layers=args.num_processor_layers,
         num_decoder_layers=args.num_decoder_layers,
         num_heads=args.num_heads,
-        dropout=args.dropout,
-        max_output_points=args.max_output_points,
+        dropout=args.dropout
     ).to(device)
+    print(f"Model has {sum(p.numel() for p in model.parameters()):,} parameters")
 
-    num_params = sum(p.numel() for p in model.parameters())
-    print(f"Model has {num_params:,} parameters")
-    print(f"Decoder type: Autoregressive with Count Prediction")
-    print(f"Max output points: {args.max_output_points}")
-    print(f"Training with variable output: {args.min_output_points}-{args.max_output_points} points")
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.01)
 
-    # Optimizer and scheduler
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay
-    )
+    # Loss weights are now a critical hyperparameter
+    loss_weights = {'coord': args.coord_loss_weight, 'stop': args.stop_loss_weight}
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=args.epochs,
-        eta_min=args.lr * 0.01
-    )
-
-    # Load checkpoint if resuming
-    start_epoch = 1
-    best_val_loss = float('inf')
-
-    if resume_checkpoint is not None:
-        model.load_state_dict(resume_checkpoint['model_state_dict'])
-        optimizer.load_state_dict(resume_checkpoint['optimizer_state_dict'])
-        scheduler.load_state_dict(resume_checkpoint['scheduler_state_dict'])
-        start_epoch = resume_checkpoint['epoch'] + 1
-        best_val_loss = resume_checkpoint['val_loss']
-        print(f"Resumed successfully! Starting from epoch {start_epoch}")
-        print(f"Best validation loss so far: {best_val_loss:.6f}\n")
-
-    # Training loop
-    print("\nStarting training...")
+    print("\nStarting training for Generative Perceiver...")
     print("=" * 80)
 
-    for epoch in range(start_epoch, args.epochs + 1):
-        # Train with variable-length generation and count prediction
-        train_loss = train_epoch(
-            model, train_loader, optimizer, device, epoch,
-            args.min_output_points, args.max_output_points, args.count_loss_weight
-        )
+    for epoch in range(1, args.epochs + 1):
+        train_loss = train_epoch(model, train_loader, optimizer, device, epoch, loss_weights)
 
-        # Validate using true autoregressive generation
-        if (epoch + 1) % args.vis_freq == 0:
-            print(f"\nValidating with visualizations at epoch {epoch}...")
-            val_loss = validate(
-                model, test_loader, device, args.count_loss_weight, epoch,
-                vis_dir=vis_dir if epoch % args.vis_freq == 0 else None,
-                num_visualizations=args.num_vis
-            )
+        if epoch % args.vis_freq == 0:
+            validate(model, test_loader, device, epoch, vis_dir, args.num_vis)
 
-            # Step scheduler
-            scheduler.step()
+        scheduler.step()
 
-            # Print epoch summary
-            print(f"\nEpoch {epoch}/{args.epochs} Summary:")
-            print(f"  Train Loss: {train_loss:.6f}")
-            print(f"  Val Loss:   {val_loss:.6f}")
-            print(f"  LR:         {optimizer.param_groups[0]['lr']:.2e}")
+        print(f"\nEpoch {epoch}/{args.epochs} Summary:")
+        print(f"  Train Loss: {train_loss:.6f}")
+        print(f"  LR:         {optimizer.param_groups[0]['lr']:.2e}")
 
-            # Save best model
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                checkpoint = {
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'train_loss': train_loss,
-                    'val_loss': val_loss,
-                    'args': vars(args)
-                }
-                torch.save(checkpoint, checkpoint_dir / 'best_model.pth')
-                print(f"  *** New best model saved! ***")
+        if epoch % args.save_freq == 0:
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'train_loss': train_loss,
+                'args': vars(args)
+            }
+            torch.save(checkpoint, checkpoint_dir / f'checkpoint_epoch_{epoch:03d}.pth')
+            print(f"  Checkpoint saved to {checkpoint_dir / f'checkpoint_epoch_{epoch:03d}.pth'}")
 
-            # Save periodic checkpoint
-            if epoch % args.save_freq == 0:
-                checkpoint = {
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'train_loss': train_loss,
-                    'val_loss': val_loss,
-                    'args': vars(args)
-                }
-                torch.save(checkpoint, checkpoint_dir / f'checkpoint_epoch_{epoch:03d}.pth')
-
-            print("=" * 80)
+        print("=" * 80)
 
     print("\nTraining complete!")
-    print(f"Best validation loss: {best_val_loss:.6f}")
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Train PerceiverIO Autoencoder for Point Clouds')
+    parser = argparse.ArgumentParser(description='Train Generative Perceiver for Point Clouds')
 
-    # Reproducibility
-    parser.add_argument('--seed', type=int, default=968324,
-                        help='Random seed for reproducibility (default: None, no seed set)')
-    parser.add_argument('--resume', type=str, default=None,
-                        help='Path to checkpoint to resume from (e.g., ./checkpoints/best_model.pth)')
+    # Data and Reproducibility
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--data_path', type=str, default='./FOR-species20K', help='Path to dataset')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of data loading workers')
+    parser.add_argument('--voxel_size', type=float, default=0.5, help='Voxel size for downsampling')
 
-    # Data
-    parser.add_argument('--data_path', type=str, default='./FOR-species20K',
-                        help='Path to FOR-species20K dataset')
-    parser.add_argument('--batch_size', type=int, default=16,
-                        help='Batch size (number of point clouds per batch)')
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='Number of data loading workers')
-    parser.add_argument('--voxel_size', type=float, default=0.5,
-                        help='Voxel size in meters for downsampling (default: 0.5). Set to 0 or None for no voxelization')
-    parser.add_argument('--shuffle_test', action='store_true',
-                        help='Shuffle test dataloader (default: False)')
+    # Model Hyperparameters
+    parser.add_argument('--latent_dim', type=int, default=256, help='Dimension of latent space')
+    parser.add_argument('--num_latents', type=int, default=128, help='Number of latent vectors')
+    parser.add_argument('--num_encoder_layers', type=int, default=4, help='Number of encoder layers')
+    parser.add_argument('--num_processor_layers', type=int, default=2, help='Number of processor layers')
+    parser.add_argument('--num_decoder_layers', type=int, default=4, help='Number of decoder layers')
+    parser.add_argument('--num_heads', type=int, default=4, help='Number of attention heads')
+    parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
 
-    # Model
-    parser.add_argument('--latent_dim', type=int, default=128,
-                        help='Dimension of latent space')
-    parser.add_argument('--num_latents', type=int, default=256,
-                        help='Number of latent vectors')
-    parser.add_argument('--num_encoder_layers', type=int, default=2,
-                        help='Number of encoder layers')
-    parser.add_argument('--num_processor_layers', type=int, default=4,
-                        help='Number of processor layers')
-    parser.add_argument('--num_decoder_layers', type=int, default=6,
-                        help='Number of decoder layers')
-    parser.add_argument('--num_heads', type=int, default=4,
-                        help='Number of attention heads')
-    parser.add_argument('--dropout', type=float, default=0.1,
-                        help='Dropout rate')
+    # Training and Loss Hyperparameters
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay')
+    parser.add_argument('--coord_loss_weight', type=float, default=1.0, help='Weight for coordinate prediction loss')
+    parser.add_argument('--stop_loss_weight', type=float, default=1.0, help='Weight for stop token prediction loss')
 
-    # Decoder-specific (VARIABLE LENGTH GENERATION)
-    parser.add_argument('--max_output_points', type=int, default=4196,
-                        help='Maximum number of output points decoder can generate')
-    parser.add_argument('--min_output_points', type=int, default=256,
-                        help='Minimum number of output points during training (for variable-length training)')
-
-    # Training
-    parser.add_argument('--epochs', type=int, default=100,
-                        help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=1e-4,
-                        help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.01,
-                        help='Weight decay')
-    parser.add_argument('--count_loss_weight', type=float, default=0.1,
-                        help='Weight for the point count prediction loss')
-
-    # Logging and visualization
-    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints',
+    # Logging and Saving
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints_generative',
                         help='Directory to save checkpoints')
-    parser.add_argument('--save_freq', type=int, default=100,
-                        help='Save checkpoint every N epochs')
-    parser.add_argument('--vis_freq', type=int, default=5,
-                        help='Visualize results every N epochs')
-    parser.add_argument('--num_vis', type=int, default=10,
-                        help='Number of visualizations to save per validation')
+    parser.add_argument('--save_freq', type=int, default=25, help='Save checkpoint every N epochs')
+    parser.add_argument('--vis_freq', type=int, default=5, help='Visualize results every N epochs')
+    parser.add_argument('--num_vis', type=int, default=5, help='Number of visualizations to save per validation run')
 
     args = parser.parse_args()
-
     main(args)
