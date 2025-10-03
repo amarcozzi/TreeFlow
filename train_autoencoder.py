@@ -1,5 +1,6 @@
 # train_autoencoder.py
 import matplotlib
+
 matplotlib.use('Agg')  # Use non-interactive backend for thread-safe plotting
 
 import torch
@@ -260,6 +261,21 @@ def main(args):
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Test dataset size: {len(test_dataset)}")
 
+    # Check if resuming from checkpoint
+    resume_checkpoint = None
+    if args.resume:
+        resume_path = Path(args.resume)
+        if resume_path.exists():
+            print(f"\nLoading checkpoint from: {resume_path}")
+            resume_checkpoint = torch.load(resume_path, map_location=device)
+            print(f"Resuming from epoch {resume_checkpoint['epoch']}")
+            print(f"Previous train loss: {resume_checkpoint['train_loss']:.6f}")
+            print(f"Previous val loss: {resume_checkpoint['val_loss']:.6f}")
+        else:
+            print(f"\nWarning: Checkpoint not found at {resume_path}")
+            print("Starting training from scratch...")
+            resume_checkpoint = None
+
     # Create dataloaders
     print("Create train loader with shuffle=True")
     train_loader = DataLoader(
@@ -312,13 +328,24 @@ def main(args):
         eta_min=args.lr * 0.01
     )
 
-    # Training loop
+    # Load checkpoint if resuming
+    start_epoch = 1
     best_val_loss = float('inf')
 
+    if resume_checkpoint is not None:
+        model.load_state_dict(resume_checkpoint['model_state_dict'])
+        optimizer.load_state_dict(resume_checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(resume_checkpoint['scheduler_state_dict'])
+        start_epoch = resume_checkpoint['epoch'] + 1
+        best_val_loss = resume_checkpoint['val_loss']
+        print(f"Resumed successfully! Starting from epoch {start_epoch}")
+        print(f"Best validation loss so far: {best_val_loss:.6f}\n")
+
+    # Training loop
     print("\nStarting training...")
     print("=" * 80)
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         # Train
         train_loss = train_epoch(
             model, train_loader, optimizer, device, epoch,
@@ -380,6 +407,8 @@ if __name__ == '__main__':
     # Reproducibility
     parser.add_argument('--seed', type=int, default=968324,
                         help='Random seed for reproducibility (default: None, no seed set)')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to checkpoint to resume from (e.g., ./checkpoints/best_model.pth)')
 
     # Data
     parser.add_argument('--data_path', type=str, default='./FOR-species20K',
