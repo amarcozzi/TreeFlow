@@ -195,10 +195,10 @@ def train_epoch(model, dataloader, optimizer, device, epoch, min_output_points, 
 
             # Sample variable number of target points for teacher forcing
             # This teaches the model to generate different resolutions
-            # Handle case where point cloud has fewer points than min_output_points
+            # num_target = random.randint(min_output_points,
+            #                             min(max_output_points, len(points)))
             actual_min = min(min_output_points, len(points))
             actual_max = min(max_output_points, len(points))
-
             num_target = random.randint(actual_min, actual_max)
             target_points = sample_points(points, num_target)
 
@@ -372,13 +372,12 @@ def main(args):
         num_decoder_layers=args.num_decoder_layers,
         num_heads=args.num_heads,
         dropout=args.dropout,
-        max_output_points=args.max_output_points,
-        decoder_type=args.decoder_type
+        max_output_points=args.max_output_points
     ).to(device)
 
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model has {num_params:,} parameters")
-    print(f"Decoder type: {args.decoder_type}")
+    print(f"Decoder type: autoregressive")
     print(f"Max output points: {args.max_output_points}")
     print(f"Training with variable output: {args.min_output_points}-{args.max_output_points} points")
 
@@ -497,7 +496,7 @@ if __name__ == '__main__':
                         help='Number of latent vectors')
     parser.add_argument('--num_encoder_layers', type=int, default=2,
                         help='Number of encoder layers')
-    parser.add_argument('--num_processor_layers', type=int, default=0,
+    parser.add_argument('--num_processor_layers', type=int, default=2,
                         help='Number of processor layers')
     parser.add_argument('--num_decoder_layers', type=int, default=2,
                         help='Number of decoder layers')
@@ -507,14 +506,11 @@ if __name__ == '__main__':
                         help='Dropout rate')
 
     # Decoder-specific (VARIABLE LENGTH GENERATION)
-    parser.add_argument('--decoder_type', type=str, default='autoregressive',
-                        choices=['autoregressive', 'cross_attention'],
-                        help='Type of decoder to use')
-    parser.add_argument('--max_output_points', type=int, default=2048,
+    parser.add_argument('--max_output_points', type=int, default=4196,
                         help='Maximum number of output points decoder can generate')
     parser.add_argument('--min_output_points', type=int, default=256,
                         help='Minimum number of output points during training (for variable-length training)')
-    parser.add_argument('--val_output_points', type=int, default=1024,
+    parser.add_argument('--val_output_points', type=int, default=2048,
                         help='Number of points to generate during validation')
 
     # Training
@@ -536,18 +532,5 @@ if __name__ == '__main__':
                         help='Number of visualizations to save per validation')
 
     args = parser.parse_args()
-
-    # Validate arguments
-    if args.min_output_points > args.max_output_points:
-        raise ValueError(
-            f"min_output_points ({args.min_output_points}) must be <= "
-            f"max_output_points ({args.max_output_points})"
-        )
-
-    if args.val_output_points > args.max_output_points:
-        raise ValueError(
-            f"val_output_points ({args.val_output_points}) must be <= "
-            f"max_output_points ({args.max_output_points})"
-        )
 
     main(args)

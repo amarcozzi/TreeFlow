@@ -15,8 +15,7 @@ class PerceiverIOAutoencoder(nn.Module):
             num_decoder_layers=6,
             num_heads=8,
             dropout=0.0,
-            max_output_points=2048,
-            decoder_type='autoregressive'
+            max_output_points=2048
     ):
         """
         PerceiverIO-based autoencoder for variable-size point clouds.
@@ -31,7 +30,6 @@ class PerceiverIOAutoencoder(nn.Module):
             num_heads: Number of attention heads
             dropout: Dropout rate
             max_output_points: Maximum number of points decoder can generate
-            decoder_type: Type of decoder ('autoregressive' or 'cross_attention')
         """
         super().__init__()
 
@@ -39,7 +37,6 @@ class PerceiverIOAutoencoder(nn.Module):
         self.latent_dim = latent_dim
         self.num_latents = num_latents
         self.max_output_points = max_output_points
-        self.decoder_type = decoder_type
 
         # Learnable latent array
         self.latent_array = nn.Parameter(torch.randn(num_latents, latent_dim))
@@ -59,27 +56,14 @@ class PerceiverIOAutoencoder(nn.Module):
             for _ in range(num_processor_layers)
         ])
 
-        # Decoder
-        if decoder_type == 'autoregressive':
-            self.decoder = AutoregressiveDecoder(
-                latent_dim=latent_dim,
-                max_points=max_output_points,
-                num_layers=num_decoder_layers,
-                num_heads=num_heads,
-                dropout=dropout
-            )
-        else:
-            # Original cross-attention decoder
-            self.query_proj = nn.Linear(input_dim, latent_dim)
-            self.decoder = nn.ModuleList([
-                CrossAttentionBlock(latent_dim, num_heads, dropout)
-                for _ in range(num_decoder_layers)
-            ])
-            self.output_proj = nn.Sequential(
-                nn.Linear(latent_dim, latent_dim),
-                nn.GELU(),
-                nn.Linear(latent_dim, input_dim)
-            )
+        # Decoder is now exclusively the AutoregressiveDecoder
+        self.decoder = AutoregressiveDecoder(
+            latent_dim=latent_dim,
+            max_points=max_output_points,
+            num_layers=num_decoder_layers,
+            num_heads=num_heads,
+            dropout=dropout
+        )
 
         self._init_weights()
 
@@ -132,32 +116,17 @@ class PerceiverIOAutoencoder(nn.Module):
 
     def decode(self, latent, num_points=None, target_points=None):
         """
-        Decode fixed-size latent to point cloud.
+        Decode fixed-size latent to point cloud using the autoregressive decoder.
 
         Args:
             latent: Latent vectors, shape (num_latents, latent_dim)
-            num_points: Number of points to generate (for autoregressive decoder)
+            num_points: Number of points to generate
             target_points: Target points for teacher forcing (training only), shape (M, 3)
 
         Returns:
             output: Generated/reconstructed points
         """
-        if self.decoder_type == 'autoregressive':
-            return self.decoder(latent, num_points=num_points, target_points=target_points)
-        else:
-            # Original cross-attention decoder (requires query positions)
-            if target_points is None:
-                raise ValueError("Cross-attention decoder requires target_points")
-
-            queries = self.query_proj(target_points)
-            latent = latent.unsqueeze(0)
-            queries = queries.unsqueeze(0)
-
-            for decoder_layer in self.decoder:
-                queries = decoder_layer(queries, latent)
-
-            output = self.output_proj(queries.squeeze(0))
-            return output
+        return self.decoder(latent, num_points=num_points, target_points=target_points)
 
     def forward(self, x, num_points=None, target_points=None):
         """
@@ -179,9 +148,6 @@ class PerceiverIOAutoencoder(nn.Module):
         latent = self.process(latent)
 
         # Decode
-        if target_points is None and self.decoder_type == 'cross_attention':
-            target_points = x
-
         output = self.decode(latent, num_points=num_points, target_points=target_points)
 
         return output, latent
