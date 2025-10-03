@@ -1,4 +1,7 @@
 # train_autoencoder.py
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for thread-safe plotting
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -9,9 +12,26 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
+import random
 
 from dataset import PointCloudDataset, collate_fn
 from model_autoencoder import PerceiverIOAutoencoder
+
+
+def set_seed(seed):
+    """
+    Set random seed for reproducibility across random, numpy, and pytorch.
+
+    Args:
+        seed: Random seed value
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    # For deterministic behavior (may impact performance)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def chamfer_distance(pred, target):
@@ -114,7 +134,7 @@ def save_visualization(epoch, output_dir, ground_truth, reconstruction, file_id,
         ax.set_ylim(y_lim)
         ax.set_zlim(z_lim)
         # Force equal aspect ratio to see true proportions
-        ax.set_box_aspect([x_lim[1]-x_lim[0], y_lim[1]-y_lim[0], z_lim[1]-z_lim[0]])
+        ax.set_box_aspect([x_lim[1] - x_lim[0], y_lim[1] - y_lim[0], z_lim[1] - z_lim[0]])
 
     # Add colorbars
     fig.colorbar(scatter1, ax=ax1, label='Z elevation', shrink=0.5, pad=0.1)
@@ -216,6 +236,11 @@ def validate(model, dataloader, device, epoch=None, vis_dir=None, num_visualizat
 
 
 def main(args):
+    # Set random seed for reproducibility
+    if args.seed is not None:
+        print(f"Setting random seed to {args.seed}")
+        set_seed(args.seed)
+
     # Setup
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -236,6 +261,7 @@ def main(args):
     print(f"Test dataset size: {len(test_dataset)}")
 
     # Create dataloaders
+    print("Create train loader with shuffle=True")
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -246,11 +272,11 @@ def main(args):
         prefetch_factor=4,
         persistent_workers=True if args.num_workers > 0 else False
     )
-
+    print(f"Create test loader with shuffle={args.shuffle_test}")
     test_loader = DataLoader(
         test_dataset,
         batch_size=args.batch_size,
-        shuffle=False,
+        shuffle=args.shuffle_test,
         num_workers=args.num_workers,
         pin_memory=True,
         prefetch_factor=4,
@@ -351,15 +377,21 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train PerceiverIO Autoencoder for Point Clouds')
 
+    # Reproducibility
+    parser.add_argument('--seed', type=int, default=968324,
+                        help='Random seed for reproducibility (default: None, no seed set)')
+
     # Data
     parser.add_argument('--data_path', type=str, default='./FOR-species20K',
                         help='Path to FOR-species20K dataset')
-    parser.add_argument('--batch_size', type=int, default=256,
+    parser.add_argument('--batch_size', type=int, default=16,
                         help='Batch size (number of point clouds per batch)')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')
     parser.add_argument('--voxel_size', type=float, default=0.5,
                         help='Voxel size in meters for downsampling (default: 0.1). Set to 0 or None for no voxelization')
+    parser.add_argument('--shuffle_test', action='store_true',
+                        help='Shuffle test dataloader (default: False)')
 
     # Model
     parser.add_argument('--latent_dim', type=int, default=32,
