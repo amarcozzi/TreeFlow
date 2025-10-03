@@ -5,6 +5,7 @@ matplotlib.use('Agg')  # Use non-interactive backend for thread-safe plotting
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from pathlib import Path
 import argparse
@@ -172,16 +173,12 @@ def save_visualization(epoch, output_dir, ground_truth, reconstruction, file_id,
     plt.close(fig)
 
 
-def train_epoch(model, dataloader, optimizer, device, epoch, min_output_points, max_output_points):
+def train_epoch(model, dataloader, optimizer, device, epoch, min_output_points, max_output_points, count_loss_weight):
     """
-    Train for one epoch with variable-length generation.
-
-    Args:
-        min_output_points: Minimum number of points to generate during training
-        max_output_points: Maximum number of points to generate during training
+    Train for one epoch with variable-length generation and count prediction.
     """
     model.train()
-    total_loss = 0
+    total_loss, total_recon_loss, total_count_loss = 0, 0, 0
     num_batches = len(dataloader)
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch} [Train]")
@@ -194,54 +191,46 @@ def train_epoch(model, dataloader, optimizer, device, epoch, min_output_points, 
             points = sample['points'].to(device)
 
             # Sample variable number of target points for teacher forcing
-            # This teaches the model to generate different resolutions
-            # num_target = random.randint(min_output_points,
-            #                             min(max_output_points, len(points)))
             actual_min = min(min_output_points, len(points))
             actual_max = min(max_output_points, len(points))
             num_target = random.randint(actual_min, actual_max)
             target_points = sample_points(points, num_target)
+            target_count = torch.tensor(len(target_points), dtype=torch.float32, device=device)
 
-            # Forward pass with teacher forcing (model.train() mode)
-            # When target_points is provided in training mode, the model uses teacher forcing
-            # and generates exactly len(target_points) points regardless of num_points arg
-            reconstructed, latent = model(points, target_points=target_points)
+            # Forward pass with teacher forcing
+            reconstructed, predicted_count, _ = model(points, target_points=target_points)
 
-            # Compute loss against sampled target
-            loss = chamfer_distance(reconstructed, target_points)
+            # Compute losses
+            recon_loss = chamfer_distance(reconstructed, target_points)
+            count_loss = F.mse_loss(predicted_count, target_count)
+            loss = recon_loss + count_loss_weight * count_loss
 
             (loss / len(batch)).backward()  # Accumulate gradients
             batch_loss += loss.item()
+            total_recon_loss += recon_loss.item()
+            total_count_loss += count_loss.item()
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
         optimizer.step()
 
-        batch_loss /= len(batch)
         total_loss += batch_loss
 
         pbar.set_postfix({
-            'loss': f'{batch_loss:.6f}',
-            'avg_loss': f'{total_loss / (batch_idx + 1):.6f}'
+            'loss': f'{batch_loss / len(batch):.4f}',
+            'recon': f'{total_recon_loss / (batch_idx + 1) / len(batch):.4f}',
+            'count': f'{total_count_loss / (batch_idx + 1) / len(batch):.4f}'
         })
 
-    return total_loss / num_batches
+    return total_loss / num_batches / len(batch)
 
 
-def validate(model, dataloader, device, num_output_points, epoch=None, vis_dir=None,
-             num_visualizations=5):
+def validate(model, dataloader, device, count_loss_weight, epoch=None, vis_dir=None, num_visualizations=5):
     """
-    Validate the model using true autoregressive generation.
-
-    Note: model.eval() forces autoregressive generation (no teacher forcing),
-    so we always test true generation quality during validation.
-
-    Args:
-        num_output_points: Number of points to generate during validation
+    Validate the model using learned autoregressive generation.
     """
     model.eval()
-    total_loss = 0
+    total_loss, total_recon_loss, total_count_loss = 0, 0, 0
     num_batches = len(dataloader)
-
     visualized_count = 0
 
     with torch.no_grad():
@@ -252,25 +241,26 @@ def validate(model, dataloader, device, num_output_points, epoch=None, vis_dir=N
 
             for sample in batch:
                 points = sample['points'].to(device)
+                target_count = torch.tensor(len(points), dtype=torch.float32, device=device)
 
-                # Determine how many points to generate (limit to available points)
-                actual_num_points = min(num_output_points, len(points))
+                # Use learned generation (model predicts num_points internally)
+                reconstructed, predicted_count, _ = model(points)
 
-                # Always use autoregressive generation (model.eval() enforces this)
-                # Explicitly pass num_points, no target_points needed
-                reconstructed, latent = model(points, num_points=actual_num_points, target_points=None)
+                # Compute losses against the full ground truth
+                recon_loss = chamfer_distance(reconstructed, points)
+                count_loss = F.mse_loss(predicted_count, target_count)
+                loss = recon_loss + count_loss_weight * count_loss
 
-                # Compute loss against full point cloud for consistent evaluation
-                loss = chamfer_distance(reconstructed, points)
-                batch_loss += loss
+                batch_loss += loss.item()
+                total_recon_loss += recon_loss.item()
+                total_count_loss += count_loss.item()
 
-            batch_loss = batch_loss / len(batch)
-            total_loss += batch_loss.item()
-            avg_loss = total_loss / (batch_idx + 1)
+            total_loss += batch_loss
 
             pbar.set_postfix({
-                'loss': f'{batch_loss.item():.6f}',
-                'avg_loss': f'{avg_loss:.6f}'
+                'loss': f'{batch_loss / len(batch):.4f}',
+                'recon': f'{total_recon_loss / (batch_idx + 1) / len(batch):.4f}',
+                'count': f'{total_count_loss / (batch_idx + 1) / len(batch):.4f}'
             })
 
             # Save visualizations for first few batches
@@ -280,10 +270,7 @@ def validate(model, dataloader, device, num_output_points, epoch=None, vis_dir=N
                         break
 
                     points = sample['points'].to(device)
-                    actual_num_points = min(num_output_points, len(points))
-
-                    # Generate using autoregressive (model.eval() enforces this)
-                    reconstructed, _ = model(points, num_points=actual_num_points, target_points=None)
+                    reconstructed, _, _ = model(points)
 
                     save_visualization(
                         epoch=epoch if epoch is not None else 0,
@@ -295,7 +282,7 @@ def validate(model, dataloader, device, num_output_points, epoch=None, vis_dir=N
                     )
                     visualized_count += 1
 
-    return total_loss / num_batches
+    return total_loss / num_batches / len(batch)
 
 
 def main(args):
@@ -372,12 +359,12 @@ def main(args):
         num_decoder_layers=args.num_decoder_layers,
         num_heads=args.num_heads,
         dropout=args.dropout,
-        max_output_points=args.max_output_points
+        max_output_points=args.max_output_points,
     ).to(device)
 
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model has {num_params:,} parameters")
-    print(f"Decoder type: autoregressive")
+    print(f"Decoder type: Autoregressive with Count Prediction")
     print(f"Max output points: {args.max_output_points}")
     print(f"Training with variable output: {args.min_output_points}-{args.max_output_points} points")
 
@@ -412,57 +399,59 @@ def main(args):
     print("=" * 80)
 
     for epoch in range(start_epoch, args.epochs + 1):
-        # Train with variable-length generation
+        # Train with variable-length generation and count prediction
         train_loss = train_epoch(
             model, train_loader, optimizer, device, epoch,
-            args.min_output_points, args.max_output_points
+            args.min_output_points, args.max_output_points, args.count_loss_weight
         )
 
         # Validate using true autoregressive generation
-        val_loss = validate(
-            model, test_loader, device, args.val_output_points, epoch,
-            vis_dir=vis_dir if epoch % args.vis_freq == 0 else None,
-            num_visualizations=args.num_vis
-        )
+        if (epoch + 1) % args.vis_freq == 0:
+            print(f"\nValidating with visualizations at epoch {epoch}...")
+            val_loss = validate(
+                model, test_loader, device, args.count_loss_weight, epoch,
+                vis_dir=vis_dir if epoch % args.vis_freq == 0 else None,
+                num_visualizations=args.num_vis
+            )
 
-        # Step scheduler
-        scheduler.step()
+            # Step scheduler
+            scheduler.step()
 
-        # Print epoch summary
-        print(f"\nEpoch {epoch}/{args.epochs} Summary:")
-        print(f"  Train Loss: {train_loss:.6f}")
-        print(f"  Val Loss:   {val_loss:.6f}")
-        print(f"  LR:         {optimizer.param_groups[0]['lr']:.2e}")
+            # Print epoch summary
+            print(f"\nEpoch {epoch}/{args.epochs} Summary:")
+            print(f"  Train Loss: {train_loss:.6f}")
+            print(f"  Val Loss:   {val_loss:.6f}")
+            print(f"  LR:         {optimizer.param_groups[0]['lr']:.2e}")
 
-        # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'train_loss': train_loss,
-                'val_loss': val_loss,
-                'args': vars(args)
-            }
-            torch.save(checkpoint, checkpoint_dir / 'best_model.pth')
-            print(f"  *** New best model saved! ***")
+            # Save best model
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'train_loss': train_loss,
+                    'val_loss': val_loss,
+                    'args': vars(args)
+                }
+                torch.save(checkpoint, checkpoint_dir / 'best_model.pth')
+                print(f"  *** New best model saved! ***")
 
-        # Save periodic checkpoint
-        if epoch % args.save_freq == 0:
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'train_loss': train_loss,
-                'val_loss': val_loss,
-                'args': vars(args)
-            }
-            torch.save(checkpoint, checkpoint_dir / f'checkpoint_epoch_{epoch:03d}.pth')
+            # Save periodic checkpoint
+            if epoch % args.save_freq == 0:
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'train_loss': train_loss,
+                    'val_loss': val_loss,
+                    'args': vars(args)
+                }
+                torch.save(checkpoint, checkpoint_dir / f'checkpoint_epoch_{epoch:03d}.pth')
 
-        print("=" * 80)
+            print("=" * 80)
 
     print("\nTraining complete!")
     print(f"Best validation loss: {best_val_loss:.6f}")
@@ -490,15 +479,15 @@ if __name__ == '__main__':
                         help='Shuffle test dataloader (default: False)')
 
     # Model
-    parser.add_argument('--latent_dim', type=int, default=32,
+    parser.add_argument('--latent_dim', type=int, default=128,
                         help='Dimension of latent space')
-    parser.add_argument('--num_latents', type=int, default=64,
+    parser.add_argument('--num_latents', type=int, default=256,
                         help='Number of latent vectors')
     parser.add_argument('--num_encoder_layers', type=int, default=2,
                         help='Number of encoder layers')
-    parser.add_argument('--num_processor_layers', type=int, default=2,
+    parser.add_argument('--num_processor_layers', type=int, default=4,
                         help='Number of processor layers')
-    parser.add_argument('--num_decoder_layers', type=int, default=2,
+    parser.add_argument('--num_decoder_layers', type=int, default=6,
                         help='Number of decoder layers')
     parser.add_argument('--num_heads', type=int, default=4,
                         help='Number of attention heads')
@@ -510,8 +499,6 @@ if __name__ == '__main__':
                         help='Maximum number of output points decoder can generate')
     parser.add_argument('--min_output_points', type=int, default=256,
                         help='Minimum number of output points during training (for variable-length training)')
-    parser.add_argument('--val_output_points', type=int, default=2048,
-                        help='Number of points to generate during validation')
 
     # Training
     parser.add_argument('--epochs', type=int, default=100,
@@ -520,13 +507,15 @@ if __name__ == '__main__':
                         help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.01,
                         help='Weight decay')
+    parser.add_argument('--count_loss_weight', type=float, default=0.1,
+                        help='Weight for the point count prediction loss')
 
     # Logging and visualization
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints',
                         help='Directory to save checkpoints')
     parser.add_argument('--save_freq', type=int, default=100,
                         help='Save checkpoint every N epochs')
-    parser.add_argument('--vis_freq', type=int, default=1,
+    parser.add_argument('--vis_freq', type=int, default=5,
                         help='Visualize results every N epochs')
     parser.add_argument('--num_vis', type=int, default=10,
                         help='Number of visualizations to save per validation')

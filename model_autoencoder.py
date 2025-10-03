@@ -56,7 +56,15 @@ class PerceiverIOAutoencoder(nn.Module):
             for _ in range(num_processor_layers)
         ])
 
-        # Decoder is now exclusively the AutoregressiveDecoder
+        # Count prediction head
+        self.count_head = nn.Sequential(
+            nn.Linear(num_latents * latent_dim, 512),
+            nn.GELU(),
+            nn.Linear(512, 1),
+            nn.ReLU()  # Ensure non-negative count prediction
+        )
+
+        # Decoder is exclusively the AutoregressiveDecoder
         self.decoder = AutoregressiveDecoder(
             latent_dim=latent_dim,
             max_points=max_output_points,
@@ -128,18 +136,19 @@ class PerceiverIOAutoencoder(nn.Module):
         """
         return self.decoder(latent, num_points=num_points, target_points=target_points)
 
-    def forward(self, x, num_points=None, target_points=None):
+    def forward(self, x, target_points=None):
         """
-        Forward pass through autoencoder.
+        Forward pass through autoencoder. Predicts point count and reconstructs.
 
         Args:
             x: Input points, shape (N, 3)
-            num_points: Number of points to generate (autoregressive only)
-            target_points: Target points for reconstruction/teacher forcing, shape (M, 3)
+            target_points: Target points for teacher forcing (training only).
+                           The length of this tensor is used as the target for the count head.
 
         Returns:
-            output: Reconstructed/generated points
-            latent: Encoded latent representation
+            reconstructed_points: The generated point cloud.
+            predicted_count: The predicted number of points (scalar tensor).
+            latent: Encoded latent representation.
         """
         # Encode
         latent = self.encode(x)
@@ -147,10 +156,20 @@ class PerceiverIOAutoencoder(nn.Module):
         # Process
         latent = self.process(latent)
 
-        # Decode
-        output = self.decode(latent, num_points=num_points, target_points=target_points)
+        # Predict count from the latent space
+        latent_flat = latent.flatten()
+        predicted_count = self.count_head(latent_flat).squeeze(-1)
 
-        return output, latent
+        # Decode
+        if self.training and target_points is not None:
+            # Training: Use teacher forcing for the decoder with the provided target points
+            reconstructed_points = self.decode(latent, target_points=target_points)
+        else:
+            # Inference: Use the predicted count to generate points
+            num_to_generate = torch.clamp(predicted_count.round(), 2, self.max_output_points).int().item()
+            reconstructed_points = self.decode(latent, num_points=num_to_generate)
+
+        return reconstructed_points, predicted_count, latent
 
 
 class SinusoidalPositionalEncoding(nn.Module):
