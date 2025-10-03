@@ -66,6 +66,43 @@ def chamfer_distance(pred, target):
     return chamfer_loss
 
 
+def soft_chamfer_distance_with_validity(all_coords, validity_scores, target_points):
+    """
+    Chamfer distance where validity scores act as soft weights.
+    Fully differentiable - gradients flow from coordinates to validity!
+
+    Args:
+        all_coords: (num_slots, 3) - all slot coordinates
+        validity_scores: (num_slots,) - validity in [0,1]
+        target_points: (N, 3) - ground truth points
+
+    Returns:
+        loss: scalar
+    """
+    num_target = len(target_points)
+
+    # Normalize validity scores to sum to num_target
+    # This makes the weighted sum comparable to regular chamfer
+    validity_normalized = validity_scores * (num_target / (validity_scores.sum() + 1e-8))
+
+    # Compute pairwise distances
+    dist_matrix = torch.cdist(
+        all_coords.unsqueeze(0),
+        target_points.unsqueeze(0)
+    ).squeeze(0)  # (num_slots, N)
+
+    # Forward direction: each slot weighted by its validity
+    # Slots with high validity contribute more to the loss
+    min_dist_forward, _ = dist_matrix.min(dim=1)  # (num_slots,)
+    forward_loss = (min_dist_forward * validity_normalized).sum() / num_target
+
+    # Backward direction: each target finds nearest slot
+    # This encourages at least one slot near each target
+    min_dist_backward, _ = dist_matrix.min(dim=0)  # (N,)
+    backward_loss = min_dist_backward.mean()
+
+    return forward_loss + backward_loss
+
 def compute_validity_loss(validity_scores, num_target_points, validity_loss_type='count'):
     """
     Compute loss for slot validity predictions.
@@ -109,39 +146,34 @@ def compute_validity_loss(validity_scores, num_target_points, validity_loss_type
         raise ValueError(f"Unknown validity_loss_type: {validity_loss_type}")
 
 
-def compute_loss(all_coords, validity_scores, target_points, coord_loss_weight=1.0,
-                 validity_loss_weight=1.0, validity_loss_type='count'):
+def compute_loss(all_coords, validity_scores, target_points,
+                 validity_loss_weight=0.1):
     """
-    Combined loss for parallel slots decoder.
+    Combined loss with soft chamfer distance.
 
     Args:
-        all_coords: All slot coordinates, shape (num_slots, 3)
-        validity_scores: Validity scores, shape (num_slots,)
-        target_points: Ground truth points, shape (N, 3)
-        coord_loss_weight: Weight for coordinate loss
-        validity_loss_weight: Weight for validity loss
-        validity_loss_type: Type of validity loss
-
-    Returns:
-        total_loss: Combined loss
-        coord_loss: Coordinate loss component
-        valid_loss: Validity loss component
+        all_coords: (num_slots, 3)
+        validity_scores: (num_slots,)
+        target_points: (N, 3)
+        validity_loss_weight: Weight for count regularization
     """
-    # Get valid points (threshold at 0.5)
-    valid_mask = validity_scores > 0.5
-    valid_coords = all_coords[valid_mask]
+    # Main loss: soft chamfer (fully differentiable!)
+    coord_loss = soft_chamfer_distance_with_validity(
+        all_coords, validity_scores, target_points
+    )
 
-    # Coordinate loss: Chamfer distance on valid points
-    coord_loss = chamfer_distance(valid_coords, target_points)
-
-    # Validity loss: encourage correct number of active slots
+    # Optional: count regularization (helps stability)
+    # Encourage total validity mass to match target count
     num_target = len(target_points)
-    valid_loss = compute_validity_loss(validity_scores, num_target, validity_loss_type)
+    total_validity = validity_scores.sum()
+    count_loss = F.l1_loss(total_validity,
+                           torch.tensor(num_target, dtype=torch.float32,
+                                        device=validity_scores.device))
 
-    # Combined loss
-    total_loss = coord_loss_weight * coord_loss + validity_loss_weight * valid_loss
+    # Combine
+    total_loss = coord_loss + validity_loss_weight * count_loss
 
-    return total_loss, coord_loss, valid_loss
+    return total_loss, coord_loss, count_loss
 
 
 def save_visualization(epoch, output_dir, ground_truth, reconstruction, file_id, num_valid, prefix='reconstruction'):
