@@ -1,7 +1,6 @@
 # model_autoencoder.py
 import torch
 import torch.nn as nn
-import math
 
 
 class PerceiverIOAutoencoder(nn.Module):
@@ -14,10 +13,12 @@ class PerceiverIOAutoencoder(nn.Module):
             num_processor_layers=8,
             num_decoder_layers=6,
             num_heads=8,
-            dropout=0.0
+            dropout=0.0,
+            num_slots=4196
     ):
         """
-        PerceiverIO-based autoencoder for variable-size point clouds.
+        PerceiverIO-based autoencoder with parallel slots decoder.
+        Uses PyTorch's built-in transformer layers throughout.
 
         Args:
             input_dim: Dimension of input points (3 for XYZ)
@@ -25,15 +26,17 @@ class PerceiverIOAutoencoder(nn.Module):
             num_latents: Number of latent vectors (fixed size)
             num_encoder_layers: Number of cross-attention encoder layers
             num_processor_layers: Number of latent self-attention layers
-            num_decoder_layers: Number of cross-attention decoder layers
+            num_decoder_layers: Number of decoder layers
             num_heads: Number of attention heads
             dropout: Dropout rate
+            num_slots: Number of parallel query slots for generation
         """
         super().__init__()
 
         self.input_dim = input_dim
         self.latent_dim = latent_dim
         self.num_latents = num_latents
+        self.num_slots = num_slots
 
         # Learnable latent array
         self.latent_array = nn.Parameter(torch.randn(num_latents, latent_dim))
@@ -41,43 +44,52 @@ class PerceiverIOAutoencoder(nn.Module):
         # Input projection
         self.input_proj = nn.Linear(input_dim, latent_dim)
 
-        # Positional encoding for queries
-        self.query_proj = nn.Linear(input_dim, latent_dim)
-
-        # Encoder: cross-attention from input to latent
-        self.encoder = nn.ModuleList([
-            CrossAttentionBlock(latent_dim, num_heads, dropout)
-            for _ in range(num_encoder_layers)
-        ])
+        # Encoder: cross-attention from latent (tgt) to input (memory)
+        # Using TransformerDecoder because we need cross-attention
+        encoder_layer = nn.TransformerDecoderLayer(
+            d_model=latent_dim,
+            nhead=num_heads,
+            dim_feedforward=latent_dim * 4,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True
+        )
+        self.encoder = nn.TransformerDecoder(encoder_layer, num_encoder_layers)
 
         # Processor: self-attention on latent
-        self.processor = nn.ModuleList([
-            SelfAttentionBlock(latent_dim, num_heads, dropout)
-            for _ in range(num_processor_layers)
-        ])
+        processor_layer = nn.TransformerEncoderLayer(
+            d_model=latent_dim,
+            nhead=num_heads,
+            dim_feedforward=latent_dim * 4,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True
+        )
+        self.processor = nn.TransformerEncoder(processor_layer, num_processor_layers)
 
-        # Decoder: cross-attention from latent to output
-        self.decoder = nn.ModuleList([
-            CrossAttentionBlock(latent_dim, num_heads, dropout)
-            for _ in range(num_decoder_layers)
-        ])
-
-        # Output projection
-        self.output_proj = nn.Sequential(
-            nn.Linear(latent_dim, latent_dim),
-            nn.GELU(),
-            nn.Linear(latent_dim, input_dim)
+        # Decoder: parallel slots
+        self.decoder = ParallelSlotsDecoder(
+            latent_dim=latent_dim,
+            num_slots=num_slots,
+            num_layers=num_decoder_layers,
+            num_heads=num_heads,
+            dropout=dropout,
+            output_dim=input_dim
         )
 
         self._init_weights()
 
     def _init_weights(self):
         """Initialize weights."""
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
+        # Initialize latent array
+        nn.init.normal_(self.latent_array, std=0.02)
+
+        # Initialize input projection
+        nn.init.xavier_uniform_(self.input_proj.weight)
+        if self.input_proj.bias is not None:
+            nn.init.zeros_(self.input_proj.bias)
 
     def encode(self, x):
         """
@@ -91,14 +103,14 @@ class PerceiverIOAutoencoder(nn.Module):
         """
         # Project input
         x_proj = self.input_proj(x)  # (N, latent_dim)
+        x_proj = x_proj.unsqueeze(0)  # (1, N, latent_dim)
 
         # Initialize latent
-        batch_size = 1  # Single point cloud
         latent = self.latent_array.unsqueeze(0)  # (1, num_latents, latent_dim)
 
-        # Encoder: cross-attend from latent (query) to input (key/value)
-        for encoder_layer in self.encoder:
-            latent = encoder_layer(latent, x_proj.unsqueeze(0))
+        # Encoder: cross-attend from latent (tgt) to input (memory)
+        # TransformerDecoder does: tgt attends to memory (cross-attention)
+        latent = self.encoder(tgt=latent, memory=x_proj)  # (1, num_latents, latent_dim)
 
         return latent.squeeze(0)  # (num_latents, latent_dim)
 
@@ -114,47 +126,44 @@ class PerceiverIOAutoencoder(nn.Module):
         """
         latent = latent.unsqueeze(0)  # (1, num_latents, latent_dim)
 
-        for processor_layer in self.processor:
-            latent = processor_layer(latent)
+        # Self-attention on latents
+        latent = self.processor(latent)  # (1, num_latents, latent_dim)
 
         return latent.squeeze(0)  # (num_latents, latent_dim)
 
-    def decode(self, latent, query_positions):
+    def decode(self, latent, return_validity=False):
         """
-        Decode fixed-size latent to variable-size point cloud.
+        Decode latent to variable-size point cloud using parallel slots.
 
         Args:
             latent: Latent vectors, shape (num_latents, latent_dim)
-            query_positions: Query positions for output, shape (M, 3)
+            return_validity: If True, return validity scores for all slots
 
         Returns:
-            output: Reconstructed points, shape (M, 3)
+            If return_validity=False:
+                points: Variable-size point cloud, shape (M, 3) where M <= num_slots
+            If return_validity=True:
+                all_coords: All slot coordinates, shape (num_slots, 3)
+                validity: Validity scores for all slots, shape (num_slots,)
         """
-        # Create queries from positions
-        queries = self.query_proj(query_positions)  # (M, latent_dim)
+        return self.decoder(latent, return_validity=return_validity)
 
-        latent = latent.unsqueeze(0)  # (1, num_latents, latent_dim)
-        queries = queries.unsqueeze(0)  # (1, M, latent_dim)
-
-        # Decoder: cross-attend from queries to latent
-        for decoder_layer in self.decoder:
-            queries = decoder_layer(queries, latent)
-
-        # Project to output space
-        output = self.output_proj(queries.squeeze(0))  # (M, 3)
-
-        return output
-
-    def forward(self, x):
+    def forward(self, x, return_validity=False):
         """
         Forward pass through autoencoder.
 
         Args:
             x: Input points, shape (N, 3)
+            return_validity: If True, return all slots and validity (for training)
 
         Returns:
-            output: Reconstructed points, shape (N, 3)
-            latent: Encoded latent representation
+            If return_validity=False:
+                output: Reconstructed points, shape (M, 3)
+                latent: Encoded latent representation
+            If return_validity=True:
+                all_coords: All slot coordinates, shape (num_slots, 3)
+                validity: Validity scores, shape (num_slots,)
+                latent: Encoded latent representation
         """
         # Encode
         latent = self.encode(x)
@@ -162,66 +171,113 @@ class PerceiverIOAutoencoder(nn.Module):
         # Process
         latent = self.process(latent)
 
-        # Decode using input positions as queries
-        output = self.decode(latent, x)
+        # Decode
+        if return_validity:
+            all_coords, validity = self.decode(latent, return_validity=True)
+            return all_coords, validity, latent
+        else:
+            output = self.decode(latent, return_validity=False)
+            return output, latent
 
-        return output, latent
 
+class ParallelSlotsDecoder(nn.Module):
+    """
+    Parallel slots decoder inspired by DETR.
+    Uses PyTorch's built-in TransformerDecoder.
 
-class SelfAttentionBlock(nn.Module):
-    def __init__(self, dim, num_heads, dropout=0.0):
+    All slots decode in parallel (one forward pass), each predicting:
+    1. A 3D coordinate
+    2. A validity score (is this slot active?)
+
+    Variable length is achieved by having different numbers of active slots.
+    """
+
+    def __init__(self, latent_dim, num_slots=2048, num_layers=6, num_heads=8, dropout=0.0, output_dim=3):
         super().__init__()
-        self.attention = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, dim * 4),
+        self.latent_dim = latent_dim
+        self.num_slots = num_slots
+        self.output_dim = output_dim
+
+        # Learnable query slots (like object queries in DETR)
+        self.query_slots = nn.Parameter(torch.randn(num_slots, latent_dim))
+
+        # Transformer decoder: cross-attend from slots (tgt) to latent (memory)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=latent_dim,
+            nhead=num_heads,
+            dim_feedforward=latent_dim * 4,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True
+        )
+        self.transformer = nn.TransformerDecoder(decoder_layer, num_layers)
+
+        # Output heads
+        # Head 1: Predict 3D coordinates for each slot
+        self.coord_head = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
             nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(dim * 4, dim),
-            nn.Dropout(dropout)
+            nn.LayerNorm(latent_dim),
+            nn.Linear(latent_dim, output_dim)
         )
 
-    def forward(self, x):
-        # Self-attention with residual
-        attn_out, _ = self.attention(x, x, x)
-        x = self.norm1(x + attn_out)
-
-        # MLP with residual
-        mlp_out = self.mlp(x)
-        x = self.norm2(x + mlp_out)
-
-        return x
-
-
-class CrossAttentionBlock(nn.Module):
-    def __init__(self, dim, num_heads, dropout=0.0):
-        super().__init__()
-        self.attention = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, dim * 4),
+        # Head 2: Predict if slot is valid (active)
+        self.validity_head = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim // 2),
             nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(dim * 4, dim),
-            nn.Dropout(dropout)
+            nn.Linear(latent_dim // 2, 1)
         )
 
-    def forward(self, query, key_value):
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize weights."""
+        # Initialize query slots with small values
+        nn.init.normal_(self.query_slots, std=0.02)
+
+        # Initialize output heads
+        for module in [self.coord_head, self.validity_head]:
+            for m in module.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
+    def forward(self, latent, return_validity=False):
         """
-        Cross-attention from query to key_value.
+        Decode latent to points using parallel slots.
 
         Args:
-            query: Query tensor, shape (B, N_q, dim)
-            key_value: Key and value tensor, shape (B, N_kv, dim)
+            latent: Latent representation, shape (num_latents, latent_dim)
+            return_validity: If True, return all coords and validity scores
+
+        Returns:
+            If return_validity=False:
+                points: Active points only, shape (M, 3) where M = number of valid slots
+            If return_validity=True:
+                all_coords: All slot coordinates, shape (num_slots, 3)
+                validity_scores: Validity scores, shape (num_slots,)
         """
-        # Cross-attention with residual
-        attn_out, _ = self.attention(query, key_value, key_value)
-        query = self.norm1(query + attn_out)
+        # Add batch dimension
+        latent = latent.unsqueeze(0)  # (1, num_latents, latent_dim)
+        slots = self.query_slots.unsqueeze(0)  # (1, num_slots, latent_dim)
 
-        # MLP with residual
-        mlp_out = self.mlp(query)
-        query = self.norm2(query + mlp_out)
+        # Cross-attend from slots (tgt) to latent (memory)
+        decoded_slots = self.transformer(tgt=slots, memory=latent)  # (1, num_slots, latent_dim)
+        decoded_slots = decoded_slots.squeeze(0)  # (num_slots, latent_dim)
 
-        return query
+        # Predict coordinates and validity for each slot
+        all_coords = self.coord_head(decoded_slots)  # (num_slots, 3)
+        validity_logits = self.validity_head(decoded_slots).squeeze(-1)  # (num_slots,)
+        validity_scores = torch.sigmoid(validity_logits)  # (num_slots,) in [0, 1]
+
+        if return_validity:
+            # Return everything (for training with validity loss)
+            return all_coords, validity_scores
+        else:
+            # Filter to valid slots only (for inference)
+            # Use threshold of 0.5
+            valid_mask = validity_scores > 0.5
+            valid_points = all_coords[valid_mask]
+            return valid_points
