@@ -61,6 +61,29 @@ def chamfer_distance(pred, target):
     return chamfer_loss
 
 
+def sample_points(points, num_samples):
+    """
+    Randomly sample a fixed number of points from a point cloud.
+
+    Args:
+        points: Input points, shape (N, 3)
+        num_samples: Number of points to sample
+
+    Returns:
+        sampled_points: shape (num_samples, 3)
+    """
+    num_points = points.size(0)
+
+    if num_points >= num_samples:
+        # Randomly sample without replacement
+        indices = torch.randperm(num_points)[:num_samples]
+        return points[indices]
+    else:
+        # If not enough points, sample with replacement
+        indices = torch.randint(0, num_points, (num_samples,))
+        return points[indices]
+
+
 def save_visualization(epoch, output_dir, ground_truth, reconstruction, file_id, prefix='reconstruction'):
     """
     Save side-by-side visualization of ground truth and reconstruction.
@@ -149,7 +172,14 @@ def save_visualization(epoch, output_dir, ground_truth, reconstruction, file_id,
     plt.close(fig)
 
 
-def train_epoch(model, dataloader, optimizer, device, epoch):
+def train_epoch(model, dataloader, optimizer, device, epoch, min_output_points, max_output_points):
+    """
+    Train for one epoch with variable-length generation.
+
+    Args:
+        min_output_points: Minimum number of points to generate during training
+        max_output_points: Maximum number of points to generate during training
+    """
     model.train()
     total_loss = 0
     num_batches = len(dataloader)
@@ -162,8 +192,23 @@ def train_epoch(model, dataloader, optimizer, device, epoch):
         batch_loss = 0
         for sample in batch:
             points = sample['points'].to(device)
-            reconstructed, latent = model(points)  # Forward pass
-            loss = chamfer_distance(reconstructed, points)
+
+            # Sample variable number of target points for teacher forcing
+            # This teaches the model to generate different resolutions
+            # Handle case where point cloud has fewer points than min_output_points
+            actual_min = min(min_output_points, len(points))
+            actual_max = min(max_output_points, len(points))
+
+            num_target = random.randint(actual_min, actual_max)
+            target_points = sample_points(points, num_target)
+
+            # Forward pass with teacher forcing (model.train() mode)
+            # When target_points is provided in training mode, the model uses teacher forcing
+            # and generates exactly len(target_points) points regardless of num_points arg
+            reconstructed, latent = model(points, target_points=target_points)
+
+            # Compute loss against sampled target
+            loss = chamfer_distance(reconstructed, target_points)
 
             (loss / len(batch)).backward()  # Accumulate gradients
             batch_loss += loss.item()
@@ -182,7 +227,17 @@ def train_epoch(model, dataloader, optimizer, device, epoch):
     return total_loss / num_batches
 
 
-def validate(model, dataloader, device, epoch=None, vis_dir=None, num_visualizations=5):
+def validate(model, dataloader, device, num_output_points, epoch=None, vis_dir=None,
+             num_visualizations=5):
+    """
+    Validate the model using true autoregressive generation.
+
+    Note: model.eval() forces autoregressive generation (no teacher forcing),
+    so we always test true generation quality during validation.
+
+    Args:
+        num_output_points: Number of points to generate during validation
+    """
     model.eval()
     total_loss = 0
     num_batches = len(dataloader)
@@ -198,10 +253,14 @@ def validate(model, dataloader, device, epoch=None, vis_dir=None, num_visualizat
             for sample in batch:
                 points = sample['points'].to(device)
 
-                # Forward pass
-                reconstructed, latent = model(points)
+                # Determine how many points to generate (limit to available points)
+                actual_num_points = min(num_output_points, len(points))
 
-                # Compute loss
+                # Always use autoregressive generation (model.eval() enforces this)
+                # Explicitly pass num_points, no target_points needed
+                reconstructed, latent = model(points, num_points=actual_num_points, target_points=None)
+
+                # Compute loss against full point cloud for consistent evaluation
                 loss = chamfer_distance(reconstructed, points)
                 batch_loss += loss
 
@@ -221,7 +280,10 @@ def validate(model, dataloader, device, epoch=None, vis_dir=None, num_visualizat
                         break
 
                     points = sample['points'].to(device)
-                    reconstructed, _ = model(points)
+                    actual_num_points = min(num_output_points, len(points))
+
+                    # Generate using autoregressive (model.eval() enforces this)
+                    reconstructed, _ = model(points, num_points=actual_num_points, target_points=None)
 
                     save_visualization(
                         epoch=epoch if epoch is not None else 0,
@@ -309,11 +371,16 @@ def main(args):
         num_processor_layers=args.num_processor_layers,
         num_decoder_layers=args.num_decoder_layers,
         num_heads=args.num_heads,
-        dropout=args.dropout
+        dropout=args.dropout,
+        max_output_points=args.max_output_points,
+        decoder_type=args.decoder_type
     ).to(device)
 
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model has {num_params:,} parameters")
+    print(f"Decoder type: {args.decoder_type}")
+    print(f"Max output points: {args.max_output_points}")
+    print(f"Training with variable output: {args.min_output_points}-{args.max_output_points} points")
 
     # Optimizer and scheduler
     optimizer = torch.optim.AdamW(
@@ -346,14 +413,15 @@ def main(args):
     print("=" * 80)
 
     for epoch in range(start_epoch, args.epochs + 1):
-        # Train
+        # Train with variable-length generation
         train_loss = train_epoch(
             model, train_loader, optimizer, device, epoch,
+            args.min_output_points, args.max_output_points
         )
 
-        # Validate
+        # Validate using true autoregressive generation
         val_loss = validate(
-            model, test_loader, device, epoch,
+            model, test_loader, device, args.val_output_points, epoch,
             vis_dir=vis_dir if epoch % args.vis_freq == 0 else None,
             num_visualizations=args.num_vis
         )
@@ -418,7 +486,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')
     parser.add_argument('--voxel_size', type=float, default=0.5,
-                        help='Voxel size in meters for downsampling (default: 0.1). Set to 0 or None for no voxelization')
+                        help='Voxel size in meters for downsampling (default: 0.5). Set to 0 or None for no voxelization')
     parser.add_argument('--shuffle_test', action='store_true',
                         help='Shuffle test dataloader (default: False)')
 
@@ -437,6 +505,17 @@ if __name__ == '__main__':
                         help='Number of attention heads')
     parser.add_argument('--dropout', type=float, default=0.1,
                         help='Dropout rate')
+
+    # Decoder-specific (VARIABLE LENGTH GENERATION)
+    parser.add_argument('--decoder_type', type=str, default='autoregressive',
+                        choices=['autoregressive', 'cross_attention'],
+                        help='Type of decoder to use')
+    parser.add_argument('--max_output_points', type=int, default=2048,
+                        help='Maximum number of output points decoder can generate')
+    parser.add_argument('--min_output_points', type=int, default=256,
+                        help='Minimum number of output points during training (for variable-length training)')
+    parser.add_argument('--val_output_points', type=int, default=1024,
+                        help='Number of points to generate during validation')
 
     # Training
     parser.add_argument('--epochs', type=int, default=100,
@@ -457,5 +536,18 @@ if __name__ == '__main__':
                         help='Number of visualizations to save per validation')
 
     args = parser.parse_args()
+
+    # Validate arguments
+    if args.min_output_points > args.max_output_points:
+        raise ValueError(
+            f"min_output_points ({args.min_output_points}) must be <= "
+            f"max_output_points ({args.max_output_points})"
+        )
+
+    if args.val_output_points > args.max_output_points:
+        raise ValueError(
+            f"val_output_points ({args.val_output_points}) must be <= "
+            f"max_output_points ({args.max_output_points})"
+        )
 
     main(args)
