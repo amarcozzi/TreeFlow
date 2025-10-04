@@ -419,16 +419,16 @@ if __name__ == '__main__':
     parser.add_argument('--voxel_size', type=float, default=0.5)
 
     # Model
-    parser.add_argument('--latent_dim', type=int, default=256)
-    parser.add_argument('--num_latents', type=int, default=128)
+    parser.add_argument('--latent_dim', type=int, default=128)
+    parser.add_argument('--num_latents', type=int, default=256)
     parser.add_argument('--num_encoder_layers', type=int, default=4)
     parser.add_argument('--num_processor_layers', type=int, default=2)
-    parser.add_argument('--num_decoder_layers', type=int, default=4)
+    parser.add_argument('--num_decoder_layers', type=int, default=6)
     parser.add_argument('--num_heads', type=int, default=4)
     parser.add_argument('--dropout', type=float, default=0.1)
 
     # Autoregressive-specific
-    parser.add_argument('--min_points', type=int, default=16,
+    parser.add_argument('--min_points', type=int, default=4,
                         help='Minimum points before stopping allowed')
     parser.add_argument('--stop_loss_weight', type=float, default=0.1,
                         help='Weight for stop loss (start low!)')
@@ -447,8 +447,8 @@ if __name__ == '__main__':
     # Logging
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints_improved')
     parser.add_argument('--save_freq', type=int, default=25)
-    parser.add_argument('--vis_freq', type=int, default=5)
-    parser.add_argument('--num_vis', type=int, default=5)
+    parser.add_argument('--vis_freq', type=int, default=1)
+    parser.add_argument('--num_vis', type=int, default=10)
 
     args = parser.parse_args()
     main(args)
