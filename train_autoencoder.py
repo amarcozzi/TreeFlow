@@ -443,7 +443,7 @@ if __name__ == '__main__':
 
     # Logging
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints_improved')
-    parser.add_argument('--save_freq', type=int, default=25)
+    parser.add_argument('--save_freq', type=int, default=100)
     parser.add_argument('--vis_freq', type=int, default=1)
     parser.add_argument('--num_vis', type=int, default=10)
 
