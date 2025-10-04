@@ -8,18 +8,23 @@ from torch.utils.data import Dataset
 
 
 class PointCloudDataset(Dataset):
-    def __init__(self, data_path: Path, split: str = "train", voxel_size: float = None, num_samples: int = None):
+    def __init__(self, data_path: Path, split: str = "train", voxel_size: float = None,
+                 num_samples: int = None, z_axis_sort: bool = True, rotation_augment: bool = True):
         """
-        Dataset for loading point clouds without resampling or padding.
+        Dataset for loading point clouds with optional Z-axis sorting and augmentation.
 
         Args:
             data_path: Path to FOR-species20K directory
             split: 'train' for dev set, 'test' for test set
-            voxel_size: Optional voxel size in meters for downsampling (e.g., 0.1).
-                       If None, no voxelization is performed.
+            voxel_size: Optional voxel size in meters for downsampling
+            num_samples: Limit number of samples (for debugging)
+            z_axis_sort: If True, sort points by Z-axis (ground to top)
+            rotation_augment: If True, apply random Z-axis rotation during training
         """
         self.data_path = data_path
         self.voxel_size = voxel_size
+        self.z_axis_sort = z_axis_sort
+        self.rotation_augment = rotation_augment and (split == "train")  # Only augment training
 
         if split == "train":
             self.laz_directory = data_path / "dev"
@@ -36,6 +41,10 @@ class PointCloudDataset(Dataset):
         self.file_id_to_idx = {f.stem: i for i, f in enumerate(self.laz_files)}
 
         print(f"Found {len(self.laz_files)} files for '{split}' split in {self.laz_directory}")
+        if self.z_axis_sort:
+            print(f"  Z-axis sorting: enabled")
+        if self.rotation_augment:
+            print(f"  Rotation augmentation: enabled (training only)")
 
         if len(self.laz_files) == 0:
             raise FileNotFoundError(f"No .laz files found in {self.laz_directory}")
@@ -68,6 +77,55 @@ class PointCloudDataset(Dataset):
 
         return voxel_centers.astype(np.float32)
 
+    def _rotation_augment_z_axis(self, points):
+        """
+        Apply random rotation around Z-axis.
+        This maintains Z-ordering while varying XY distribution.
+
+        Args:
+            points: (N, 3) numpy array
+
+        Returns:
+            rotated_points: (N, 3) numpy array
+        """
+        angle = np.random.rand() * 2 * np.pi
+        cos_a = np.cos(angle)
+        sin_a = np.sin(angle)
+
+        # Rotation matrix around Z-axis
+        R = np.array([
+            [cos_a, -sin_a, 0],
+            [sin_a, cos_a, 0],
+            [0, 0, 1]
+        ], dtype=np.float32)
+
+        return points @ R.T
+
+    def _z_axis_sort(self, points):
+        """
+        Sort points by Z-axis (growing from ground up), then by radial distance.
+        This creates a physically meaningful ordering for trees.
+
+        Args:
+            points: (N, 3) numpy array
+
+        Returns:
+            sorted_points: (N, 3) numpy array sorted by Z (primary), radial distance (secondary)
+        """
+        z = points[:, 2]
+
+        # Radial distance from Z-axis (as tiebreaker for points at same height)
+        xy = points[:, :2]
+        centroid_xy = xy.mean(axis=0, keepdims=True)
+        radial_dist = np.linalg.norm(xy - centroid_xy, axis=1)
+
+        # Create composite sorting key: Z dominates, radial is tiebreaker
+        # Scale Z by large factor so it dominates the sorting
+        sort_key = z * 1e6 + radial_dist
+        sort_indices = np.argsort(sort_key)
+
+        return points[sort_indices]
+
     def __getitem__(self, idx):
         filepath = self.laz_files[idx]
         file_id = filepath.stem
@@ -89,10 +147,20 @@ class PointCloudDataset(Dataset):
         if self.voxel_size is not None:
             raw_points = points.copy()
             points = self._voxelize(points)
+        else:
+            raw_points = None
+
+        # Apply rotation augmentation (before sorting, to vary the radial ordering)
+        if self.rotation_augment:
+            points = self._rotation_augment_z_axis(points)
+
+        # Apply Z-axis sorting
+        if self.z_axis_sort:
+            points = self._z_axis_sort(points)
 
         return {
             'points': torch.from_numpy(points),
-            'raw_points': None if self.voxel_size is None else torch.from_numpy(raw_points),
+            'raw_points': None if raw_points is None else torch.from_numpy(raw_points),
             'file_id': file_id,
             'num_points': len(points)
         }
@@ -157,14 +225,21 @@ def visualize_voxelization(raw_points, voxelized_points, voxel_size, file_id):
         ax.set_ylim(y_lim)
         ax.set_zlim(z_lim)
         # Force equal aspect ratio to see true proportions
-        ax.set_box_aspect([x_lim[1]-x_lim[0], y_lim[1]-y_lim[0], z_lim[1]-z_lim[0]])
+        ax.set_box_aspect([x_lim[1] - x_lim[0], y_lim[1] - y_lim[0], z_lim[1] - z_lim[0]])
 
     plt.tight_layout()
     plt.show()
 
+
 def main():
     # Example usage
-    dataset = PointCloudDataset(data_path=Path("./FOR-species20K"), split="test", voxel_size=0.5)
+    dataset = PointCloudDataset(
+        data_path=Path("./FOR-species20K"),
+        split="test",
+        voxel_size=0.5,
+        z_axis_sort=True,
+        rotation_augment=False  # Test set, no augmentation
+    )
     print(f"Dataset size: {len(dataset)}")
 
     # Sample a random point cloud
@@ -177,13 +252,17 @@ def main():
         random_idx = np.random.randint(len(dataset))
         sample = dataset[random_idx]
     print(f"Sampled file ID: {sample['file_id']}, Number of points: {sample['num_points']}")
-    visualize_voxelization(sample['raw_points'].numpy(), sample['points'].numpy(), dataset.voxel_size, sample['file_id'])
 
-    # # Find the largest point cloud
-    # max_pts_idx = max(range(len(dataset)), key=lambda i: dataset[i]['num_points'])
-    # max_pts = dataset[max_pts_idx]['num_points']
-    # file_id = dataset[max_pts_idx]['file_id']
-    # print(f"Largest point cloud: {file_id} with {max_pts} points")
+    # Visualize
+    if sample['raw_points'] is not None:
+        visualize_voxelization(sample['raw_points'].numpy(), sample['points'].numpy(),
+                               dataset.voxel_size, sample['file_id'])
+
+    # Print first few Z values to verify sorting
+    points = sample['points'].numpy()
+    print(f"\nFirst 10 Z values (should be ascending): {points[:10, 2]}")
+    print(f"Last 10 Z values: {points[-10:, 2]}")
+
 
 if __name__ == "__main__":
     main()
