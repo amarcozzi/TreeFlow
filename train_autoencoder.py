@@ -243,11 +243,8 @@ def validate(model, dataloader, device, epoch, vis_dir, num_visualizations, stop
 
                 points = sample['points'].to(device)
 
-                if len(points) < 2:
-                    continue
-
                 # Generate
-                generated = model.generate(points, max_len=2500, stop_threshold=stop_threshold)
+                generated = model.generate(points, max_len=8192, stop_threshold=stop_threshold)
                 num_generated = len(generated)
                 generated_lengths.append(num_generated)
 
@@ -430,7 +427,7 @@ if __name__ == '__main__':
     # Autoregressive-specific
     parser.add_argument('--min_points', type=int, default=4,
                         help='Minimum points before stopping allowed')
-    parser.add_argument('--stop_loss_weight', type=float, default=0.1,
+    parser.add_argument('--stop_loss_weight', type=float, default=1,
                         help='Weight for stop loss (start low!)')
     parser.add_argument('--stop_threshold', type=float, default=0.5,
                         help='Stop probability threshold for inference')
@@ -440,7 +437,7 @@ if __name__ == '__main__':
                         help='Use curriculum learning for sequence length')
 
     # Training
-    parser.add_argument('--epochs', type=int, default=300)
+    parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=0.01)
 
