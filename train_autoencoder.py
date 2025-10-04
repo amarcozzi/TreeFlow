@@ -78,15 +78,15 @@ def get_curriculum_max_length(epoch, max_size):
     This helps stabilize training.
     """
     if epoch <= 5:
-        return max_size * 0.1  # 10% for first 5 epochs
+        return int(max_size * 0.1)  # 10% for first 5 epochs
     elif epoch <= 10:
-        return max_size * 0.25  # 25% for next 10 epochs
+        return int(max_size * 0.25)  # 25% for next 10 epochs
     elif epoch <= 15:
-        return max_size * 0.5  # 50% for next 15 epochs
+        return int(max_size * 0.5)  # 50% for next 15 epochs
     elif epoch <= 20:
-        return max_size * 0.75  # 75% for next 20 epochs
+        return int(max_size * 0.75)  # 75% for next 20 epochs
     else:
-        return max_size  # Full length afterwards
+        return int(max_size)  # Full length afterwards
 
 
 def save_visualization(epoch, output_dir, ground_truth, reconstruction, file_id, num_generated, prefix='val'):
