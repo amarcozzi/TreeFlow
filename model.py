@@ -155,9 +155,12 @@ class PointNetSetAbstraction(nn.Module):
         self.radius = radius
         self.nsample = nsample
 
-        # Create conditional MLPs for feature extraction
         self.mlp_convs = nn.ModuleList()
-        last_channel = in_channel
+
+        # The input to the first MLP is the channel dimension of the `points` tensor
+        # PLUS the 3 dimensions of the normalized local coordinates (grouped_xyz_norm).
+        last_channel = in_channel + 3
+
         for out_channel in mlp:
             self.mlp_convs.append(ConditionalConv1d(last_channel, out_channel, 1, time_embed_dim))
             last_channel = out_channel
@@ -168,11 +171,11 @@ class PointNetSetAbstraction(nn.Module):
         # t_embed: (B, D_t) - time embedding
 
         # 1. Sampling
-        if self.npoint is not None:
+        if self.npoint is not None and self.npoint < xyz.shape[1]:
             new_xyz_idx = farthest_point_sample(xyz, self.npoint)
             new_xyz = index_points(xyz, new_xyz_idx)
         else:
-            new_xyz = None
+            new_xyz = xyz  # Use all points as centroids if npoint is None or not smaller
 
         # 2. Grouping
         idx = query_ball_point(self.radius, self.nsample, xyz, new_xyz)
@@ -197,7 +200,6 @@ class PointNetSetAbstraction(nn.Module):
         new_points = torch.max(new_points, 3)[0]  # (B, C', npoint)
 
         return new_xyz, new_points
-
 
 class PointNetFeaturePropagation(nn.Module):
     """PointNet Feature Propagation (FP) module."""
