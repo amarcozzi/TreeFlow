@@ -1,9 +1,10 @@
-# model.py
 import torch
 from torch import nn
 import torch.nn.functional as F
 import math
 
+
+# --- UTILITY FUNCTIONS ---
 
 def farthest_point_sample(xyz, npoint):
     """
@@ -97,6 +98,8 @@ def index_points(points, idx):
     return new_points
 
 
+# --- CORE POINTNET++ MODULES ---
+
 class TimeEmbedding(nn.Module):
     """Sinusoidal time embedding module."""
 
@@ -169,17 +172,39 @@ class PointNetSetAbstraction(nn.Module):
         # xyz: (B, N, 3) - coordinates
         # points: (B, C, N) - features
         # t_embed: (B, D_t) - time embedding
+        if self.npoint is None:
+            # This is the global abstraction layer. It processes all points to create a single feature vector.
+            new_xyz = None
 
-        # 1. Sampling
-        if self.npoint is not None and self.npoint < xyz.shape[1]:
+            # The input `points` are the features from the previous layer.
+            # We treat the entire point cloud as one group.
+            if points is not None:
+                processed_points = points.permute(0, 2, 1)
+                processed_points = torch.cat([xyz, processed_points], dim=-1)
+            else:
+                processed_points = xyz
+
+            # Reshape for MLPs: (B, C+3, N)
+            processed_points = processed_points.permute(0, 2, 1)
+
+            for conv in self.mlp_convs:
+                processed_points = conv(processed_points, t_embed)
+
+            # Global max pooling to get the final global feature vector
+            new_points = torch.max(processed_points, 2)[0].unsqueeze(-1)  # -> (B, C', 1)
+
+            return new_xyz, new_points
+
+        # --- Local Abstraction Logic (for non-global layers) ---
+        if self.npoint < xyz.shape[1]:
             new_xyz_idx = farthest_point_sample(xyz, self.npoint)
             new_xyz = index_points(xyz, new_xyz_idx)
         else:
-            new_xyz = xyz  # Use all points as centroids if npoint is None or not smaller
+            new_xyz = xyz
 
         # 2. Grouping
         idx = query_ball_point(self.radius, self.nsample, xyz, new_xyz)
-        grouped_xyz = index_points(xyz, idx)  # (B, npoint, nsample, 3)
+        grouped_xyz = index_points(xyz, idx)
         grouped_xyz_norm = grouped_xyz - new_xyz.unsqueeze(2)
 
         if points is not None:
@@ -193,13 +218,14 @@ class PointNetSetAbstraction(nn.Module):
         for conv in self.mlp_convs:
             # Reshape for Conv1d: (B, C, npoint * nsample)
             B, C, S, K = new_points.shape
-            new_points = conv(new_points.reshape(B, C, S * K), t_embed)
-            new_points = new_points.reshape(B, -1, S, K)
+            new_points_flat = new_points.reshape(B, C, S * K)
+            new_points_conv = conv(new_points_flat, t_embed)
+            new_points = new_points_conv.reshape(B, -1, S, K)
 
-        # Max pooling over the neighborhood points
-        new_points = torch.max(new_points, 3)[0]  # (B, C', npoint)
+        new_points = torch.max(new_points, 3)[0]
 
         return new_xyz, new_points
+
 
 class PointNetFeaturePropagation(nn.Module):
     """PointNet Feature Propagation (FP) module."""
@@ -220,12 +246,17 @@ class PointNetFeaturePropagation(nn.Module):
         # t_embed: (B, D_t) - time embedding
 
         B, N, C = xyz1.shape
-        _, S, _ = xyz2.shape
 
-        if S == 1:  # Global feature
+        # GET SHAPE FROM 'points2' TENSOR
+        # This handles the case where xyz2 is None (for global feature propagation)
+        S = points2.shape[2]
+
+        if S == 1:
             interpolated_points = points2.repeat(1, 1, N)
         else:
-            # Inverse distance weighted interpolation
+            if xyz2 is None:
+                raise ValueError("xyz2 cannot be None for local feature propagation (S > 1)")
+
             dists = torch.cdist(xyz1, xyz2, p=2.0) ** 2
             dists, idx = dists.sort(dim=-1)
             dists, idx = dists[:, :, :3], idx[:, :, :3]  # k=3 nearest neighbors
@@ -250,6 +281,8 @@ class PointNetFeaturePropagation(nn.Module):
         return new_points
 
 
+# --- FINAL UNET MODEL ---
+
 class PointNet2UnetForFlowMatching(nn.Module):
     def __init__(self, time_embed_dim=128):
         super().__init__()
@@ -264,23 +297,17 @@ class PointNet2UnetForFlowMatching(nn.Module):
         # --- Encoder (Set Abstraction) ---
         # Note: 'in_channel' now refers to the feature dimension of the 'points' input,
         # not the concatenated (xyz + features) dimension.
-
         # input_channels = 3 for XYZ
         self.sa1 = PointNetSetAbstraction(npoint=512, radius=0.2, nsample=32, in_channel=3, mlp=[64, 64, 128],
                                           time_embed_dim=time_embed_dim)
-
-        # The input features from sa1 have 128 channels.
         self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.4, nsample=64, in_channel=128, mlp=[128, 128, 256],
                                           time_embed_dim=time_embed_dim)
-
-        # The input features from sa2 have 256 channels. The global SA layer processes all points.
         self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, in_channel=256, mlp=[256, 512, 1024],
                                           time_embed_dim=time_embed_dim)
 
-        # --- Decoder (Feature Propagation) ---
+        # Decoder Layers
         self.fp3 = PointNetFeaturePropagation(in_channel=1024 + 256, mlp=[256, 256], time_embed_dim=time_embed_dim)
         self.fp2 = PointNetFeaturePropagation(in_channel=256 + 128, mlp=[256, 128], time_embed_dim=time_embed_dim)
-        # The skip connection from the input has 3 channels (xyz), and the features from fp2 have 128.
         self.fp1 = PointNetFeaturePropagation(in_channel=128 + 3, mlp=[128, 128, 128], time_embed_dim=time_embed_dim)
 
         # --- Prediction Head ---
@@ -292,21 +319,23 @@ class PointNet2UnetForFlowMatching(nn.Module):
         )
 
     def forward(self, x_t, t):
+        # Ensure input is (B, C, N) -> (B, 3, N)
         if x_t.dim() == 3 and x_t.shape[1] != 3:
             x_t = x_t.transpose(1, 2)
 
-        xyz = x_t.transpose(1, 2)  # Working with (B, N, 3)
-        l0_points = x_t  # (B, 3, N) - save for skip connection
+        # Convert to (B, N, C) for coordinate-based operations
+        xyz = x_t.transpose(1, 2)
+        l0_points = x_t  # Keep original (B, 3, N) for skip connection
 
         t_embed = self.time_mlp(t)
 
-        # Encoder
+        # --- Encoder ---
         l1_xyz, l1_points = self.sa1(xyz, l0_points, t_embed)
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points, t_embed)
-        _, l3_points = self.sa3(l2_xyz, l2_points, t_embed)  # Global feature, l3_xyz is not needed.
+        l3_xyz, l3_points = self.sa3(l2_xyz, l2_points, t_embed)  # l3_xyz is None
 
-        # Decoder
-        l2_points = self.fp3(l2_xyz, None, l2_points, l3_points, t_embed)
+        # --- Decoder ---
+        l2_points = self.fp3(l2_xyz, l3_xyz, l2_points, l3_points, t_embed)
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points, t_embed)
         l0_points = self.fp1(xyz, l1_xyz, l0_points, l1_points, t_embed)
 
@@ -314,45 +343,34 @@ class PointNet2UnetForFlowMatching(nn.Module):
 
         return pred_velocity
 
-if __name__ == '__main__':
-    # --- Example Usage ---
 
-    # Model Hyperparameters
+if __name__ == '__main__':
     BATCH_SIZE = 4
     NUM_POINTS = 2048
     TIME_EMBED_DIM = 256
 
-    # Check if CUDA is available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Instantiate the model and move it to the device
     model = PointNet2UnetForFlowMatching(time_embed_dim=TIME_EMBED_DIM).to(device)
-
     print(f"Model created successfully. Parameter count: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
 
-    # Create dummy input data
-    # Noisy point cloud at time t
-    x_t_input = torch.randn(BATCH_SIZE, NUM_POINTS, 3, device=device)
-    # Timesteps (random values between 0 and 1)
+    x_t_input = torch.randn(BATCH_SIZE, 3, NUM_POINTS, device=device)
     t_input = torch.rand(BATCH_SIZE, device=device)
 
-    # Perform a forward pass
-    # try:
-    predicted_velocity = model(x_t_input, t_input)
+    try:
+        predicted_velocity = model(x_t_input, t_input)
 
-    # Print shapes to verify
-    print("\n--- Verification ---")
-    print(f"Input point cloud shape: {x_t_input.shape}")
-    print(f"Input time shape:          {t_input.shape}")
-    print(f"Predicted velocity shape:  {predicted_velocity.shape}")
+        print("\n--- Verification ---")
+        print(f"Input point cloud shape: {x_t_input.shape}")
+        print(f"Input time shape:          {t_input.shape}")
+        print(f"Predicted velocity shape:  {predicted_velocity.shape}")
 
-    # Check output shape
-    expected_shape = (BATCH_SIZE, 3, NUM_POINTS)
-    assert predicted_velocity.shape == expected_shape, \
-        f"Shape mismatch! Expected {expected_shape}, but got {predicted_velocity.shape}"
+        expected_shape = (BATCH_SIZE, 3, NUM_POINTS)
+        assert predicted_velocity.shape == expected_shape, \
+            f"Shape mismatch! Expected {expected_shape}, but got {predicted_velocity.shape}"
 
-    print("\nForward pass successful and output shape is correct!")
+        print("\nForward pass successful and output shape is correct!")
 
-    # except Exception as e:
-    #     print(f"\nAn error occurred during the forward pass: {e}")
+    except Exception as e:
+        print(f"\nAn error occurred during the forward pass: {e}")
