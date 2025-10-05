@@ -262,19 +262,26 @@ class PointNet2UnetForFlowMatching(nn.Module):
         )
 
         # --- Encoder (Set Abstraction) ---
+        # Note: 'in_channel' now refers to the feature dimension of the 'points' input,
+        # not the concatenated (xyz + features) dimension.
+
         # input_channels = 3 for XYZ
         self.sa1 = PointNetSetAbstraction(npoint=512, radius=0.2, nsample=32, in_channel=3, mlp=[64, 64, 128],
                                           time_embed_dim=time_embed_dim)
-        self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.4, nsample=64, in_channel=128 + 3, mlp=[128, 128, 256],
+
+        # The input features from sa1 have 128 channels.
+        self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.4, nsample=64, in_channel=128, mlp=[128, 128, 256],
                                           time_embed_dim=time_embed_dim)
-        self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, in_channel=256 + 3,
-                                          mlp=[256, 512, 1024], time_embed_dim=time_embed_dim)
+
+        # The input features from sa2 have 256 channels. The global SA layer processes all points.
+        self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, in_channel=256, mlp=[256, 512, 1024],
+                                          time_embed_dim=time_embed_dim)
 
         # --- Decoder (Feature Propagation) ---
         self.fp3 = PointNetFeaturePropagation(in_channel=1024 + 256, mlp=[256, 256], time_embed_dim=time_embed_dim)
         self.fp2 = PointNetFeaturePropagation(in_channel=256 + 128, mlp=[256, 128], time_embed_dim=time_embed_dim)
-        self.fp1 = PointNetFeaturePropagation(in_channel=128 + 3, mlp=[128, 128, 128],
-                                              time_embed_dim=time_embed_dim)  # Added initial features
+        # The skip connection from the input has 3 channels (xyz), and the features from fp2 have 128.
+        self.fp1 = PointNetFeaturePropagation(in_channel=128 + 3, mlp=[128, 128, 128], time_embed_dim=time_embed_dim)
 
         # --- Prediction Head ---
         self.head = nn.Sequential(
@@ -285,42 +292,27 @@ class PointNet2UnetForFlowMatching(nn.Module):
         )
 
     def forward(self, x_t, t):
-        """
-        Forward pass for the PointNet++ U-Net.
-
-        Args:
-            x_t (torch.Tensor): Input point cloud at time t, shape (B, N, 3).
-            t (torch.Tensor): Timestep tensor, shape (B,).
-
-        Returns:
-            torch.Tensor: Predicted velocity field, shape (B, 3, N).
-        """
-        # Ensure input is (B, N, C)
-        if x_t.dim() == 3 and x_t.shape[2] != 3:
+        if x_t.dim() == 3 and x_t.shape[1] != 3:
             x_t = x_t.transpose(1, 2)
 
-        xyz = x_t
-        l0_points = xyz.transpose(1, 2)  # (B, 3, N) - save for skip connection
+        xyz = x_t.transpose(1, 2)  # Working with (B, N, 3)
+        l0_points = x_t  # (B, 3, N) - save for skip connection
 
-        # Generate time embedding
         t_embed = self.time_mlp(t)
 
-        # --- Encoder Path ---
+        # Encoder
         l1_xyz, l1_points = self.sa1(xyz, l0_points, t_embed)
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points, t_embed)
-        l3_xyz, l3_points = self.sa3(l2_xyz, l2_points, t_embed)  # l3_xyz is None
+        _, l3_points = self.sa3(l2_xyz, l2_points, t_embed)  # Global feature, l3_xyz is not needed.
 
-        # --- Decoder Path ---
-        # Note: The 'points1' are the skip connections from the corresponding encoder level
-        l2_points = self.fp3(l2_xyz, l3_xyz, l2_points, l3_points, t_embed)
+        # Decoder
+        l2_points = self.fp3(l2_xyz, None, l2_points, l3_points, t_embed)
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points, t_embed)
         l0_points = self.fp1(xyz, l1_xyz, l0_points, l1_points, t_embed)
 
-        # --- Final Prediction ---
         pred_velocity = self.head(l0_points)
 
-        return pred_velocity  # (B, 3, N)
-
+        return pred_velocity
 
 if __name__ == '__main__':
     # --- Example Usage ---
