@@ -48,45 +48,61 @@ def chamfer_distance(pred, target):
 
 def compute_losses(pred_coords, stop_logits, target_points, stop_loss_weight=1.0):
     """
-    Compute combined loss with Chamfer distance and stop prediction.
+    Compute losses with MSE for sorted sequences and structural constraints.
 
     Args:
-        pred_coords: (N, 3) predicted coordinates
+        pred_coords: (N, 3) predicted coordinates (already sorted by Z)
         stop_logits: (N,) stop prediction logits
         target_points: (N, 3) ground truth sorted points
         stop_loss_weight: Weight for stop loss
 
     Returns:
-        total_loss, coord_loss, stop_loss
+        total_loss, coord_loss, stop_loss, z_mono_loss
     """
-    # Coordinate loss: Chamfer distance (spatially aware, permutation invariant)
-    coord_loss = chamfer_distance(pred_coords, target_points)
+    # MSE coordinate loss - appropriate for sorted sequences
+    # This enforces position-by-position matching along the Z-sorted sequence
+    coord_loss = F.mse_loss(pred_coords, target_points)
 
-    # Stop loss: predict 0 for all positions except last = 1
-    stop_targets = torch.zeros_like(stop_logits)
-    stop_targets[-1] = 1.0
+    # Z-monotonicity loss: penalize Z decreases (tree grows upward)
+    pred_z_diff = pred_coords[1:, 2] - pred_coords[:-1, 2]
+    z_mono_loss = F.relu(-pred_z_diff).mean()  # Only penalize decreases
+
+    # Smoothness loss: consecutive points shouldn't jump wildly
+    coord_diff = pred_coords[1:] - pred_coords[:-1]
+    smoothness_loss = torch.norm(coord_diff, dim=1).mean()
+
+    # Improved stop targets: gradual ramp instead of single spike
+    seq_len = len(target_points)
+    positions = torch.arange(seq_len, dtype=torch.float32, device=stop_logits.device)
+    # Sigmoid ramp: low probability until 80% through, then ramps up
+    stop_targets = torch.sigmoid((positions - seq_len * 0.8) / (seq_len * 0.1))
     stop_loss = F.binary_cross_entropy_with_logits(stop_logits, stop_targets)
 
-    total_loss = coord_loss + stop_loss_weight * stop_loss
+    # Combine all losses
+    total_loss = (coord_loss +
+                  stop_loss_weight * stop_loss +
+                  0.1 * z_mono_loss +
+                  0.01 * smoothness_loss)
 
-    return total_loss, coord_loss, stop_loss
+    return total_loss, coord_loss, stop_loss, z_mono_loss
 
 
-def get_curriculum_max_length(epoch, max_size):
+def get_curriculum_max_length(epoch, total_epochs):
     """
     Curriculum learning: start with shorter sequences, gradually increase.
     This helps stabilize training.
     """
-    if epoch <= 5:
-        return int(max_size * 0.1)  # 10% for first 5 epochs
-    elif epoch <= 10:
-        return int(max_size * 0.25)  # 25% for next 10 epochs
-    elif epoch <= 15:
-        return int(max_size * 0.5)  # 50% for next 15 epochs
-    elif epoch <= 20:
-        return int(max_size * 0.75)  # 75% for next 20 epochs
+    start_count = 512
+    if epoch <= total_epochs * 0.1:
+        return int(start_count)
+    elif epoch <= total_epochs * 0.2:
+        return int(start_count*2)
+    elif epoch <= total_epochs * 0.3:
+        return int(start_count*4)
+    elif epoch <= total_epochs * 0.4:
+        return int(start_count*6)
     else:
-        return int(max_size)  # Full length afterwards
+        return int(start_count*8)
 
 
 def save_visualization(epoch, output_dir, ground_truth, reconstruction, file_id, num_generated, prefix='val'):
@@ -151,12 +167,13 @@ def save_visualization(epoch, output_dir, ground_truth, reconstruction, file_id,
 
 
 def train_epoch(model, dataloader, optimizer, device, epoch, stop_loss_weight, max_length):
-    """Training loop with improved loss computation."""
+    """Training loop with MSE loss and structural constraints."""
     model.train()
 
     total_loss = 0
     total_coord_loss = 0
     total_stop_loss = 0
+    total_z_mono_loss = 0
     num_samples = 0
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch} [Train]")
@@ -167,6 +184,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch, stop_loss_weight, m
         batch_loss = 0
         batch_coord_loss = 0
         batch_stop_loss = 0
+        batch_z_mono_loss = 0
 
         for sample in batch:
             points = sample['points'].to(device)
@@ -184,8 +202,8 @@ def train_epoch(model, dataloader, optimizer, device, epoch, stop_loss_weight, m
             # Forward (points already sorted by dataset)
             pred_coords, stop_logits = model(points)
 
-            # Compute losses (points already sorted by dataset)
-            loss, coord_loss, stop_loss = compute_losses(
+            # Compute losses with structural constraints
+            loss, coord_loss, stop_loss, z_mono_loss = compute_losses(
                 pred_coords, stop_logits, points, stop_loss_weight
             )
 
@@ -195,6 +213,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch, stop_loss_weight, m
             batch_loss += loss.item()
             batch_coord_loss += coord_loss.item()
             batch_stop_loss += stop_loss.item()
+            batch_z_mono_loss += z_mono_loss.item()
             num_samples += 1
 
         # Gradient clipping
@@ -207,20 +226,23 @@ def train_epoch(model, dataloader, optimizer, device, epoch, stop_loss_weight, m
         total_loss += batch_loss / len(batch)
         total_coord_loss += batch_coord_loss / len(batch)
         total_stop_loss += batch_stop_loss / len(batch)
+        total_z_mono_loss += batch_z_mono_loss / len(batch)
 
         # Progress bar
         pbar.set_postfix({
             'loss': f'{batch_loss / len(batch):.4f}',
             'coord': f'{batch_coord_loss / len(batch):.4f}',
             'stop': f'{batch_stop_loss / len(batch):.4f}',
+            'z_mono': f'{batch_z_mono_loss / len(batch):.4f}',
             'max_len': max_length
         })
 
     avg_loss = total_loss / len(dataloader)
     avg_coord = total_coord_loss / len(dataloader)
     avg_stop = total_stop_loss / len(dataloader)
+    avg_z_mono = total_z_mono_loss / len(dataloader)
 
-    return avg_loss, avg_coord, avg_stop
+    return avg_loss, avg_coord, avg_stop, avg_z_mono
 
 
 def validate(model, dataloader, device, epoch, vis_dir, num_visualizations, stop_threshold):
@@ -243,8 +265,11 @@ def validate(model, dataloader, device, epoch, vis_dir, num_visualizations, stop
 
                 points = sample['points'].to(device)
 
+                if len(points) < 2:
+                    continue
+
                 # Generate
-                generated = model.generate(points, max_len=8192, stop_threshold=stop_threshold)
+                generated = model.generate(points, max_len=2500, stop_threshold=stop_threshold)
                 num_generated = len(generated)
                 generated_lengths.append(num_generated)
 
@@ -344,12 +369,12 @@ def main(args):
     for epoch in range(1, args.epochs + 1):
         # Curriculum learning: gradually increase max sequence length
         if args.use_curriculum:
-            max_length = get_curriculum_max_length(epoch, 8192)
+            max_length = int(get_curriculum_max_length(epoch, args.epochs))
         else:
-            max_length = 8192
+            max_length = int(2048)
 
         # Train
-        train_loss, train_coord, train_stop = train_epoch(
+        train_loss, train_coord, train_stop, train_z_mono = train_epoch(
             model, train_loader, optimizer, device, epoch,
             args.stop_loss_weight, max_length
         )
@@ -367,15 +392,21 @@ def main(args):
 
         # Print summary
         print(f"\nEpoch {epoch}/{args.epochs} Summary:")
-        print(f"  Train Loss: {train_loss:.6f} (coord: {train_coord:.6f}, stop: {train_stop:.6f})")
+        print(
+            f"  Train Loss: {train_loss:.6f} (coord: {train_coord:.6f}, stop: {train_stop:.6f}, z_mono: {train_z_mono:.6f})")
         if epoch % args.vis_freq == 0:
             print(f"  Generated Lengths: avg={avg_length:.0f}, range=[{min_length}-{max_length_gen}]")
 
             # Check for degenerate solutions
             if avg_length < 50:
-                print(f"  WARNING: Model generating very few points! Consider:")
-                print(f"    - Decreasing stop_loss_weight (currently {args.stop_loss_weight})")
-                print(f"    - Increasing min_points (currently {args.min_points})")
+                print(f"  WARNING: Model generating very few points!")
+                print(f"    - Decrease stop_loss_weight (currently {args.stop_loss_weight})")
+                print(f"    - Increase min_points (currently {args.min_points})")
+                print(f"    - Lower stop_threshold (currently {args.stop_threshold})")
+            elif avg_length >= max_length_gen - 10:
+                print(f"  WARNING: Model hitting max_length!")
+                print(f"    - Stop mechanism not working")
+                print(f"    - Try lower stop_threshold (currently {args.stop_threshold})")
 
         print(f"  LR: {optimizer.param_groups[0]['lr']:.2e}")
 
@@ -416,7 +447,7 @@ if __name__ == '__main__':
     parser.add_argument('--voxel_size', type=float, default=0.5)
 
     # Model
-    parser.add_argument('--latent_dim', type=int, default=128)
+    parser.add_argument('--latent_dim', type=int, default=256)
     parser.add_argument('--num_latents', type=int, default=256)
     parser.add_argument('--num_encoder_layers', type=int, default=4)
     parser.add_argument('--num_processor_layers', type=int, default=2)
@@ -429,21 +460,21 @@ if __name__ == '__main__':
                         help='Minimum points before stopping allowed')
     parser.add_argument('--stop_loss_weight', type=float, default=1,
                         help='Weight for stop loss (start low!)')
-    parser.add_argument('--stop_threshold', type=float, default=0.5,
-                        help='Stop probability threshold for inference')
+    parser.add_argument('--stop_threshold', type=float, default=0.2,
+                        help='Stop probability threshold for inference (lowered from 0.5)')
     parser.add_argument('--use_rotation_augment', action='store_true', default=True,
                         help='Use rotation augmentation around Z-axis')
     parser.add_argument('--use_curriculum', action='store_true', default=True,
                         help='Use curriculum learning for sequence length')
 
     # Training
-    parser.add_argument('--epochs', type=int, default=500)
+    parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=0.01)
 
     # Logging
-    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints_improved')
-    parser.add_argument('--save_freq', type=int, default=100)
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints_generative')
+    parser.add_argument('--save_freq', type=int, default=25)
     parser.add_argument('--vis_freq', type=int, default=1)
     parser.add_argument('--num_vis', type=int, default=10)
 
