@@ -149,14 +149,113 @@ class ConditionalConv1d(nn.Module):
         return x
 
 
+class VectorAttention(nn.Module):
+    """
+    Vector attention module for point clouds.
+    Based on Point Transformer (Zhao et al., 2021) and Point Transformer V2 (Wu et al., 2022).
+    """
+
+    def __init__(self, in_channels, num_heads=4):
+        super().__init__()
+        self.num_heads = num_heads
+        self.in_channels = in_channels
+
+        assert in_channels % num_heads == 0, "in_channels must be divisible by num_heads"
+        self.head_dim = in_channels // num_heads
+
+        # Linear transformations for Q, K, V
+        self.q_conv = nn.Conv1d(in_channels, in_channels, 1, bias=False)
+        self.k_conv = nn.Conv1d(in_channels, in_channels, 1, bias=False)
+        self.v_conv = nn.Conv1d(in_channels, in_channels, 1, bias=False)
+
+        # Position encoding MLP
+        self.pos_mlp = nn.Sequential(
+            nn.Conv1d(3, in_channels, 1),
+            nn.GELU(),
+            nn.Conv1d(in_channels, in_channels, 1)
+        )
+
+        # Attention weight MLP
+        self.attn_mlp = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // 2, 1),
+            nn.GELU(),
+            nn.Conv2d(in_channels // 2, in_channels, 1)
+        )
+
+        # Output projection
+        self.out_conv = nn.Conv1d(in_channels, in_channels, 1)
+
+        self.norm = nn.LayerNorm(in_channels)
+
+    def forward(self, x, xyz):
+        """
+        Args:
+            x: (B, C, N) - input features
+            xyz: (B, N, 3) - point coordinates
+
+        Returns:
+            (B, C, N) - output features
+        """
+        B, C, N = x.shape
+
+        # Save residual
+        residual = x
+
+        # Compute Q, K, V
+        Q = self.q_conv(x)  # (B, C, N)
+        K = self.k_conv(x)  # (B, C, N)
+        V = self.v_conv(x)  # (B, C, N)
+
+        # Reshape for multi-head attention
+        Q = Q.view(B, self.num_heads, self.head_dim, N)  # (B, H, D, N)
+        K = K.view(B, self.num_heads, self.head_dim, N)  # (B, H, D, N)
+        V = V.view(B, self.num_heads, self.head_dim, N)  # (B, H, D, N)
+
+        # Compute relative positions
+        xyz_t = xyz.transpose(1, 2)  # (B, 3, N)
+        rel_pos = xyz_t.unsqueeze(3) - xyz_t.unsqueeze(2)  # (B, 3, N, N)
+
+        # Position encoding
+        pos_enc = self.pos_mlp(rel_pos.view(B, 3, N * N))  # (B, C, N*N)
+        pos_enc = pos_enc.view(B, C, N, N)  # (B, C, N, N)
+
+        # Compute attention scores
+        # (B, H, D, N) x (B, H, D, N) -> (B, H, N, N)
+        attn = torch.einsum('bhdn,bhdm->bhnm', Q, K) / math.sqrt(self.head_dim)
+
+        # Add position encoding to attention
+        pos_enc_heads = pos_enc.view(B, self.num_heads, self.head_dim, N, N)
+        attn = attn.unsqueeze(2) + pos_enc_heads.mean(dim=2)  # (B, H, N, N)
+
+        # Apply attention MLP and softmax
+        attn = attn.view(B, self.num_heads, N, N).mean(dim=1, keepdim=True)  # (B, 1, N, N)
+        attn = self.attn_mlp(attn.expand(B, C, N, N))  # (B, C, N, N)
+        attn = F.softmax(attn.view(B, self.num_heads, self.head_dim, N, N), dim=-1)
+
+        # Apply attention to values
+        # (B, H, D, N, N) x (B, H, D, N) -> (B, H, D, N)
+        out = torch.einsum('bhdnm,bhdm->bhdn', attn, V)
+
+        # Reshape and project
+        out = out.reshape(B, C, N)
+        out = self.out_conv(out)
+
+        # Add residual and normalize
+        out = out + residual
+        out = self.norm(out.transpose(1, 2)).transpose(1, 2)
+
+        return out
+
+
 class PointNetSetAbstraction(nn.Module):
     """PointNet Set Abstraction (SA) module (Single-Scale Grouping)."""
 
-    def __init__(self, npoint, radius, nsample, in_channel, mlp, time_embed_dim):
+    def __init__(self, npoint, radius, nsample, in_channel, mlp, time_embed_dim, use_attention=True, num_heads=4):
         super().__init__()
         self.npoint = npoint
         self.radius = radius
         self.nsample = nsample
+        self.use_attention = use_attention
 
         self.mlp_convs = nn.ModuleList()
 
@@ -167,6 +266,10 @@ class PointNetSetAbstraction(nn.Module):
         for out_channel in mlp:
             self.mlp_convs.append(ConditionalConv1d(last_channel, out_channel, 1, time_embed_dim))
             last_channel = out_channel
+
+        # Add vector attention if specified
+        if use_attention:
+            self.attention = VectorAttention(last_channel, num_heads=num_heads)
 
     def forward(self, xyz, points, t_embed):
         # xyz: (B, N, 3) - coordinates
@@ -189,6 +292,10 @@ class PointNetSetAbstraction(nn.Module):
 
             for conv in self.mlp_convs:
                 processed_points = conv(processed_points, t_embed)
+
+            # Apply vector attention before global pooling if specified
+            if self.use_attention:
+                processed_points = self.attention(processed_points, xyz)
 
             # Global max pooling to get the final global feature vector
             new_points = torch.max(processed_points, 2)[0].unsqueeze(-1)  # -> (B, C', 1)
@@ -299,11 +406,12 @@ class PointNet2UnetForFlowMatching(nn.Module):
         # not the concatenated (xyz + features) dimension.
         # input_channels = 3 for XYZ
         self.sa1 = PointNetSetAbstraction(npoint=512, radius=0.2, nsample=32, in_channel=3, mlp=[64, 64, 128],
-                                          time_embed_dim=time_embed_dim)
+                                          time_embed_dim=time_embed_dim, use_attention=False)
         self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.4, nsample=64, in_channel=128, mlp=[128, 128, 256],
-                                          time_embed_dim=time_embed_dim)
+                                          time_embed_dim=time_embed_dim, use_attention=False)
+        # SA3 uses vector attention as specified in the paper
         self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, in_channel=256, mlp=[256, 512, 1024],
-                                          time_embed_dim=time_embed_dim)
+                                          time_embed_dim=time_embed_dim, use_attention=True, num_heads=4)
 
         # Decoder Layers
         self.fp3 = PointNetFeaturePropagation(in_channel=1024 + 256, mlp=[256, 256], time_embed_dim=time_embed_dim)
@@ -332,7 +440,7 @@ class PointNet2UnetForFlowMatching(nn.Module):
         # --- Encoder ---
         l1_xyz, l1_points = self.sa1(xyz, l0_points, t_embed)
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points, t_embed)
-        l3_xyz, l3_points = self.sa3(l2_xyz, l2_points, t_embed)  # l3_xyz is None
+        l3_xyz, l3_points = self.sa3(l2_xyz, l2_points, t_embed)  # l3_xyz is None, uses attention
 
         # --- Decoder ---
         l2_points = self.fp3(l2_xyz, l3_xyz, l2_points, l3_points, t_embed)
@@ -358,19 +466,20 @@ if __name__ == '__main__':
     x_t_input = torch.randn(BATCH_SIZE, 3, NUM_POINTS, device=device)
     t_input = torch.rand(BATCH_SIZE, device=device)
 
-    try:
-        predicted_velocity = model(x_t_input, t_input)
+    # try:
+    predicted_velocity = model(x_t_input, t_input)
 
-        print("\n--- Verification ---")
-        print(f"Input point cloud shape: {x_t_input.shape}")
-        print(f"Input time shape:          {t_input.shape}")
-        print(f"Predicted velocity shape:  {predicted_velocity.shape}")
+    print("\n--- Verification ---")
+    print(f"Input point cloud shape: {x_t_input.shape}")
+    print(f"Input time shape:          {t_input.shape}")
+    print(f"Predicted velocity shape:  {predicted_velocity.shape}")
 
-        expected_shape = (BATCH_SIZE, 3, NUM_POINTS)
-        assert predicted_velocity.shape == expected_shape, \
-            f"Shape mismatch! Expected {expected_shape}, but got {predicted_velocity.shape}"
+    expected_shape = (BATCH_SIZE, 3, NUM_POINTS)
+    assert predicted_velocity.shape == expected_shape, \
+        f"Shape mismatch! Expected {expected_shape}, but got {predicted_velocity.shape}"
 
-        print("\nForward pass successful and output shape is correct!")
+    print("\nForward pass successful and output shape is correct!")
+    print("\n✓ Vector attention blocks added to SA3 layer")
 
-    except Exception as e:
-        print(f"\nAn error occurred during the forward pass: {e}")
+    # except Exception as e:
+    #     print(f"\nAn error occurred during the forward pass: {e}")
