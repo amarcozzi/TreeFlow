@@ -56,49 +56,43 @@ def compute_loss(model, x_1, flow_path, device):
     return loss
 
 
-def train_epoch(model, train_loader, optimizer, flow_path, device, accumulation_steps):
-    """Train for one epoch with gradient accumulation."""
+def train_epoch(model, train_loader, optimizer, flow_path, device, batch_size):
+    """Train for one epoch. Gradients are accumulated for each batch from the loader."""
     model.train()
     total_loss = 0.0
-    num_batches = 0
-
-    optimizer.zero_grad()
+    avg_loss = 0.0
+    num_samples = 0
 
     pbar = tqdm(train_loader, desc="Training", dynamic_ncols=True, disable=False)
-    for i, batch in enumerate(pbar):
-        # batch is a list of dicts (length 1 since batch_size=1)
-        sample = batch[0]
-        points = sample['points']  # (N, 3)
-        num_points = sample['num_points']
 
-        # Add batch dimension and transpose: (N, 3) -> (1, N, 3) -> (1, 3, N)
-        points = points.unsqueeze(0).transpose(1, 2).to(device)
-
-        # Compute loss
-        loss = compute_loss(model, points, flow_path, device)
-
-        # Normalize loss for gradient accumulation
-        loss = loss / accumulation_steps
-        loss.backward()
-
-        # Accumulate gradients
-        if (i + 1) % accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            optimizer.zero_grad()
-
-        total_loss += loss.item() * accumulation_steps
-        num_batches += 1
-
-        pbar.set_postfix({'loss': f'{loss.item() * accumulation_steps:.4f}', 'pts': num_points})
-
-    # Final step if there are remaining gradients
-    if num_batches % accumulation_steps != 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+    # Outer loop iterates over BATCHES from the DataLoader
+    for batch in pbar:
         optimizer.zero_grad()
 
-    return total_loss / num_batches
+        # Inner loop iterates over each SAMPLE in the batch to accumulate gradients
+        for sample in batch:
+            points = sample['points']
+            num_points = sample['num_points']
+
+            points = points.unsqueeze(0).transpose(1, 2).to(device)
+
+            loss = compute_loss(model, points, flow_path, device)
+
+            # Normalize the loss by the number of samples in the batch (the accumulation count)
+            # This is crucial for the gradients to have the correct magnitude.
+            normalized_loss = loss / len(batch)
+            normalized_loss.backward()
+
+            total_loss += loss.item()  # Keep track of the un-normalized loss for logging
+            avg_loss = total_loss / (num_samples + 1)
+            num_samples += 1
+            pbar.set_postfix({'loss': f'{avg_loss:.4f}', 'pts': num_points})
+
+        # After processing all samples in the batch, perform a single optimizer step
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+
+    return total_loss / num_samples if num_samples > 0 else 0.0
 
 
 @torch.no_grad()
@@ -224,9 +218,6 @@ def train(args):
     vis_dir = output_dir / "visualizations"
     vis_dir.mkdir(exist_ok=True)
 
-    device = torch.device('cuda' if torch.cuda.is_available() and not args.no_cuda else 'cpu')
-
-    print(f"Using device: {device}")
     print(f"Voxel size: {args.voxel_size}")
     print(f"Augmentation: {args.augment}")
 
@@ -255,26 +246,31 @@ def train(args):
     print(f"Point cloud sizes (sample of {len(train_sizes)}): "
           f"min={min(train_sizes)}, max={max(train_sizes)}, mean={np.mean(train_sizes):.0f}")
 
-    # Only pin memory when using CUDA
-    pin_memory = device.type == 'cuda'
-
     train_loader = DataLoader(
         train_dataset,
-        batch_size=1,
+        batch_size=args.batch_size,
         shuffle=True,
-        num_workers=0,
+        num_workers=args.num_workers,
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=4,
+        pin_memory=True,
         collate_fn=collate_fn,
-        pin_memory=pin_memory
     )
 
     val_loader = DataLoader(
         test_dataset,
-        batch_size=1,
-        shuffle=False,
-        num_workers=0,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=4,
+        pin_memory=True,
         collate_fn=collate_fn,
-        pin_memory=pin_memory
     )
+
+    # Setup device
+    device = torch.device('cuda' if torch.cuda.is_available() and not args.no_cuda else 'cpu')
+    print(f"Using device: {device}")
 
     # Initialize model
     print("\nInitializing model...")
@@ -301,7 +297,7 @@ def train(args):
         print(f"{'=' * 60}")
 
         # Train
-        train_loss = train_epoch(model, train_loader, optimizer, flow_path, device, args.accumulation_steps)
+        train_loss = train_epoch(model, train_loader, optimizer, flow_path, device, args.batch_size)
         train_losses.append(train_loss)
         print(f"Train Loss: {train_loss:.6f}")
 
@@ -364,7 +360,7 @@ def parse_args():
     # Data arguments
     parser.add_argument('--data_path', type=str, default='FOR-species20K',
                         help='Path to FOR-species20K dataset')
-    parser.add_argument('--voxel_size', type=float, default=0.25,
+    parser.add_argument('--voxel_size', type=float, default=0.1,
                         help='Voxel size for downsampling (None for no downsampling)')
 
     # Augmentation arguments
@@ -384,7 +380,7 @@ def parse_args():
                         help='Dimension of time embedding')
 
     # Training arguments
-    parser.add_argument('--num_epochs', type=int, default=100,
+    parser.add_argument('--num_epochs', type=int, default=1000,
                         help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate')
@@ -392,8 +388,8 @@ def parse_args():
                         help='Minimum learning rate for scheduler')
     parser.add_argument('--weight_decay', type=float, default=1e-5,
                         help='Weight decay')
-    parser.add_argument('--accumulation_steps', type=int, default=32,
-                        help='Gradient accumulation steps')
+    parser.add_argument('--batch_size', type=int, default=64,
+                        help='Number of samples to process before each optimizer step.')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')
     parser.add_argument('--no_cuda', action='store_true',
