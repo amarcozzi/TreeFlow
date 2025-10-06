@@ -399,7 +399,7 @@ def parse_args():
     # Data
     parser.add_argument('--data_path', type=str, default='FOR-species20K',
                         help='Path to FOR-species20K dataset')
-    parser.add_argument('--voxel_size', type=float, default=0.1,
+    parser.add_argument('--voxel_size', type=float, default=0.05,
                         help='Voxel size for downsampling (meters)')
 
     # Augmentation
