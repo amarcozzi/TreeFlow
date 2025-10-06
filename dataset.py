@@ -117,8 +117,8 @@ class PointCloudDataset(Dataset):
         u = np.random.uniform(0, 1)
         sample_ratio = u ** self.sample_exponent
 
-        # Ensure at least 1 point is sampled
-        num_to_sample = max(1, int(sample_ratio * n))
+        # Ensure at least 8 points are sampled
+        num_to_sample = max(8, int(sample_ratio * n))
 
         # Randomly select points
         indices = np.random.choice(n, num_to_sample, replace=False)

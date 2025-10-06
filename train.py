@@ -147,14 +147,12 @@ def sample(model, num_points, device, method='dopri5'):
         t_batch = torch.full((1,), t, device=device, dtype=x.dtype)
         return model(x, t_batch)
 
-    # Create ODE solver
-    solver = ODESolver(method=method)
+    # 1. Initialize the solver with the velocity function (the model)
+    solver = ODESolver(velocity_model=ode_fn)
 
-    # Solve ODE from t=0 to t=1
-    trajectory = solver.sample(ode_fn, x_init, t_span=(0.0, 1.0))
-
-    # Get the final state
-    x_final = trajectory[-1]
+    # 2. Call .sample() with the starting tensor and the method name.
+    # The solver from your other project returns the final state directly, not the full trajectory.
+    x_final = solver.sample(x_init, method=method, step_size=None)
 
     return x_final[0].T.cpu().numpy()  # (3, N) -> (N, 3)
 
@@ -253,7 +251,7 @@ def train(args):
     print(f"Test dataset: {len(test_dataset)} samples")
 
     # Check point cloud size distribution
-    train_sizes = [train_dataset[i]['num_points'] for i in range(min(1000, len(train_dataset)))]
+    train_sizes = [train_dataset[i]['num_points'] for i in range(min(100, len(train_dataset)))]
     print(f"Point cloud sizes (sample of {len(train_sizes)}): "
           f"min={min(train_sizes)}, max={max(train_sizes)}, mean={np.mean(train_sizes):.0f}")
 
@@ -307,35 +305,35 @@ def train(args):
         print(f"Train Loss: {train_loss:.6f}")
 
         # Validate
-        val_loss = validate(model, val_loader, flow_path, device)
-        val_losses.append(val_loss)
-        print(f"Val Loss: {val_loss:.6f}")
+        # val_loss = validate(model, val_loader, flow_path, device)
+        # val_losses.append(val_loss)
+        # print(f"Val Loss: {val_loss:.6f}")
 
         # Update learning rate
         scheduler.step()
         print(f"Learning Rate: {scheduler.get_last_lr()[0]:.6e}")
 
-        # Save checkpoint
-        is_best = val_loss < best_val_loss
-        if is_best:
-            best_val_loss = val_loss
-            print(f"New best model! Val Loss: {best_val_loss:.6f}")
+        # # Save checkpoint
+        # is_best = val_loss < best_val_loss
+        # if is_best:
+        #     best_val_loss = val_loss
+        #     print(f"New best model! Val Loss: {best_val_loss:.6f}")
 
-        if epoch % args.save_every == 0 or is_best:
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'train_losses': train_losses,
-                'val_losses': val_losses,
-                'args': vars(args),
-            }
-
-            torch.save(checkpoint, checkpoint_dir / f'checkpoint_epoch_{epoch}.pt')
-
-            if is_best:
-                torch.save(checkpoint, checkpoint_dir / 'best_model.pt')
+        # if epoch % args.save_every == 0 or is_best:
+        #     checkpoint = {
+        #         'epoch': epoch,
+        #         'model_state_dict': model.state_dict(),
+        #         'optimizer_state_dict': optimizer.state_dict(),
+        #         'scheduler_state_dict': scheduler.state_dict(),
+        #         'train_losses': train_losses,
+        #         'val_losses': val_losses,
+        #         'args': vars(args),
+        #     }
+        #
+        #     torch.save(checkpoint, checkpoint_dir / f'checkpoint_epoch_{epoch}.pt')
+        #
+        #     if is_best:
+        #         torch.save(checkpoint, checkpoint_dir / 'best_model.pt')
 
         # Plot losses
         plot_losses(train_losses, val_losses, log_dir / 'losses.png')
@@ -365,7 +363,7 @@ def parse_args():
     # Data arguments
     parser.add_argument('--data_path', type=str, default='FOR-species20K',
                         help='Path to FOR-species20K dataset')
-    parser.add_argument('--voxel_size', type=float, default=0.1,
+    parser.add_argument('--voxel_size', type=float, default=0.25,
                         help='Voxel size for downsampling (None for no downsampling)')
 
     # Augmentation arguments
