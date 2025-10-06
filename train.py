@@ -4,6 +4,13 @@ train.py - Train a Flow Matching model on tree point clouds
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend for multiprocessing safety
 
+import torch.multiprocessing as mp
+try:
+    mp.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass
+
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
