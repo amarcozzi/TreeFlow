@@ -439,7 +439,7 @@ def parse_args():
                         choices=['dopri5', 'euler', 'midpoint', 'rk4'],
                         help='ODE solver method')
     parser.add_argument('--sample_sizes', type=int, nargs='+',
-                        default=[500, 1000, 2000],
+                        default=[100, 500, 2000, 8000],
                         help='Point cloud sizes to generate')
 
     # Logging
