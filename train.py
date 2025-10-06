@@ -60,60 +60,63 @@ def train_epoch(model, train_loader, optimizer, flow_path, device, batch_size):
     """Train for one epoch. Gradients are accumulated for each batch from the loader."""
     model.train()
     total_loss = 0.0
-    avg_loss = 0.0
     num_samples = 0
 
-    pbar = tqdm(train_loader, desc="Training", dynamic_ncols=True, disable=False)
+    # Create a tqdm object that we can manually update.
+    # We set the total number of iterations to len(train_loader).
+    pbar = tqdm(total=len(train_loader), desc="Training", dynamic_ncols=True, disable=False)
 
-    # Outer loop iterates over BATCHES from the DataLoader
-    for batch in pbar:
+    # Outer loop iterates over batches from the DataLoader
+    for batch in train_loader:
         optimizer.zero_grad()
 
-        # Inner loop iterates over each SAMPLE in the batch to accumulate gradients
+        # Inner loop iterates over each sample in the batch to accumulate gradients
         for sample in batch:
             points = sample['points']
-            num_points = sample['num_points']
 
             points = points.unsqueeze(0).transpose(1, 2).to(device)
 
             loss = compute_loss(model, points, flow_path, device)
 
-            # Normalize the loss by the number of samples in the batch (the accumulation count)
-            # This is crucial for the gradients to have the correct magnitude.
             normalized_loss = loss / len(batch)
             normalized_loss.backward()
 
-            total_loss += loss.item()  # Keep track of the un-normalized loss for logging
-            avg_loss = total_loss / (num_samples + 1)
+            total_loss += loss.item()
             num_samples += 1
-            pbar.set_postfix({'loss': f'{avg_loss:.4f}', 'pts': num_points})
 
         # After processing all samples in the batch, perform a single optimizer step
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
-    return total_loss / num_samples if num_samples > 0 else 0.0
+        # Manually update the progress bar and its postfix
+        pbar.update(1)
+        if num_samples > 0:
+            avg_loss = total_loss / num_samples
+            pbar.set_postfix({'loss': f'{avg_loss:.4f}'})
 
+    pbar.close() # Close the tqdm bar at the end of the epoch
+
+    return total_loss / num_samples if num_samples > 0 else 0.0
 
 @torch.no_grad()
 def validate(model, val_loader, flow_path, device):
     """Validate the model."""
     model.eval()
     total_loss = 0.0
-    num_batches = 0
+    num_samples = 0
 
-    for batch in tqdm(val_loader, desc="Validation", dynamic_ncols=True, disable=False):
-        sample = batch[0]
-        points = sample['points']
+    pbar = tqdm(total=len(val_loader), desc="Validation", dynamic_ncols=True, disable=False)
+    for batch in val_loader:
+        for sample in batch:
+            points = sample['points']
+            points = points.unsqueeze(0).transpose(1, 2).to(device)
+            loss = compute_loss(model, points, flow_path, device)
+            total_loss += loss.item()
+            num_samples += 1
+        pbar.update(1)
 
-        # Add batch dimension and transpose
-        points = points.unsqueeze(0).transpose(1, 2).to(device)
-
-        loss = compute_loss(model, points, flow_path, device)
-        total_loss += loss.item()
-        num_batches += 1
-
-    return total_loss / num_batches
+    pbar.close()
+    return total_loss / num_samples if num_samples > 0 else 0.0
 
 
 @torch.no_grad()
