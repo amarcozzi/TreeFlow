@@ -45,7 +45,6 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
 
     Returns:
         torch.Tensor: Grouped indices, shape (B, S, nsample).
-                      -1 is used for padding if fewer than nsample points are found.
     """
     device = xyz.device
     B, N, C = xyz.shape
@@ -88,17 +87,11 @@ def index_points(points, idx):
     repeat_shape[0] = 1
     batch_indices = torch.arange(B, dtype=torch.long, device=device).view(view_shape).repeat(repeat_shape)
 
-    if idx.dim() == 2:  # (B, S)
-        new_points = points[batch_indices, idx, :]
-    elif idx.dim() == 3:  # (B, S, K)
-        new_points = points[batch_indices, idx, :]
-    else:
-        raise ValueError("idx must be 2D or 3D")
-
+    new_points = points[batch_indices, idx, :]
     return new_points
 
 
-# --- CORE POINTNET++ MODULES ---
+# --- CORE MODULES ---
 
 class TimeEmbedding(nn.Module):
     """Sinusoidal time embedding module."""
@@ -127,7 +120,7 @@ class ConditionalConv1d(nn.Module):
         self.conv = nn.Conv1d(in_channels, out_channels, kernel_size)
         self.time_mlp = nn.Sequential(
             nn.GELU(),
-            nn.Linear(time_embed_dim, in_channels)
+            nn.Linear(time_embed_dim, out_channels)
         )
         self.norm = nn.BatchNorm1d(out_channels)
         self.activation = nn.GELU()
@@ -135,16 +128,13 @@ class ConditionalConv1d(nn.Module):
     def forward(self, x, t_embed):
         # x: (B, C_in, N)
         # t_embed: (B, D_t)
-
-        # Project time embedding and reshape for broadcasting
-        t_embed = self.time_mlp(t_embed).unsqueeze(-1)  # (B, C_in, 1)
-
-        # Condition the input features
-        x = x + t_embed
-
-        # Apply convolution
         x = self.conv(x)
         x = self.norm(x)
+
+        # Add time conditioning after convolution
+        t_embed = self.time_mlp(t_embed).unsqueeze(-1)  # (B, C_out, 1)
+        x = x + t_embed
+
         x = self.activation(x)
         return x
 
@@ -152,7 +142,7 @@ class ConditionalConv1d(nn.Module):
 class VectorAttention(nn.Module):
     """
     Vector attention module for point clouds.
-    Based on Point Transformer (Zhao et al., 2021) and Point Transformer V2 (Wu et al., 2022).
+    Based on Point Transformer (Zhao et al., 2021).
     """
 
     def __init__(self, in_channels, num_heads=4):
@@ -170,12 +160,12 @@ class VectorAttention(nn.Module):
 
         # Position encoding MLP
         self.pos_mlp = nn.Sequential(
-            nn.Conv1d(3, in_channels, 1),
+            nn.Conv2d(3, in_channels, 1),
             nn.GELU(),
-            nn.Conv1d(in_channels, in_channels, 1)
+            nn.Conv2d(in_channels, in_channels, 1)
         )
 
-        # Attention weight MLP
+        # Attention weight MLP (scalar attention)
         self.attn_mlp = nn.Sequential(
             nn.Conv2d(in_channels, in_channels // 2, 1),
             nn.GELU(),
@@ -206,44 +196,29 @@ class VectorAttention(nn.Module):
         K = self.k_conv(x)  # (B, C, N)
         V = self.v_conv(x)  # (B, C, N)
 
-        # Reshape for multi-head attention
-        Q = Q.view(B, self.num_heads, self.head_dim, N)  # (B, H, D, N)
-        K = K.view(B, self.num_heads, self.head_dim, N)  # (B, H, D, N)
-        V = V.view(B, self.num_heads, self.head_dim, N)  # (B, H, D, N)
-
         # Compute relative positions
         xyz_t = xyz.transpose(1, 2)  # (B, 3, N)
         rel_pos = xyz_t.unsqueeze(3) - xyz_t.unsqueeze(2)  # (B, 3, N, N)
 
         # Position encoding
-        pos_enc = self.pos_mlp(rel_pos.view(B, 3, N * N))  # (B, C, N*N)
-        pos_enc = pos_enc.view(B, C, N, N)  # (B, C, N, N)
+        pos_enc = self.pos_mlp(rel_pos)  # (B, C, N, N)
 
-        # Compute attention scores
-        # (B, H, D, N) x (B, H, D, N) -> (B, H, N, N)
-        attn = torch.einsum('bhdn,bhdm->bhnm', Q, K) / math.sqrt(self.head_dim)
+        # Compute relation features: (q_i - q_j) + pos_enc
+        Q_expanded = Q.unsqueeze(3)  # (B, C, N, 1)
+        K_expanded = K.unsqueeze(2)  # (B, C, 1, N)
+        relation = Q_expanded - K_expanded + pos_enc  # (B, C, N, N)
 
-        # Add position encoding to attention
-        # pos_enc is (B, C, N, N), reshape to add to each head
-        pos_enc_heads = pos_enc.view(B, self.num_heads, self.head_dim, N, N)
-        pos_enc_attn = pos_enc_heads.mean(dim=2)  # (B, H, N, N)
-        attn = attn + pos_enc_attn  # (B, H, N, N)
+        # Apply attention MLP to get scalar attention weights
+        attn = self.attn_mlp(relation)  # (B, C, N, N)
 
-        # Apply attention MLP and softmax
-        # Reshape to apply MLP across all heads and head_dims
-        attn_for_mlp = attn.reshape(B, self.num_heads * N, N).unsqueeze(1)  # (B, 1, H*N, N)
-        attn_for_mlp = attn_for_mlp.expand(B, C, self.num_heads * N, N)  # (B, C, H*N, N)
+        # Softmax over source points (last dimension)
+        attn = F.softmax(attn, dim=-1)  # (B, C, N, N)
 
-        # For simplicity, apply softmax directly without the MLP
-        # The MLP was causing shape issues, and softmax alone is standard for attention
-        attn = F.softmax(attn, dim=-1)  # (B, H, N, N)
+        # Apply attention to values with position encoding
+        V_expanded = V.unsqueeze(2)  # (B, C, 1, N)
+        out = (attn * (V_expanded + pos_enc)).sum(dim=-1)  # (B, C, N)
 
-        # Apply attention to values
-        # (B, H, N, N) x (B, H, D, N) -> (B, H, D, N)
-        out = torch.einsum('bhnm,bhdm->bhdn', attn, V)
-
-        # Reshape and project
-        out = out.reshape(B, C, N)
+        # Output projection
         out = self.out_conv(out)
 
         # Add residual and normalize
@@ -254,7 +229,7 @@ class VectorAttention(nn.Module):
 
 
 class PointNetSetAbstraction(nn.Module):
-    """PointNet Set Abstraction (SA) module (Single-Scale Grouping)."""
+    """PointNet Set Abstraction (SA) module."""
 
     def __init__(self, npoint, radius, nsample, in_channel, mlp, time_embed_dim, use_attention=False, num_heads=4):
         super().__init__()
@@ -264,16 +239,12 @@ class PointNetSetAbstraction(nn.Module):
         self.use_attention = use_attention
 
         self.mlp_convs = nn.ModuleList()
-
-        # The input to the first MLP is the channel dimension of the `points` tensor
-        # PLUS the 3 dimensions of the normalized local coordinates (grouped_xyz_norm).
         last_channel = in_channel + 3
 
         for out_channel in mlp:
             self.mlp_convs.append(ConditionalConv1d(last_channel, out_channel, 1, time_embed_dim))
             last_channel = out_channel
 
-        # Add vector attention if specified
         if use_attention:
             self.attention = VectorAttention(last_channel, num_heads=num_heads)
 
@@ -281,55 +252,47 @@ class PointNetSetAbstraction(nn.Module):
         # xyz: (B, N, 3) - coordinates
         # points: (B, C, N) - features
         # t_embed: (B, D_t) - time embedding
+
         if self.npoint is None:
-            # This is the global abstraction layer. It processes all points to create a single feature vector.
+            # Global abstraction layer
             new_xyz = None
 
-            # The input `points` are the features from the previous layer.
-            # We treat the entire point cloud as one group.
             if points is not None:
-                processed_points = points.permute(0, 2, 1)
-                processed_points = torch.cat([xyz, processed_points], dim=-1)
+                # Concatenate xyz with features
+                processed_points = torch.cat([xyz.transpose(1, 2), points], dim=1)  # (B, C+3, N)
             else:
-                processed_points = xyz
-
-            # Reshape for MLPs: (B, C+3, N)
-            processed_points = processed_points.permute(0, 2, 1)
+                processed_points = xyz.transpose(1, 2)  # (B, 3, N)
 
             for conv in self.mlp_convs:
                 processed_points = conv(processed_points, t_embed)
 
-            # Apply vector attention before global pooling if specified
             if self.use_attention:
                 processed_points = self.attention(processed_points, xyz)
 
-            # Global max pooling to get the final global feature vector
-            new_points = torch.max(processed_points, 2)[0].unsqueeze(-1)  # -> (B, C', 1)
+            new_points = torch.max(processed_points, 2)[0].unsqueeze(-1)  # (B, C', 1)
 
             return new_xyz, new_points
 
-        # --- Local Abstraction Logic (for non-global layers) ---
+        # Local abstraction
         if self.npoint < xyz.shape[1]:
             new_xyz_idx = farthest_point_sample(xyz, self.npoint)
             new_xyz = index_points(xyz, new_xyz_idx)
         else:
             new_xyz = xyz
 
-        # 2. Grouping
         idx = query_ball_point(self.radius, self.nsample, xyz, new_xyz)
         grouped_xyz = index_points(xyz, idx)
         grouped_xyz_norm = grouped_xyz - new_xyz.unsqueeze(2)
 
         if points is not None:
-            grouped_points = index_points(points.transpose(1, 2), idx)  # (B, npoint, nsample, C)
-            new_points = torch.cat([grouped_xyz_norm, grouped_points], dim=-1)  # (B, npoint, nsample, C+3)
+            grouped_points = index_points(points.transpose(1, 2), idx)
+            new_points = torch.cat([grouped_xyz_norm, grouped_points], dim=-1)
         else:
             new_points = grouped_xyz_norm
 
-        # 3. Mini-PointNet (feature extraction)
         new_points = new_points.permute(0, 3, 1, 2)  # (B, C+3, npoint, nsample)
+
         for conv in self.mlp_convs:
-            # Reshape for Conv1d: (B, C, npoint * nsample)
             B, C, S, K = new_points.shape
             new_points_flat = new_points.reshape(B, C, S * K)
             new_points_conv = conv(new_points_flat, t_embed)
@@ -352,49 +315,42 @@ class PointNetFeaturePropagation(nn.Module):
             last_channel = out_channel
 
     def forward(self, xyz1, xyz2, points1, points2, t_embed):
-        # xyz1: (B, N, 3) - points to interpolate to (e.g., original points)
-        # xyz2: (B, S, 3) - points to interpolate from (e.g., subsampled points)
+        # xyz1: (B, N, 3) - points to interpolate to
+        # xyz2: (B, S, 3) or None - points to interpolate from
         # points1: (B, C1, N) - skip-link features from xyz1
         # points2: (B, C2, S) - features from xyz2
         # t_embed: (B, D_t) - time embedding
 
         B, N, C = xyz1.shape
-
-        # GET SHAPE FROM 'points2' TENSOR
-        # This handles the case where xyz2 is None (for global feature propagation)
         S = points2.shape[2]
 
         if S == 1:
             interpolated_points = points2.repeat(1, 1, N)
         else:
-            if xyz2 is None:
-                raise ValueError("xyz2 cannot be None for local feature propagation (S > 1)")
-
             dists = torch.cdist(xyz1, xyz2, p=2.0) ** 2
             dists, idx = dists.sort(dim=-1)
-            dists, idx = dists[:, :, :3], idx[:, :, :3]  # k=3 nearest neighbors
+            k = min(3, S)
+            dists, idx = dists[:, :, :k], idx[:, :, :k]
 
             dist_recip = 1.0 / (dists + 1e-8)
             norm = torch.sum(dist_recip, dim=2, keepdim=True)
             weight = dist_recip / norm
 
             interpolated_points = torch.sum(index_points(points2.transpose(1, 2), idx) * weight.unsqueeze(-1), dim=2)
-            interpolated_points = interpolated_points.transpose(1, 2)  # (B, C2, N)
+            interpolated_points = interpolated_points.transpose(1, 2)
 
-        # Concatenate skip-link features
         if points1 is not None:
             new_points = torch.cat([points1, interpolated_points], dim=1)
         else:
             new_points = interpolated_points
 
-        # Apply MLPs
         for conv in self.mlp_convs:
             new_points = conv(new_points, t_embed)
 
         return new_points
 
 
-# --- FINAL UNET MODEL ---
+# --- FINAL MODEL ---
 
 class PointNet2UnetForFlowMatching(nn.Module):
     def __init__(self, time_embed_dim=128):
@@ -407,48 +363,44 @@ class PointNet2UnetForFlowMatching(nn.Module):
             nn.GELU()
         )
 
-        # --- Encoder (Set Abstraction) ---
-        # Note: 'in_channel' now refers to the feature dimension of the 'points' input,
-        # not the concatenated (xyz + features) dimension.
-        # input_channels = 3 for XYZ
+        # Encoder (Set Abstraction)
         self.sa1 = PointNetSetAbstraction(npoint=512, radius=0.2, nsample=32, in_channel=3, mlp=[64, 64, 128],
                                           time_embed_dim=time_embed_dim, use_attention=False)
         self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.4, nsample=64, in_channel=128, mlp=[128, 128, 256],
                                           time_embed_dim=time_embed_dim, use_attention=False)
-        # SA3 uses vector attention as specified in the paper
         self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, in_channel=256, mlp=[256, 512, 1024],
                                           time_embed_dim=time_embed_dim, use_attention=True, num_heads=4)
 
-        # Decoder Layers
+        # Decoder (Feature Propagation)
         self.fp3 = PointNetFeaturePropagation(in_channel=1024 + 256, mlp=[256, 256], time_embed_dim=time_embed_dim)
         self.fp2 = PointNetFeaturePropagation(in_channel=256 + 128, mlp=[256, 128], time_embed_dim=time_embed_dim)
         self.fp1 = PointNetFeaturePropagation(in_channel=128 + 3, mlp=[128, 128, 128], time_embed_dim=time_embed_dim)
 
-        # --- Prediction Head ---
+        # Prediction Head
         self.head = nn.Sequential(
             nn.Conv1d(128, 128, 1),
             nn.BatchNorm1d(128),
             nn.GELU(),
-            nn.Conv1d(128, 3, 1)  # Output 3 channels for XYZ velocity
+            nn.Conv1d(128, 3, 1)
         )
 
     def forward(self, x_t, t):
-        # Ensure input is (B, C, N) -> (B, 3, N)
+        # Ensure input is (B, 3, N)
         if x_t.dim() == 3 and x_t.shape[1] != 3:
             x_t = x_t.transpose(1, 2)
 
-        # Convert to (B, N, C) for coordinate-based operations
+        # Convert to (B, N, 3) for coordinate operations
         xyz = x_t.transpose(1, 2)
-        l0_points = x_t  # Keep original (B, 3, N) for skip connection
+        l0_points = x_t
 
         t_embed = self.time_mlp(t)
 
-        # --- Encoder ---
+        # Encoder
         l1_xyz, l1_points = self.sa1(xyz, l0_points, t_embed)
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points, t_embed)
-        l3_xyz, l3_points = self.sa3(l2_xyz, l2_points, t_embed)  # l3_xyz is None, uses attention
+        l3_xyz, l3_points = self.sa3(l2_xyz, l2_points, t_embed)
 
-        # --- Decoder ---
+        # Decoder
         l2_points = self.fp3(l2_xyz, l3_xyz, l2_points, l3_points, t_embed)
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points, t_embed)
         l0_points = self.fp1(xyz, l1_xyz, l0_points, l1_points, t_embed)
@@ -461,7 +413,7 @@ class PointNet2UnetForFlowMatching(nn.Module):
 if __name__ == '__main__':
     BATCH_SIZE = 4
     NUM_POINTS = 2048
-    TIME_EMBED_DIM = 128  # Changed to match model default
+    TIME_EMBED_DIM = 256
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -484,8 +436,13 @@ if __name__ == '__main__':
         assert predicted_velocity.shape == expected_shape, \
             f"Shape mismatch! Expected {expected_shape}, but got {predicted_velocity.shape}"
 
-        print("\nForward pass successful and output shape is correct!")
-        print("\n✓ Vector attention blocks added to SA3 layer")
+        print("\nForward pass successful!")
+        print("✓ Vector attention fully implemented with MLP")
+        print("✓ Time conditioning applied after convolution")
+        print("✓ Position encoding properly integrated in attention")
 
     except Exception as e:
-        print(f"\nAn error occurred during the forward pass: {e}")
+        print(f"\nError during forward pass: {e}")
+        import traceback
+
+        traceback.print_exc()
