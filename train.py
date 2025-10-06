@@ -255,24 +255,27 @@ def train(args):
     print(f"Point cloud sizes (sample of {len(train_sizes)}): "
           f"min={min(train_sizes)}, max={max(train_sizes)}, mean={np.mean(train_sizes):.0f}")
 
+    # Only pin memory when using CUDA
+    pin_memory = device.type == 'cuda'
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=1,
         shuffle=True,
-        num_workers=args.num_workers,
+        num_workers=0,
         collate_fn=collate_fn,
         prefetch_factor=4,
-        pin_memory=True
+        pin_memory=pin_memory
     )
 
     val_loader = DataLoader(
         test_dataset,
         batch_size=1,
-        shuffle=True,
-        num_workers=args.num_workers,
+        shuffle=False,
+        num_workers=0,
         collate_fn=collate_fn,
         prefetch_factor=4,
-        pin_memory=True
+        pin_memory=pin_memory
     )
 
     # Initialize model
