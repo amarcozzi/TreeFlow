@@ -8,18 +8,35 @@ from torch.utils.data import Dataset
 
 
 class PointCloudDataset(Dataset):
-    def __init__(self, data_path: Path, split: str = "train", voxel_size: float = None, num_samples: int = None):
+    def __init__(
+            self,
+            data_path: Path,
+            split: str = "train",
+            voxel_size: float = None,
+            num_samples: int = None,
+            augment: bool = True,
+            sample_exponent: float = 0.5,
+            rotation_augment: bool = True
+    ):
         """
-        Dataset for loading point clouds without resampling or padding.
+        Dataset for loading point clouds with optional augmentation.
 
         Args:
             data_path: Path to FOR-species20K directory
             split: 'train' for dev set, 'test' for test set
             voxel_size: Optional voxel size in meters for downsampling (e.g., 0.1).
                        If None, no voxelization is performed.
+            num_samples: Limit number of files to load (for debugging)
+            augment: Whether to apply data augmentation (point sampling and rotation)
+            sample_exponent: Exponent for power law sampling (lower = more aggressive skew toward full count)
+                           0.5 = moderate skew, 0.3 = aggressive skew, 1.0 = uniform
+            rotation_augment: Whether to apply random rotation around Z-axis
         """
         self.data_path = data_path
         self.voxel_size = voxel_size
+        self.augment = augment and (split == "train")  # Only augment training data
+        self.sample_exponent = sample_exponent
+        self.rotation_augment = rotation_augment
 
         if split == "train":
             self.laz_directory = data_path / "dev"
@@ -36,6 +53,9 @@ class PointCloudDataset(Dataset):
         self.file_id_to_idx = {f.stem: i for i, f in enumerate(self.laz_files)}
 
         print(f"Found {len(self.laz_files)} files for '{split}' split in {self.laz_directory}")
+        if self.augment:
+            print(f"Augmentation enabled: point_sampling=True (power_law, exponent={sample_exponent}), "
+                  f"rotation={rotation_augment}")
 
         if len(self.laz_files) == 0:
             raise FileNotFoundError(f"No .laz files found in {self.laz_directory}")
@@ -68,6 +88,69 @@ class PointCloudDataset(Dataset):
 
         return voxel_centers.astype(np.float32)
 
+    def _sample_points(self, points):
+        """
+        Sample a subset of points using a power law distribution.
+        This creates a right-skewed distribution that favors sampling near the full point count.
+
+        The distribution is: ratio = uniform(0,1)^exponent
+        - exponent < 1: Right-skewed (concentrates near 1)
+        - exponent = 1: Uniform distribution
+        - exponent > 1: Left-skewed (concentrates near 0)
+
+        With exponent=0.5 (sqrt):
+          - 50% of samples will have >75% of points
+          - 75% of samples will have >56% of points
+          - 90% of samples will have >32% of points
+
+        Args:
+            points: Input points, shape (N, 3)
+
+        Returns:
+            sampled_points: Subset of points, shape (M, 3) where M <= N
+        """
+        n = len(points)
+        if n <= 1:
+            return points
+
+        # Sample from power law distribution
+        u = np.random.uniform(0, 1)
+        sample_ratio = u ** self.sample_exponent
+
+        # Ensure at least 1 point is sampled
+        num_to_sample = max(1, int(sample_ratio * n))
+
+        # Randomly select points
+        indices = np.random.choice(n, num_to_sample, replace=False)
+
+        return points[indices]
+
+    def _rotate_z(self, points):
+        """
+        Apply random rotation around Z-axis (vertical axis for trees).
+
+        Args:
+            points: Input points, shape (N, 3)
+
+        Returns:
+            rotated_points: Rotated points, shape (N, 3)
+        """
+        # Random angle in [0, 2π)
+        theta = np.random.uniform(0, 2 * np.pi)
+
+        # Rotation matrix around Z-axis
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+
+        rotation_matrix = np.array([
+            [cos_theta, -sin_theta, 0],
+            [sin_theta, cos_theta, 0],
+            [0, 0, 1]
+        ], dtype=np.float32)
+
+        # Apply rotation
+        return points @ rotation_matrix.T
+
     def __getitem__(self, idx):
         filepath = self.laz_files[idx]
         file_id = filepath.stem
@@ -87,12 +170,19 @@ class PointCloudDataset(Dataset):
 
         # Voxelize if requested
         if self.voxel_size is not None:
-            raw_points = points.copy()
             points = self._voxelize(points)
+
+        # Apply augmentation if enabled
+        if self.augment:
+            # Random point sampling with right-skewed distribution
+            points = self._sample_points(points)
+
+            # Random rotation around Z-axis
+            if self.rotation_augment:
+                points = self._rotate_z(points)
 
         return {
             'points': torch.from_numpy(points),
-            'raw_points': None if self.voxel_size is None else torch.from_numpy(raw_points),
             'file_id': file_id,
             'num_points': len(points)
         }
@@ -103,87 +193,82 @@ def collate_fn(batch):
     return batch  # Return list of dicts, each with variable-length tensors
 
 
-def visualize_voxelization(raw_points, voxelized_points, voxel_size, file_id):
+def visualize_augmentation(dataset, idx, num_samples=6):
     """
-    Generates a 3-panel plot to compare a raw point cloud with its voxelized version.
+    Visualize the effect of augmentation by showing multiple samples of the same point cloud.
+
+    Args:
+        dataset: PointCloudDataset with augmentation enabled
+        idx: Index of point cloud to visualize
+        num_samples: Number of augmented versions to show
     """
-    fig = plt.figure(figsize=(10, 7))
-    fig.suptitle(f"Voxelization Validation | File: {file_id} | Voxel Size: {voxel_size}m", fontsize=16)
+    fig = plt.figure(figsize=(15, 10))
+    fig.suptitle(f"Augmentation Examples - File: {dataset.laz_files[idx].stem}", fontsize=16)
 
-    # Use oblique view to show 3D structure
-    view_elev = 25  # Look down at 25 degrees
-    view_azim = 45  # Diagonal view
+    for i in range(num_samples):
+        sample = dataset[idx]
+        points = sample['points'].numpy()
+        num_pts = sample['num_points']
 
-    # --- Plot 1: Original Point Cloud ---
-    ax1 = fig.add_subplot(131, projection='3d')
-    ax1.scatter(raw_points[:, 0], raw_points[:, 1], raw_points[:, 2],
-                s=0.5, alpha=0.2, c=raw_points[:, 2], cmap='viridis')  # Smaller points, less alpha
-    ax1.set_title(f"Original ({len(raw_points)} points)")
-    ax1.set_xlabel("X")
-    ax1.set_ylabel("Y")
-    ax1.set_zlabel("Z")
-    ax1.view_init(elev=view_elev, azim=view_azim)  # Side view to see thinness
+        ax = fig.add_subplot(2, 3, i + 1, projection='3d')
+        ax.scatter(points[:, 0], points[:, 1], points[:, 2],
+                   c=points[:, 2], cmap='viridis', s=1, alpha=0.6)
+        ax.set_title(f"Sample {i + 1} ({num_pts} points)")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
 
-    # --- Plot 2: Voxelized Point Cloud ---
-    ax2 = fig.add_subplot(132, projection='3d')
-    ax2.scatter(voxelized_points[:, 0], voxelized_points[:, 1], voxelized_points[:, 2],
-                s=5, c='r', alpha=0.6)  # Reduced from s=15
-    ax2.set_title(f"Voxelized ({len(voxelized_points)} points)")
-    ax2.set_xlabel("X")
-    ax2.set_ylabel("Y")
-    ax2.set_zlabel("Z")
-    ax2.view_init(elev=view_elev, azim=view_azim)  # Same view
+        # Set equal aspect ratio
+        max_range = np.array([
+            points[:, 0].max() - points[:, 0].min(),
+            points[:, 1].max() - points[:, 1].min(),
+            points[:, 2].max() - points[:, 2].min()
+        ]).max() / 2.0
 
-    # --- Plot 3: Overlay ---
-    ax3 = fig.add_subplot(133, projection='3d')
-    ax3.scatter(raw_points[:, 0], raw_points[:, 1], raw_points[:, 2],
-                s=0.5, alpha=0.1, label='Original', c='blue')
-    ax3.scatter(voxelized_points[:, 0], voxelized_points[:, 1], voxelized_points[:, 2],
-                s=5, c='r', alpha=0.6, label='Voxelized')
-    ax3.set_title("Overlay")
-    ax3.set_xlabel("X")
-    ax3.set_ylabel("Y")
-    ax3.set_zlabel("Z")
-    ax3.legend()
-    ax3.view_init(elev=view_elev, azim=view_azim)  # Same view
+        mid_x = (points[:, 0].max() + points[:, 0].min()) * 0.5
+        mid_y = (points[:, 1].max() + points[:, 1].min()) * 0.5
+        mid_z = (points[:, 2].max() + points[:, 2].min()) * 0.5
 
-    # Use same axis limits for all plots
-    x_lim = (raw_points[:, 0].min(), raw_points[:, 0].max())
-    y_lim = (raw_points[:, 1].min(), raw_points[:, 1].max())
-    z_lim = (raw_points[:, 2].min(), raw_points[:, 2].max())
-
-    for ax in [ax1, ax2, ax3]:
-        ax.set_xlim(x_lim)
-        ax.set_ylim(y_lim)
-        ax.set_zlim(z_lim)
-        # Force equal aspect ratio to see true proportions
-        ax.set_box_aspect([x_lim[1]-x_lim[0], y_lim[1]-y_lim[0], z_lim[1]-z_lim[0]])
+        ax.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax.set_zlim(mid_z - max_range, mid_z + max_range)
 
     plt.tight_layout()
     plt.show()
 
+
 def main():
-    # Example usage
-    dataset = PointCloudDataset(data_path=Path("./FOR-species20K"), split="test", voxel_size=0.5)
+    # Example usage with augmentation
+    dataset = PointCloudDataset(
+        data_path=Path("./FOR-species20K"),
+        split="train",
+        voxel_size=0.1,
+        augment=True,
+        sample_exponent=0.5,
+        rotation_augment=True
+    )
     print(f"Dataset size: {len(dataset)}")
 
-    # Sample a random point cloud
-    file_id = "00085"
-    file_id = None
-    if file_id:
-        idx = dataset.file_id_to_idx.get(file_id)
-        sample = dataset[idx]
-    else:
-        random_idx = np.random.randint(len(dataset))
-        sample = dataset[random_idx]
-    print(f"Sampled file ID: {sample['file_id']}, Number of points: {sample['num_points']}")
-    visualize_voxelization(sample['raw_points'].numpy(), sample['points'].numpy(), dataset.voxel_size, sample['file_id'])
+    # Visualize augmentation on a sample
+    random_idx = np.random.randint(len(dataset))
+    visualize_augmentation(dataset, random_idx, num_samples=6)
 
-    # # Find the largest point cloud
-    # max_pts_idx = max(range(len(dataset)), key=lambda i: dataset[i]['num_points'])
-    # max_pts = dataset[max_pts_idx]['num_points']
-    # file_id = dataset[max_pts_idx]['file_id']
-    # print(f"Largest point cloud: {file_id} with {max_pts} points")
+    # Show distribution of sampled point counts
+    num_points_list = []
+    for _ in range(1000):
+        sample = dataset[random_idx]
+        num_points_list.append(sample['num_points'])
+
+    plt.figure(figsize=(10, 6))
+    plt.hist(num_points_list, bins=20, alpha=0.7, edgecolor='black')
+    plt.xlabel('Number of Points Sampled')
+    plt.ylabel('Frequency')
+    plt.title(f'Distribution of Sampled Points (Power Law, exponent={dataset.sample_exponent})')
+    plt.axvline(np.mean(num_points_list), color='r', linestyle='--', label=f'Mean: {np.mean(num_points_list):.0f}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
 
 if __name__ == "__main__":
     main()
