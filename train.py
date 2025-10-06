@@ -264,7 +264,6 @@ def train(args):
         shuffle=True,
         num_workers=0,
         collate_fn=collate_fn,
-        prefetch_factor=4,
         pin_memory=pin_memory
     )
 
@@ -274,7 +273,6 @@ def train(args):
         shuffle=False,
         num_workers=0,
         collate_fn=collate_fn,
-        prefetch_factor=4,
         pin_memory=pin_memory
     )
 
