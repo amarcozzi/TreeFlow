@@ -28,24 +28,24 @@ def compute_loss(model, x_1, flow_path, device):
     Returns:
         loss: scalar tensor
     """
-    batch_size = x_1.shape[0]
-    num_points = x_1.shape[2]
 
     # Sample time uniformly from [0, 1]
+    batch_size = x_1.shape[0]
     t = torch.rand(batch_size, device=device)
 
     # Sample source (noise) from standard normal
     x_0 = torch.randn_like(x_1)
 
-    # Get interpolated point and target velocity from flow path
-    t_expanded = t.view(-1, 1, 1).expand(batch_size, 3, num_points)
-    x_t, u_t, _, _ = flow_path.sample(t_expanded, x_0, x_1)
+    # Sample points along the flow path
+    path_sample = flow_path.sample(t=t, x_0=x_0, x_1=x_1)
+    x_t = path_sample.x_t
+    u_t = path_sample.dx_t
 
     # Predict velocity with model
-    v_t = model(x_t, t)
+    pred_u_t = model(x_t, t)
 
     # MSE loss between predicted and target velocity
-    loss = nn.functional.mse_loss(v_t, u_t)
+    loss = nn.functional.mse_loss(pred_u_t, u_t)
 
     return loss
 
@@ -165,11 +165,6 @@ def visualize_point_cloud(points, title="Point Cloud", save_path=None):
     fig = plt.figure(figsize=(10, 10))
     ax = fig.add_subplot(111, projection='3d')
 
-    # # Downsample for visualization if too many points
-    # if points.shape[0] > 2048:
-    #     indices = np.random.choice(points.shape[0], 2048, replace=False)
-    #     points = points[indices]
-
     ax.scatter(points[:, 0], points[:, 1], points[:, 2],
                c=points[:, 2], cmap='viridis', s=1, alpha=0.6)
 
@@ -216,11 +211,13 @@ def train(args):
     """Main training function."""
 
     # Setup directories
-    checkpoint_dir = Path(args.checkpoint_dir)
-    log_dir = Path(args.log_dir)
-    vis_dir = Path(args.vis_dir)
+    output_dir = Path('output_flow_matching')
+    output_dir.mkdir(exist_ok=True)
+    checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(exist_ok=True)
+    log_dir = output_dir / "logs"
     log_dir.mkdir(exist_ok=True)
+    vis_dir = output_dir / "visualizations"
     vis_dir.mkdir(exist_ok=True)
 
     device = torch.device('cuda' if torch.cuda.is_available() and not args.no_cuda else 'cpu')
@@ -282,20 +279,6 @@ def train(args):
 
     # Setup flow matching
     flow_path = CondOTProbPath()
-
-    # Visualize some real samples
-    print("\nVisualizing real samples...")
-    for i in range(min(4, len(test_dataset))):
-        sample = test_dataset[i]
-        points = sample['points'].numpy()
-        file_id = sample['file_id']
-        num_pts = sample['num_points']
-
-        visualize_point_cloud(
-            points,
-            title=f"Real Tree {file_id} ({num_pts} points)",
-            save_path=vis_dir / f'real_tree_{i}.png'
-        )
 
     # Training loop
     print("\nStarting training...")
@@ -415,12 +398,6 @@ def parse_args():
                         help='Point cloud sizes to generate during visualization')
 
     # Logging arguments
-    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints_flow_matching',
-                        help='Directory to save checkpoints')
-    parser.add_argument('--log_dir', type=str, default='logs',
-                        help='Directory to save logs')
-    parser.add_argument('--vis_dir', type=str, default='visualizations',
-                        help='Directory to save visualizations')
     parser.add_argument('--save_every', type=int, default=20,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--visualize_every', type=int, default=1,
