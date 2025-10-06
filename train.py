@@ -1,3 +1,9 @@
+"""
+train.py
+
+Train a Flow Matching model on tree point clouds from the FOR-species20K dataset.
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -58,7 +64,7 @@ def train_epoch(model, train_loader, optimizer, flow_path, device, accumulation_
 
     optimizer.zero_grad()
 
-    pbar = tqdm(train_loader, desc="Training")
+    pbar = tqdm(train_loader, desc="Training", dynamic_ncols=True, disable=False)
     for i, batch in enumerate(pbar):
         # batch is a list of dicts (length 1 since batch_size=1)
         sample = batch[0]
@@ -102,7 +108,7 @@ def validate(model, val_loader, flow_path, device):
     total_loss = 0.0
     num_batches = 0
 
-    for batch in tqdm(val_loader, desc="Validation"):
+    for batch in tqdm(val_loader, desc="Validation", dynamic_ncols=True, disable=False):
         sample = batch[0]
         points = sample['points']
 
@@ -247,7 +253,7 @@ def train(args):
     print(f"Test dataset: {len(test_dataset)} samples")
 
     # Check point cloud size distribution
-    train_sizes = [train_dataset[i]['num_points'] for i in range(min(100, len(train_dataset)))]
+    train_sizes = [train_dataset[i]['num_points'] for i in range(min(1000, len(train_dataset)))]
     print(f"Point cloud sizes (sample of {len(train_sizes)}): "
           f"min={min(train_sizes)}, max={max(train_sizes)}, mean={np.mean(train_sizes):.0f}")
 
@@ -264,9 +270,11 @@ def train(args):
     val_loader = DataLoader(
         test_dataset,
         batch_size=1,
-        shuffle=False,
+        shuffle=True,
         num_workers=args.num_workers,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        prefetch_factor=4,
+        pin_memory=True
     )
 
     # Initialize model
