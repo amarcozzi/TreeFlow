@@ -44,7 +44,7 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
         new_xyz (torch.Tensor): Query points (centroids), shape (B, S, 3).
 
     Returns:
-        torch.Tensor: Grouped indices, shape (B, S, nsample).
+        torch.Tensor: Grouped indices, shape (B, S, nsample) or (B, S, K) if fewer than nsample exist.
     """
     device = xyz.device
     B, N, C = xyz.shape
@@ -54,16 +54,33 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
     # Calculate squared distances between each query point and all points
     sqrdists = torch.cdist(new_xyz, xyz, p=2.0) ** 2
 
-    # Mask out points that are outside the radius
+    # Mask out points that are outside the radius by assigning sentinel N
     group_idx[sqrdists > radius ** 2] = N
 
-    # Sort by distance and take the first nsample points
-    group_idx = group_idx.sort(dim=-1)[0][:, :, :nsample]
+    # Sort by distance (align sort with distances to keep correspondence)
+    # We sort distances and use their indices as ordering over points
+    sorted_dists, order = sqrdists.sort(dim=-1)               # (B, S, N)
+    ordered_idx = torch.arange(N, device=device).view(1, 1, N).repeat(B, S, 1)
+    ordered_idx = ordered_idx.gather(-1, order)               # (B, S, N)
+    # Apply sentinel to positions outside radius
+    ordered_idx[sorted_dists > radius ** 2] = N
 
-    # In case a centroid has no neighbors, its first neighbor is itself
-    group_first = group_idx[:, :, 0].view(B, S, 1).repeat([1, 1, nsample])
+    # Take up to nsample neighbors
+    K = min(nsample, N)
+    group_idx = ordered_idx[:, :, :K]                          # (B, S, K)
+
+    # Handle empty neighbor sets: replace N with the first valid if any, else nearest neighbor
+    # If first is N (no valid within radius), fallback to nearest neighbor (from sorted_dists without radius filter)
+    empty_mask = group_idx[:, :, 0] == N                       # (B, S)
+    if empty_mask.any():
+        # nearest overall (distance sort without radius filter already computed in 'order')
+        nearest_overall = ordered_idx[:, :, 0]                 # (B, S)
+        group_idx[empty_mask] = nearest_overall[empty_mask].unsqueeze(-1).expand(-1, -1, group_idx.shape[-1])
+
+    # Now fill any remaining N positions (some positions beyond available neighbors) with the first element per group
+    first = group_idx[:, :, 0].unsqueeze(-1).expand(-1, -1, group_idx.shape[-1])  # (B, S, K)
     mask = group_idx == N
-    group_idx[mask] = group_first[mask]
+    group_idx[mask] = first[mask]
 
     return group_idx
 
