@@ -256,7 +256,9 @@ def train(args):
         batch_size=1,
         shuffle=True,
         num_workers=args.num_workers,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        prefetch_factor=4,
+        pin_memory=True
     )
 
     val_loader = DataLoader(
