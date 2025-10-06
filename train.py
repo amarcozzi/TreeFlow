@@ -427,7 +427,7 @@ def parse_args():
                         help='Minimum learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5,
                         help='Weight decay')
-    parser.add_argument('--batch_size', type=int, default=64,
+    parser.add_argument('--batch_size', type=int, default=8,
                         help='Batch size')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')
