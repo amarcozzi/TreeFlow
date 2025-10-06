@@ -200,12 +200,45 @@ class PointCloudDataset(Dataset):
         }
 
 
-def collate_fn(batch):
+def collate_to_batch_min(batch):
     """
-    Custom collate function for variable-length point clouds.
-    Returns list of dicts instead of batching.
+    Collate function that samples all point clouds to the minimum size in the batch.
+    This allows full batch parallelization while maintaining flexibility.
+
+    Args:
+        batch: List of samples from dataset
+
+    Returns:
+        dict with batched tensors
     """
-    return batch
+    # Find minimum number of points in this batch
+    min_points = min(sample['num_points'] for sample in batch)
+
+    points_list = []
+    file_ids = []
+
+    for sample in batch:
+        points = sample['points']  # (N, 3)
+        n = len(points)
+
+        # Downsample to min_points
+        if n > min_points:
+            indices = np.random.choice(n, min_points, replace=False)
+            points = points[indices]
+        # If n == min_points, use as-is
+
+        points_list.append(points)
+        file_ids.append(sample['file_id'])
+
+    # Stack into batch
+    points_batch = torch.from_numpy(np.stack(points_list, axis=0))  # (B, min_points, 3)
+    points_batch = points_batch.transpose(1, 2)  # (B, 3, min_points)
+
+    return {
+        'points': points_batch,
+        'file_ids': file_ids,
+        'num_points': min_points
+    }
 
 
 def visualize_sample(dataset, idx, save_path=None):

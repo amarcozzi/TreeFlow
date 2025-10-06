@@ -24,18 +24,18 @@ import argparse
 from datetime import datetime
 
 from model import PointNet2UnetForFlowMatching
-from dataset import PointCloudDataset, collate_fn
+from dataset import PointCloudDataset, collate_to_batch_min
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 
 
 def compute_loss(model, x_1, flow_path, device):
     """
-    Compute flow matching loss for a single point cloud.
+    Compute flow matching loss for a BATCH of point clouds.
 
     Args:
         model: Velocity prediction model
-        x_1: Target point cloud (1, 3, N)
+        x_1: Target point clouds (B, 3, N)
         flow_path: Flow matching path object
         device: torch device
 
@@ -63,7 +63,7 @@ def compute_loss(model, x_1, flow_path, device):
 
 
 def train_epoch(model, train_loader, optimizer, flow_path, device, epoch):
-    """Train for one epoch."""
+    """Train for one epoch with batched processing."""
     model.train()
     total_loss = 0.0
     num_batches = len(train_loader)
@@ -72,37 +72,37 @@ def train_epoch(model, train_loader, optimizer, flow_path, device, epoch):
 
     for batch_idx, batch in enumerate(pbar):
         optimizer.zero_grad()
-        batch_loss = 0.0
 
-        # Accumulate gradients over batch
-        for sample in batch:
-            points = sample['points']
-            points = torch.from_numpy(points).unsqueeze(0).transpose(1, 2).to(device)
+        # Get batched points - already sampled to same size
+        points = batch['points'].to(device)  # (B, 3, min_points)
 
-            loss = compute_loss(model, points, flow_path, device)
-            (loss / len(batch)).backward()
-
-            batch_loss += loss.item()
+        # Single forward pass for entire batch
+        loss = compute_loss(model, points, flow_path, device)
+        loss.backward()
 
         # Gradient clipping and optimization step
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        batch_loss /= len(batch)
-        total_loss += batch_loss
+        total_loss += loss.item()
 
         # Update progress bar
         pbar.set_postfix({
-            'loss': f'{batch_loss:.6f}',
-            'avg': f'{total_loss / (batch_idx + 1):.6f}'
+            'loss': f'{loss.item():.6f}',
+            'avg': f'{total_loss / (batch_idx + 1):.6f}',
+            'pts': batch['num_points']
         })
+
+        # Log first batch info
+        if batch_idx == 0:
+            print(f"\n  First batch: {batch['num_points']} points per sample")
 
     return total_loss / num_batches
 
 
 @torch.no_grad()
 def validate(model, val_loader, flow_path, device, epoch):
-    """Validate the model."""
+    """Validate the model with batched processing."""
     model.eval()
     total_loss = 0.0
     num_batches = len(val_loader)
@@ -110,21 +110,15 @@ def validate(model, val_loader, flow_path, device, epoch):
     pbar = tqdm(val_loader, desc=f"Epoch {epoch:3d} [Val]")
 
     for batch_idx, batch in enumerate(pbar):
-        batch_loss = 0.0
+        points = batch['points'].to(device)
 
-        for sample in batch:
-            points = sample['points']
-            points = torch.from_numpy(points).unsqueeze(0).transpose(1, 2).to(device)
-
-            loss = compute_loss(model, points, flow_path, device)
-            batch_loss += loss.item()
-
-        batch_loss /= len(batch)
-        total_loss += batch_loss
+        loss = compute_loss(model, points, flow_path, device)
+        total_loss += loss.item()
 
         pbar.set_postfix({
-            'loss': f'{batch_loss:.6f}',
-            'avg': f'{total_loss / (batch_idx + 1):.6f}'
+            'loss': f'{loss.item():.6f}',
+            'avg': f'{total_loss / (batch_idx + 1):.6f}',
+            'pts': batch['num_points']
         })
 
     return total_loss / num_batches
@@ -280,16 +274,16 @@ def train(args):
           f"min={min(sample_sizes)}, max={max(sample_sizes)}, "
           f"mean={np.mean(sample_sizes):.0f}\n")
 
-    # Create dataloaders
+    # Create dataloaders with new collate function
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        persistent_workers=args.num_workers > 0,
+        persistent_workers=False,
         prefetch_factor=4 if args.num_workers > 0 else None,
         pin_memory=True,
-        collate_fn=collate_fn,
+        collate_fn=collate_to_batch_min,
     )
 
     val_loader = DataLoader(
@@ -297,10 +291,10 @@ def train(args):
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        persistent_workers=args.num_workers > 0,
+        persistent_workers=False,
         prefetch_factor=4 if args.num_workers > 0 else None,
         pin_memory=True,
-        collate_fn=collate_fn,
+        collate_fn=collate_to_batch_min,
     )
 
     # Setup device
