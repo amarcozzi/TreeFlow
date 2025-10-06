@@ -74,7 +74,7 @@ def train_epoch(model, train_loader, optimizer, flow_path, device, batch_size):
         for sample in batch:
             points = sample['points']
 
-            points = points.unsqueeze(0).transpose(1, 2).to(device)
+            points = torch.from_numpy(points).unsqueeze(0).transpose(1, 2).to(device)
 
             loss = compute_loss(model, points, flow_path, device)
 
