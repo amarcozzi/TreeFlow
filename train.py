@@ -257,7 +257,7 @@ def train(args):
         shuffle=True,
         num_workers=args.num_workers,
         persistent_workers=args.num_workers > 0,
-        prefetch_factor=12,
+        prefetch_factor=args.num_workers - 1 if args.num_workers > 0 else None,
         pin_memory=True,
         collate_fn=collate_fn,
     )
@@ -384,7 +384,7 @@ def parse_args():
                         help='Minimum learning rate for scheduler')
     parser.add_argument('--weight_decay', type=float, default=1e-5,
                         help='Weight decay')
-    parser.add_argument('--batch_size', type=int, default=64,
+    parser.add_argument('--batch_size', type=int, default=8,
                         help='Number of samples to process before each optimizer step.')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')

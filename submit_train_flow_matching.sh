@@ -3,7 +3,7 @@
 #SBATCH --partition=gpu-a100
 #SBATCH --gres=gpu:a100:1
 #SBATCH --job-name="train_flow_matching"
-#SBATCH --cpus-per-task=36
+#SBATCH --cpus-per-task=48
 #SBATCH --time=2-0
 #SBATCH --output=log_train_flow_matching.out
 
@@ -13,4 +13,6 @@ source /project/umontana_fire_modeling/anthony.marcozzi/miniforge3/etc/profile.d
 conda activate canopy-flow
 
 python train.py \
-    --num_workers 24
+    --voxel_size=0.5 \
+    --batch_size=16 \
+    --num_workers=36
