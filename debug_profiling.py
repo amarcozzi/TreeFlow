@@ -149,7 +149,10 @@ def profile_full_training_step(data_path, device='cuda', batch_size=64):
         
         # Transfer to device
         device_start = time.time()
-        points = batch[i]['points'].to(device)
+        # Use a single sample from the batch list and add batch dimension
+        sample = batch[0]
+        points = sample['points'].to(device)           # (N, 3)
+        points = points.unsqueeze(0).transpose(1, 2)   # (1, 3, N)
         torch.cuda.synchronize()
         times['to_device'].append(time.time() - device_start)
         
@@ -157,8 +160,8 @@ def profile_full_training_step(data_path, device='cuda', batch_size=64):
         optimizer.zero_grad()
         forward_start = time.time()
         
-        batch_size_actual = points.shape[0]
-        t = torch.rand(batch_size_actual, device=device)
+        batch_size_actual = points.shape[0]  # 1
+        t = torch.rand(batch_size_actual, device=device)  # (1,)
         x_0 = torch.randn_like(points)
         path_sample = flow_path.sample(t=t, x_0=x_0, x_1=points)
         pred = model(path_sample.x_t, t)
@@ -182,7 +185,7 @@ def profile_full_training_step(data_path, device='cuda', batch_size=64):
         
         times['total'].append(time.time() - iter_start)
         
-        print(f"  Iteration {i+1}: {times['total'][-1]:.3f}s (pts={batch[i]['num_points']})")
+        print(f"  Iteration {i+1}: {times['total'][-1]:.3f}s (pts={sample['num_points']})")
     
     print("\n  Average times:")
     for key, values in times.items():
