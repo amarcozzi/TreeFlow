@@ -264,7 +264,7 @@ def train(args):
         shuffle=True,
         num_workers=args.num_workers,
         persistent_workers=args.num_workers > 0,
-        prefetch_factor=args.num_workers - 1 if args.num_workers > 0 else None,
+        prefetch_factor=args.num_workers if args.num_workers > 0 else None,
         pin_memory=True,
         collate_fn=collate_fn,
     )
@@ -402,7 +402,7 @@ def parse_args():
     parser.add_argument('--ode_method', type=str, default='dopri5',
                         choices=['dopri5', 'euler', 'midpoint', 'rk4'],
                         help='ODE solver method')
-    parser.add_argument('--sample_sizes', type=int, nargs='+', default=[100, 250, 500, 1000, 2000, 4000],
+    parser.add_argument('--sample_sizes', type=int, nargs='+', default=[200, 1000, 2000, 4000, 8000],
                         help='Point cloud sizes to generate during visualization')
 
     # Logging arguments

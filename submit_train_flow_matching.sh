@@ -18,7 +18,7 @@ srun python train.py \
     --preprocessed_version "voxel_0.1m" \
     --sample_exponent 0.3 \
     --rotation_augment \
-    --batch_size 8 \
+    --batch_size 32 \
     --num_workers 24 \
     --num_epochs 1000 \
     --lr 1e-4 \
