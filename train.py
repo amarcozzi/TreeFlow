@@ -237,6 +237,13 @@ def train(args):
         sample_exponent=args.sample_exponent,
         rotation_augment=args.rotation_augment
     )
+    print("Loaded training dataset\n"
+          f" - Number of samples: {len(train_dataset)}\n"
+          f" - Voxel size: {args.voxel_size}\n"
+          f" - Sample exponent: {args.sample_exponent}\n"
+          f" - Rotation augment: {args.rotation_augment}"
+          )
+
     # test_dataset = PointCloudDataset(
     #     Path(args.data_path),
     #     split='test',
