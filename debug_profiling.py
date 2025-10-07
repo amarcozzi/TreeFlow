@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from model import PointNet2UnetForFlowMatching
-from dataset import PointCloudDataset, collate_to_batch_min
+from dataset import PointCloudDataset, collate_fn
 from flow_matching.path import CondOTProbPath
 
 
@@ -23,7 +23,6 @@ def profile_data_loading(data_path, batch_size=64, num_batches=10):
         Path(data_path),
         split='train',
         voxel_size=0.1,
-        augment=True,
         sample_exponent=0.5,
         rotation_augment=True
     )
@@ -38,7 +37,7 @@ def profile_data_loading(data_path, batch_size=64, num_batches=10):
             persistent_workers=(num_workers > 0),
             prefetch_factor=4 if num_workers > 0 else None,
             pin_memory=True,
-            collate_fn=collate_to_batch_min,
+            collate_fn=collate_fn,
         )
         
         times = []
@@ -107,7 +106,6 @@ def profile_full_training_step(data_path, device='cuda', batch_size=64):
         Path(data_path),
         split='train',
         voxel_size=0.1,
-        augment=True,
         sample_exponent=0.5,
         rotation_augment=True
     )
@@ -120,7 +118,7 @@ def profile_full_training_step(data_path, device='cuda', batch_size=64):
         persistent_workers=True,
         prefetch_factor=4,
         pin_memory=True,
-        collate_fn=collate_to_batch_min,
+        collate_fn=collate_fn,
     )
     
     model = PointNet2UnetForFlowMatching(time_embed_dim=256).to(device)
