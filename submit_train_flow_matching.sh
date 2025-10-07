@@ -2,17 +2,26 @@
 #SBATCH --account=umontana_fire_modeling
 #SBATCH --partition=gpu-a100
 #SBATCH --gres=gpu:a100:1
-#SBATCH --job-name="train_flow_matching"
-#SBATCH --cpus-per-task=48
+#SBATCH --job-name="fm_train"
+#SBATCH --cpus-per-task=36
 #SBATCH --time=2-0
-#SBATCH --output=log_train_flow_matching.out
+#SBATCH --output=log_train.out
 
 module load cuda
 
 source /project/umontana_fire_modeling/anthony.marcozzi/miniforge3/etc/profile.d/conda.sh
 conda activate canopy-flow
 
-python train.py \
-    --voxel_size=0.1 \
-    --batch_size=16 \
-    --num_workers=36
+# Train with pre-voxelized data (much faster!)
+srun python train.py \
+    --data_path ./FOR-species20K \
+    --preprocessed_version voxel_0.1m \
+    --sample_exponent 0.3 \
+    --rotation_augment \
+    --batch_size 8 \
+    --num_workers 24 \
+    --num_epochs 1000 \
+    --lr 1e-4 \
+    --time_embed_dim 256 \
+    --visualize_every 5 \
+    --save_every 20

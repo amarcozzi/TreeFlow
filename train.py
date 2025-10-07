@@ -226,20 +226,20 @@ def train(args):
     vis_dir = output_dir / "visualizations"
     vis_dir.mkdir(exist_ok=True)
 
-    print(f"Voxel size: {args.voxel_size}")
+    print(f"Using preprocessed version: {args.preprocessed_version}")
 
     # Load datasets
     print("\nLoading datasets...")
     train_dataset = PointCloudDataset(
         Path(args.data_path),
         split='train',
-        voxel_size=args.voxel_size,
+        preprocessed_version=args.preprocessed_version,
         sample_exponent=args.sample_exponent,
         rotation_augment=args.rotation_augment
     )
     print("Loaded training dataset\n"
           f" - Number of samples: {len(train_dataset)}\n"
-          f" - Voxel size: {args.voxel_size}\n"
+          f" - Preprocessed version: {args.preprocessed_version}\n"
           f" - Sample exponent: {args.sample_exponent}\n"
           f" - Rotation augment: {args.rotation_augment}"
           )
@@ -247,7 +247,7 @@ def train(args):
     # test_dataset = PointCloudDataset(
     #     Path(args.data_path),
     #     split='test',
-    #     voxel_size=args.voxel_size,
+    #     preprocessed_version=args.preprocessed_version,
     # )
 
     print(f"Train dataset: {len(train_dataset)} samples")
@@ -369,10 +369,10 @@ def parse_args():
     # Data arguments
     parser.add_argument('--data_path', type=str, default='FOR-species20K',
                         help='Path to FOR-species20K dataset')
-    parser.add_argument('--voxel_size', type=float, default=0.1,
-                        help='Voxel size for downsampling (None for no downsampling)')
+    parser.add_argument('--preprocessed_version', type=str, default='voxel_0.1m',
+                        help='Which preprocessed version to use (e.g., "raw", "voxel_0.1m", "voxel_0.05m")')
 
-    # Augmentation arguments
+    # Augmentation arguments (voxelization is now done during preprocessing)
     parser.add_argument('--sample_exponent', type=float, default=None,
                         help='Exponent for power law point sampling (lower=more skew toward full count, 0.5=moderate, 0.3=aggressive)')
     parser.add_argument('--rotation_augment', action='store_true', default=False,

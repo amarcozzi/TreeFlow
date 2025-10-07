@@ -1,5 +1,6 @@
 """
 dataset.py - Point cloud dataset loader with optional augmentation
+(Voxelization is now done during preprocessing)
 """
 import torch
 import numpy as np
@@ -13,7 +14,7 @@ class PointCloudDataset(Dataset):
             self,
             data_path: Path,
             split: str = "train",
-            voxel_size: float = None,
+            preprocessed_version: str = "raw",
             num_samples: int = None,
             sample_exponent: float = None,
             rotation_augment: bool = False
@@ -24,24 +25,35 @@ class PointCloudDataset(Dataset):
         Args:
             data_path: Path to FOR-species20K directory
             split: 'train' for dev set, 'test' for test set
-            voxel_size: Optional voxel size in meters for downsampling (e.g., 0.1).
-                       If None, no voxelization is performed.
+            preprocessed_version: Which preprocessed version to use:
+                                 - "raw": Original points (no voxelization)
+                                 - "voxel_0.05m", "voxel_0.1m", etc.: Voxelized versions
             num_samples: Limit number of files to load (for debugging)
             sample_exponent: Exponent for power law sampling (lower = more aggressive skew toward full count)
                            0.5 = moderate skew, 0.3 = aggressive skew, 1.0 = uniform
+                           None = no sampling
             rotation_augment: Whether to apply random rotation around Z-axis
         """
         self.data_path = Path(data_path)
-        self.voxel_size = voxel_size
         self.sample_exponent = sample_exponent
         self.rotation_augment = rotation_augment
 
         if split == "train":
-            self.npy_directory = self.data_path / "npy" / "dev"
+            split_name = "dev"
         elif split == "test":
-            self.npy_directory = self.data_path / "npy" / "test"
+            split_name = "test"
         else:
             raise ValueError("Split must be 'train' or 'test'")
+
+        # Build path to preprocessed data
+        self.npy_directory = self.data_path / "npy" / preprocessed_version / split_name
+
+        if not self.npy_directory.exists():
+            raise FileNotFoundError(
+                f"Preprocessed data not found at {self.npy_directory}\n"
+                f"Please run preprocessing first with:\n"
+                f"  python preprocess_laz_to_npy.py --voxel_sizes <size> (or --include_raw for raw)"
+            )
 
         self.npy_files = sorted(self.npy_directory.glob("*.npy"))
 
@@ -54,33 +66,11 @@ class PointCloudDataset(Dataset):
         if len(self.npy_files) == 0:
             raise FileNotFoundError(f"No .npy files found in {self.npy_directory}")
 
+        print(f"Loaded dataset from: {self.npy_directory}")
+        print(f"  Number of files: {len(self.npy_files)}")
+
     def __len__(self):
         return len(self.npy_files)
-
-    def _voxelize(self, points):
-        """
-        Voxelize point cloud using numpy for efficiency.
-        Returns points at the centers of occupied voxels.
-
-        Args:
-            points: Input points, shape (N, 3)
-
-        Returns:
-            voxelized_points: Points at voxel centers, shape (M, 3) where M <= N
-        """
-        if self.voxel_size is None:
-            return points
-
-        # Compute voxel indices for each point
-        voxel_indices = np.floor(points / self.voxel_size).astype(np.int32)
-
-        # Find unique voxels (occupied voxels)
-        unique_voxels = np.unique(voxel_indices, axis=0)
-
-        # Compute voxel centers: center = (index + 0.5) * voxel_size
-        voxel_centers = (unique_voxels + 0.5) * self.voxel_size
-
-        return voxel_centers.astype(np.float32)
 
     def _sample_points(self, points):
         """
@@ -149,18 +139,14 @@ class PointCloudDataset(Dataset):
         filepath = self.npy_files[idx]
         file_id = filepath.stem
 
-        # Load from NPY
+        # Load from NPY (already preprocessed/voxelized if requested)
         points = np.load(filepath)
 
-        # Voxelize if requested
-        if self.voxel_size is not None:
-            points = self._voxelize(points)
-
-        # Random point sampling
+        # Random point sampling (fast operation, keep it online)
         if self.sample_exponent is not None:
             points = self._sample_points(points)
 
-        # Random rotation around Z-axis
+        # Random rotation around Z-axis (fast operation, keep it online)
         if self.rotation_augment:
             points = self._rotate_z(points)
 
@@ -225,7 +211,7 @@ def main():
     dataset = PointCloudDataset(
         data_path=Path("./FOR-species20K"),
         split="train",
-        voxel_size=0.1,
+        preprocessed_version="voxel_0.1m",  # Use pre-voxelized data
         sample_exponent=0.3,
         rotation_augment=True
     )
@@ -242,7 +228,7 @@ def main():
         num_points_list.append(sample['num_points'])
 
     plt.figure(figsize=(10, 6))
-    plt.hist(num_points_list, bins=20, alpha=0.7, edgecolodr='black')
+    plt.hist(num_points_list, bins=20, alpha=0.7, edgecolor='black')
     plt.xlabel('Number of Points Sampled')
     plt.ylabel('Frequency')
     plt.title(f'Distribution of Sampled Points (Power Law, exponent={dataset.sample_exponent})')
