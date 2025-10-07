@@ -165,7 +165,7 @@ class PointCloudDataset(Dataset):
             points = self._rotate_z(points)
 
         return {
-            'points': points,
+            'points': torch.from_numpy(points).float(),
             'file_id': file_id,
             'num_points': len(points)
         }
