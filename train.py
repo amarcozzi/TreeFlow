@@ -228,13 +228,6 @@ def train(args):
 
     print(f"Voxel size: {args.voxel_size}")
 
-    if args.no_rotation:
-        print("Rotation augmentation: Disabled")
-        rotation_augment = False
-    else:
-        print("Rotation augmentation: Enabled")
-        rotation_augment = True
-
     # Load datasets
     print("\nLoading datasets...")
     train_dataset = PointCloudDataset(
@@ -242,7 +235,7 @@ def train(args):
         split='train',
         voxel_size=args.voxel_size,
         sample_exponent=args.sample_exponent,
-        rotation_augment=rotation_augment
+        rotation_augment=args.rotation_augment
     )
     test_dataset = PointCloudDataset(
         Path(args.data_path),
@@ -375,10 +368,8 @@ def parse_args():
     # Augmentation arguments
     parser.add_argument('--sample_exponent', type=float, default=None,
                         help='Exponent for power law point sampling (lower=more skew toward full count, 0.5=moderate, 0.3=aggressive)')
-    parser.add_argument('--rotation_augment', action='store_true', default=True,
+    parser.add_argument('--rotation_augment', action='store_true', default=False,
                         help='Enable rotation augmentation')
-    parser.add_argument('--no_rotation', action='store_false', dest='rotation_augment',
-                        help='Disable rotation augmentation')
 
     # Model arguments
     parser.add_argument('--time_embed_dim', type=int, default=256,
