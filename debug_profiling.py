@@ -28,7 +28,7 @@ def profile_data_loading(data_path, batch_size=64, num_batches=10):
     )
     
     # Test different worker configurations
-    for num_workers in [0, 2, 4, 8]:
+    for num_workers in [0, 2, 4, 8, 16, 32, 64]:
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
@@ -149,7 +149,7 @@ def profile_full_training_step(data_path, device='cuda', batch_size=64):
         
         # Transfer to device
         device_start = time.time()
-        points = batch['points'].to(device)
+        points = batch[i]['points'].to(device)
         torch.cuda.synchronize()
         times['to_device'].append(time.time() - device_start)
         
@@ -182,7 +182,7 @@ def profile_full_training_step(data_path, device='cuda', batch_size=64):
         
         times['total'].append(time.time() - iter_start)
         
-        print(f"  Iteration {i+1}: {times['total'][-1]:.3f}s (pts={batch['num_points']})")
+        print(f"  Iteration {i+1}: {times['total'][-1]:.3f}s (pts={batch[i]['num_points']})")
     
     print("\n  Average times:")
     for key, values in times.items():
