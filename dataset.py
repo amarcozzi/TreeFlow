@@ -3,7 +3,7 @@ dataset.py - Point cloud dataset loader with optional augmentation
 """
 import matplotlib
 
-matplotlib.use('Agg')  # Non-interactive backend for multiprocessing safety
+# matplotlib.use('Agg')  # Non-interactive backend for multiprocessing safety
 
 import torch
 import laspy
@@ -20,8 +20,7 @@ class PointCloudDataset(Dataset):
             split: str = "train",
             voxel_size: float = None,
             num_samples: int = None,
-            augment: bool = True,
-            sample_exponent: float = 0.5,
+            sample_exponent: float = None,
             rotation_augment: bool = True
     ):
         """
@@ -33,23 +32,22 @@ class PointCloudDataset(Dataset):
             voxel_size: Optional voxel size in meters for downsampling (e.g., 0.1).
                        If None, no voxelization is performed.
             num_samples: Limit number of files to load (for debugging)
-            augment: Whether to apply data augmentation (point sampling and rotation)
             sample_exponent: Exponent for power law sampling (lower = more aggressive skew toward full count)
                            0.5 = moderate skew, 0.3 = aggressive skew, 1.0 = uniform
             rotation_augment: Whether to apply random rotation around Z-axis
         """
         self.data_path = data_path
         self.voxel_size = voxel_size
-        self.augment = augment and (split == "train")  # Only augment training data
         self.sample_exponent = sample_exponent
         self.rotation_augment = rotation_augment
 
         if split == "train":
-            self.laz_directory = data_path / "dev"
+            self.laz_directory = data_path / "laz" / "dev"
         elif split == "test":
-            self.laz_directory = data_path / "test"
+            self.laz_directory = data_path / "laz" / "test"
         else:
             raise ValueError("Split must be 'train' or 'test'")
+
 
         self.laz_files = list(self.laz_directory.glob("*.laz"))
 
@@ -57,11 +55,6 @@ class PointCloudDataset(Dataset):
             self.laz_files = self.laz_files[:num_samples]
 
         self.file_id_to_idx = {f.stem: i for i, f in enumerate(self.laz_files)}
-
-        print(f"Found {len(self.laz_files)} files for '{split}' split in {self.laz_directory}")
-        if self.augment:
-            print(f"Augmentation enabled: point_sampling=True (power_law, exponent={sample_exponent}), "
-                  f"rotation={rotation_augment}")
 
         if len(self.laz_files) == 0:
             raise FileNotFoundError(f"No .laz files found in {self.laz_directory}")
@@ -178,14 +171,14 @@ class PointCloudDataset(Dataset):
         if self.voxel_size is not None:
             points = self._voxelize(points)
 
-        # Apply augmentation if enabled
-        if self.augment:
-            # Random point sampling with right-skewed distribution
+
+        # Random point sampling
+        if self.sample_exponent is not None:
             points = self._sample_points(points)
 
-            # Random rotation around Z-axis
-            if self.rotation_augment:
-                points = self._rotate_z(points)
+        # Random rotation around Z-axis
+        if self.rotation_augment:
+            points = self._rotate_z(points)
 
         return {
             'points': points,
@@ -213,7 +206,7 @@ def visualize_augmentation(dataset, idx, num_samples=6):
 
     for i in range(num_samples):
         sample = dataset[idx]
-        points = sample['points'].numpy()
+        points = sample['points']
         num_pts = sample['num_points']
 
         ax = fig.add_subplot(2, 3, i + 1, projection='3d')
@@ -249,8 +242,7 @@ def main():
         data_path=Path("./FOR-species20K"),
         split="train",
         voxel_size=0.1,
-        augment=True,
-        sample_exponent=0.5,
+        sample_exponent=0.3,
         rotation_augment=True
     )
     print(f"Dataset size: {len(dataset)}")
