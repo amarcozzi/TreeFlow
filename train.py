@@ -237,14 +237,14 @@ def train(args):
         sample_exponent=args.sample_exponent,
         rotation_augment=args.rotation_augment
     )
-    test_dataset = PointCloudDataset(
-        Path(args.data_path),
-        split='test',
-        voxel_size=args.voxel_size,
-    )
+    # test_dataset = PointCloudDataset(
+    #     Path(args.data_path),
+    #     split='test',
+    #     voxel_size=args.voxel_size,
+    # )
 
     print(f"Train dataset: {len(train_dataset)} samples")
-    print(f"Test dataset: {len(test_dataset)} samples")
+    # print(f"Test dataset: {len(test_dataset)} samples")
 
     # Check point cloud size distribution
     train_sizes = [train_dataset[i]['num_points'] for i in range(min(100, len(train_dataset)))]
@@ -262,13 +262,13 @@ def train(args):
         collate_fn=collate_fn,
     )
 
-    val_loader = DataLoader(
-        test_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        pin_memory=True,
-        collate_fn=collate_fn,
-    )
+    # val_loader = DataLoader(
+    #     test_dataset,
+    #     batch_size=args.batch_size,
+    #     shuffle=True,
+    #     pin_memory=True,
+    #     collate_fn=collate_fn,
+    # )
 
     # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() and not args.no_cuda else 'cpu')
