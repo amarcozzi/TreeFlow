@@ -51,7 +51,7 @@ def profile_data_loading(data_path, batch_size=64, num_batches=10):
                 break
             batch_time = time.time()
             times.append(batch_time - start)
-            point_counts.append(batch['num_points'])
+            point_counts.append(batch[i]['num_points'])
             start = batch_time
         
         print(f"  Avg time per batch: {np.mean(times):.3f}s")
