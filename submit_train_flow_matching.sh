@@ -15,7 +15,7 @@ conda activate canopy-flow
 # Train with pre-voxelized data (much faster!)
 srun python train.py \
     --data_path ./FOR-species20K \
-    --preprocessed_version voxel_0.1m \
+    --preprocessed_version "raw" \
     --sample_exponent 0.3 \
     --rotation_augment \
     --batch_size 8 \
