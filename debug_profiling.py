@@ -28,7 +28,7 @@ def profile_data_loading(data_path, batch_size=64, num_batches=10):
     )
     
     # Test different worker configurations
-    for num_workers in [0, 2, 4, 8, 16, 32, 64]:
+    for num_workers in [0, 2, 4, 8, 16, 32]:
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
