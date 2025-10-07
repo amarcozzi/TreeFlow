@@ -227,7 +227,13 @@ def train(args):
     vis_dir.mkdir(exist_ok=True)
 
     print(f"Voxel size: {args.voxel_size}")
-    print(f"Augmentation: {args.augment}")
+
+    if args.no_rotation:
+        print("Rotation augmentation: Disabled")
+        rotation_augment = False
+    else:
+        print("Rotation augmentation: Enabled")
+        rotation_augment = True
 
     # Load datasets
     print("\nLoading datasets...")
@@ -236,7 +242,7 @@ def train(args):
         split='train',
         voxel_size=args.voxel_size,
         sample_exponent=args.sample_exponent,
-        rotation_augment=args.rotation_augment
+        rotation_augment=rotation_augment
     )
     test_dataset = PointCloudDataset(
         Path(args.data_path),
@@ -258,7 +264,7 @@ def train(args):
         shuffle=True,
         num_workers=args.num_workers,
         persistent_workers=args.num_workers > 0,
-        prefetch_factor=4,
+        prefetch_factor=12,
         pin_memory=True,
         collate_fn=collate_fn,
     )
@@ -267,9 +273,6 @@ def train(args):
         test_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=args.num_workers,
-        persistent_workers=args.num_workers > 0,
-        prefetch_factor=4,
         pin_memory=True,
         collate_fn=collate_fn,
     )
@@ -370,11 +373,7 @@ def parse_args():
                         help='Voxel size for downsampling (None for no downsampling)')
 
     # Augmentation arguments
-    parser.add_argument('--augment', action='store_true', default=True,
-                        help='Enable data augmentation')
-    parser.add_argument('--no_augment', action='store_false', dest='augment',
-                        help='Disable data augmentation')
-    parser.add_argument('--sample_exponent', type=float, default=0.5,
+    parser.add_argument('--sample_exponent', type=float, default=None,
                         help='Exponent for power law point sampling (lower=more skew toward full count, 0.5=moderate, 0.3=aggressive)')
     parser.add_argument('--rotation_augment', action='store_true', default=True,
                         help='Enable rotation augmentation')
