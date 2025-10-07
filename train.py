@@ -235,7 +235,6 @@ def train(args):
         Path(args.data_path),
         split='train',
         voxel_size=args.voxel_size,
-        augment=args.augment,
         sample_exponent=args.sample_exponent,
         rotation_augment=args.rotation_augment
     )
@@ -243,7 +242,6 @@ def train(args):
         Path(args.data_path),
         split='test',
         voxel_size=args.voxel_size,
-        augment=False  # No augmentation for test set
     )
 
     print(f"Train dataset: {len(train_dataset)} samples")

@@ -1,12 +1,7 @@
 """
 dataset.py - Point cloud dataset loader with optional augmentation
 """
-import matplotlib
-
-# matplotlib.use('Agg')  # Non-interactive backend for multiprocessing safety
-
 import torch
-import laspy
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -21,10 +16,10 @@ class PointCloudDataset(Dataset):
             voxel_size: float = None,
             num_samples: int = None,
             sample_exponent: float = None,
-            rotation_augment: bool = True
+            rotation_augment: bool = False
     ):
         """
-        Dataset for loading point clouds with optional augmentation.
+        Dataset for loading preprocessed point clouds (NPY format) with optional augmentation.
 
         Args:
             data_path: Path to FOR-species20K directory
@@ -36,31 +31,31 @@ class PointCloudDataset(Dataset):
                            0.5 = moderate skew, 0.3 = aggressive skew, 1.0 = uniform
             rotation_augment: Whether to apply random rotation around Z-axis
         """
-        self.data_path = data_path
+        self.data_path = Path(data_path)
         self.voxel_size = voxel_size
         self.sample_exponent = sample_exponent
         self.rotation_augment = rotation_augment
 
         if split == "train":
-            self.laz_directory = data_path / "laz" / "dev"
+            self.npy_directory = self.data_path / "npy" / "dev"
         elif split == "test":
-            self.laz_directory = data_path / "laz" / "test"
+            self.npy_directory = self.data_path / "npy" / "test"
         else:
             raise ValueError("Split must be 'train' or 'test'")
 
-
-        self.laz_files = list(self.laz_directory.glob("*.laz"))
+        self.npy_files = sorted(self.npy_directory.glob("*.npy"))
 
         if num_samples is not None:
-            self.laz_files = self.laz_files[:num_samples]
+            # Randomly select a subset of files
+            self.npy_files = list(np.random.choice(self.npy_files, num_samples, replace=False))
 
-        self.file_id_to_idx = {f.stem: i for i, f in enumerate(self.laz_files)}
+        self.file_id_to_idx = {f.stem: i for i, f in enumerate(self.npy_files)}
 
-        if len(self.laz_files) == 0:
-            raise FileNotFoundError(f"No .laz files found in {self.laz_directory}")
+        if len(self.npy_files) == 0:
+            raise FileNotFoundError(f"No .npy files found in {self.npy_directory}")
 
     def __len__(self):
-        return len(self.laz_files)
+        return len(self.npy_files)
 
     def _voxelize(self, points):
         """
@@ -151,26 +146,15 @@ class PointCloudDataset(Dataset):
         return points @ rotation_matrix.T
 
     def __getitem__(self, idx):
-        filepath = self.laz_files[idx]
+        filepath = self.npy_files[idx]
         file_id = filepath.stem
 
-        with laspy.open(filepath) as laz_file:
-            las_data = laz_file.read()
-            # Load XYZ coordinates - shape (N, 3)
-            points = np.array(las_data.xyz, dtype=np.float32)
-
-        # Center the point cloud at the origin
-        centroid_x = (points[:, 0].max() + points[:, 0].min()) / 2
-        centroid_y = (points[:, 1].max() + points[:, 1].min()) / 2
-        centroid_z = (points[:, 2].max() + points[:, 2].min()) / 2
-        points[:, 0] -= centroid_x
-        points[:, 1] -= centroid_y
-        points[:, 2] -= centroid_z
+        # Load from NPY
+        points = np.load(filepath)
 
         # Voxelize if requested
         if self.voxel_size is not None:
             points = self._voxelize(points)
-
 
         # Random point sampling
         if self.sample_exponent is not None:
@@ -202,7 +186,7 @@ def visualize_augmentation(dataset, idx, num_samples=6):
         num_samples: Number of augmented versions to show
     """
     fig = plt.figure(figsize=(15, 10))
-    fig.suptitle(f"Augmentation Examples - File: {dataset.laz_files[idx].stem}", fontsize=16)
+    fig.suptitle(f"Augmentation Examples - File: {dataset.npy_files[idx].stem}", fontsize=16)
 
     for i in range(num_samples):
         sample = dataset[idx]
@@ -237,7 +221,7 @@ def visualize_augmentation(dataset, idx, num_samples=6):
 
 
 def main():
-    # Example usage with augmentation
+    # Example usage with preprocessed NPY files
     dataset = PointCloudDataset(
         data_path=Path("./FOR-species20K"),
         split="train",
@@ -258,7 +242,7 @@ def main():
         num_points_list.append(sample['num_points'])
 
     plt.figure(figsize=(10, 6))
-    plt.hist(num_points_list, bins=20, alpha=0.7, edgecolor='black')
+    plt.hist(num_points_list, bins=20, alpha=0.7, edgecolodr='black')
     plt.xlabel('Number of Points Sampled')
     plt.ylabel('Frequency')
     plt.title(f'Distribution of Sampled Points (Power Law, exponent={dataset.sample_exponent})')
