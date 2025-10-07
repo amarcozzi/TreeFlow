@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --account=umontana_fire_modeling
-#SBATCH --partition=cpu
 #SBATCH --job-name="preprocess_trees"
 #SBATCH --cpus-per-task=40
 #SBATCH --time=4:00:00
