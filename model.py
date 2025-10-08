@@ -44,46 +44,37 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
         new_xyz (torch.Tensor): Query points (centroids), shape (B, S, 3).
 
     Returns:
-        torch.Tensor: Grouped indices, shape (B, S, nsample) or (B, S, K) if fewer than nsample exist.
+        torch.Tensor: Grouped indices, shape (B, S, nsample).
     """
     device = xyz.device
     B, N, C = xyz.shape
     _, S, _ = new_xyz.shape
-    group_idx = torch.arange(N, device=device).view(1, 1, N).repeat([B, S, 1])
 
     # Calculate squared distances between each query point and all points
-    sqrdists = torch.cdist(new_xyz, xyz, p=2.0) ** 2
+    sqrdists = torch.cdist(new_xyz, xyz, p=2.0) ** 2  # (B, S, N)
 
-    # Mask out points that are outside the radius by assigning sentinel N
-    group_idx[sqrdists > radius ** 2] = N
+    # Sort by distance to get nearest neighbors
+    sorted_dists, order = sqrdists.sort(dim=-1)  # Both (B, S, N)
 
-    # Sort by distance (align sort with distances to keep correspondence)
-    # We sort distances and use their indices as ordering over points
-    sorted_dists, order = sqrdists.sort(dim=-1)               # (B, S, N)
-    ordered_idx = torch.arange(N, device=device).view(1, 1, N).repeat(B, S, 1)
-    ordered_idx = ordered_idx.gather(-1, order)               # (B, S, N)
-    # Apply sentinel to positions outside radius
-    ordered_idx[sorted_dists > radius ** 2] = N
-
-    # Take up to nsample neighbors
+    # Determine K (number of neighbors to return)
     K = min(nsample, N)
-    group_idx = ordered_idx[:, :, :K]                          # (B, S, K)
 
-    # Handle empty neighbor sets: replace N with the first valid if any, else nearest neighbor
-    # If first is N (no valid within radius), fallback to nearest neighbor (from sorted_dists without radius filter)
-    empty_mask = group_idx[:, :, 0] == N                       # (B, S)
-    if empty_mask.any():
-        # nearest overall (distance sort without radius filter already computed in 'order')
-        nearest_overall = ordered_idx[:, :, 0]                 # (B, S)
-        group_idx[empty_mask] = nearest_overall[empty_mask].unsqueeze(-1).expand(-1, group_idx.shape[-1])
+    # Take K nearest neighbors
+    group_idx = order[:, :, :K]  # (B, S, K)
+    neighbor_dists = sorted_dists[:, :, :K]  # (B, S, K)
 
-    # Now fill any remaining N positions (some positions beyond available neighbors) with the first element per group
-    first = group_idx[:, :, 0].unsqueeze(-1).expand(-1, -1, group_idx.shape[-1])  # (B, S, K)
-    mask = group_idx == N
-    group_idx[mask] = first[mask]
+    # Check which neighbors are within radius
+    within_radius = neighbor_dists <= radius ** 2  # (B, S, K)
+
+    # For positions outside the radius, we'll use the nearest neighbor
+    # Get the nearest neighbor for each query point (always valid)
+    nearest_neighbor = order[:, :, 0:1]  # (B, S, 1)
+    nearest_neighbor_expanded = nearest_neighbor.expand(-1, -1, K)  # (B, S, K)
+
+    # Replace out-of-radius neighbors with the nearest neighbor
+    group_idx = torch.where(within_radius, group_idx, nearest_neighbor_expanded)
 
     return group_idx
-
 
 def index_points(points, idx):
     """
