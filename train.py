@@ -405,7 +405,7 @@ def parse_args():
     parser.add_argument('--ode_method', type=str, default='dopri5',
                         choices=['dopri5', 'euler', 'midpoint', 'rk4'],
                         help='ODE solver method')
-    parser.add_argument('--sample_sizes', type=int, nargs='+', default=[200, 1000, 2000, 4000, 8000],
+    parser.add_argument('--sample_sizes', type=int, nargs='+', default=[1000, 2000, 4000, 8000],
                         help='Point cloud sizes to generate during visualization')
 
     # Logging arguments
