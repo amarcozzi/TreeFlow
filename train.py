@@ -348,13 +348,16 @@ def train(args):
         if epoch % args.visualize_every == 0:
             print("Generating samples...")
             # Sample different sizes to see how model handles it
-            for i, num_pts in enumerate(args.sample_sizes):
+            pbar = tqdm(args.sample_sizes, desc="Sampling", dynamic_ncols=True)
+            for num_pts in pbar:
+                pbar.set_description(f"Sampling {num_pts} points")
                 generated = sample(model, num_pts, device, method=args.ode_method)
                 visualize_point_cloud(
                     generated,
                     title=f"Generated Tree (Epoch {epoch}, {num_pts} points)",
                     save_path=vis_dir / f'generated_epoch_{epoch}_size_{num_pts}.png'
                 )
+            pbar.close()
 
     print("\n" + "=" * 60)
     print("Training completed!")
