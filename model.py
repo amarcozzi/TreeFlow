@@ -75,7 +75,7 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
     if empty_mask.any():
         # nearest overall (distance sort without radius filter already computed in 'order')
         nearest_overall = ordered_idx[:, :, 0]                 # (B, S)
-        group_idx[empty_mask] = nearest_overall[empty_mask].unsqueeze(-1).expand(-1, -1, group_idx.shape[-1])
+        group_idx[empty_mask] = nearest_overall[empty_mask].unsqueeze(-1).expand(-1, group_idx.shape[-1])
 
     # Now fill any remaining N positions (some positions beyond available neighbors) with the first element per group
     first = group_idx[:, :, 0].unsqueeze(-1).expand(-1, -1, group_idx.shape[-1])  # (B, S, K)
