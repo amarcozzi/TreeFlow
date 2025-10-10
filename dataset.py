@@ -72,7 +72,7 @@ class PointCloudDataset(Dataset):
     def __len__(self):
         return len(self.npy_files)
 
-    def _sample_points(self, points):
+    def _sample_points(self, points, min_points=8):
         """
         Sample a subset of points using a power law distribution.
         This creates a right-skewed distribution that favors sampling near the full point count.
@@ -94,7 +94,7 @@ class PointCloudDataset(Dataset):
             sampled_points: Subset of points, shape (M, 3) where M <= N
         """
         n = len(points)
-        if n <= 1:
+        if n <= min_points:  # Don't sample if we have very few points
             return points
 
         # Sample from power law distribution
@@ -102,7 +102,7 @@ class PointCloudDataset(Dataset):
         sample_ratio = u ** self.sample_exponent
 
         # Ensure at least 8 points are sampled
-        num_to_sample = max(8, int(sample_ratio * n))
+        num_to_sample = max(min_points, int(sample_ratio * n))
 
         # Randomly select points
         indices = np.random.choice(n, num_to_sample, replace=False)
