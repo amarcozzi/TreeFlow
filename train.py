@@ -154,7 +154,7 @@ def sample(model, num_points, device, method='dopri5'):
 
     # 2. Call .sample() with the starting tensor and the method name.
     # The solver from your other project returns the final state directly, not the full trajectory.
-    num_steps = 1000
+    num_steps = 100
     x_final = solver.sample(x_init, method="euler", step_size=1.0 / num_steps)
     return x_final[0].T.cpu().numpy()  # (3, N) -> (N, 3)
 
@@ -348,7 +348,8 @@ def train(args):
         if epoch % args.visualize_every == 0:
             print("Generating samples...")
             # Sample different sizes to see how model handles it
-            pbar = tqdm(args.sample_sizes, desc="Sampling", dynamic_ncols=True)
+            sample_size = np.random.randint(100, 8000)
+            pbar = tqdm([sample_size], desc="Sampling", dynamic_ncols=True)
             for num_pts in pbar:
                 pbar.set_description(f"Sampling {num_pts} points")
                 generated = sample(model, num_pts, device, method=args.ode_method)
@@ -405,8 +406,8 @@ def parse_args():
     parser.add_argument('--ode_method', type=str, default='dopri5',
                         choices=['dopri5', 'euler', 'midpoint', 'rk4'],
                         help='ODE solver method')
-    parser.add_argument('--sample_sizes', type=int, nargs='+', default=[1000, 2000, 4000, 8000],
-                        help='Point cloud sizes to generate during visualization')
+    # parser.add_argument('--sample_sizes', type=int, nargs='+', default=[1000, 2000, 4000, 8000],
+    #                     help='Point cloud sizes to generate during visualization')
 
     # Logging arguments
     parser.add_argument('--save_every', type=int, default=20,
