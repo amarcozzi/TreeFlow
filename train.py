@@ -154,7 +154,7 @@ def sample(model, num_points, device, method='dopri5'):
 
     # 2. Call .sample() with the starting tensor and the method name.
     # The solver from your other project returns the final state directly, not the full trajectory.
-    x_final = solver.sample(x_init, method="euler", step_size=0.01)
+    x_final = solver.sample(x_init, method="euler", step_size=1e-6)
 
     return x_final[0].T.cpu().numpy()  # (3, N) -> (N, 3)
 
