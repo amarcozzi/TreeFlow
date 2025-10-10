@@ -161,42 +161,87 @@ def sample(model, num_points, device, method='dopri5'):
 
 def visualize_point_cloud(points, title="Point Cloud", save_path=None):
     """
-    Visualize a 3D point cloud.
+    Visualize a 3D point cloud with NaN/Inf filtering.
 
     Args:
-        points: (N, 3) numpy array
+        points: (N, 3) numpy array of points
         title: Plot title
         save_path: Path to save figure
     """
-    fig = plt.figure(figsize=(10, 10))
-    ax = fig.add_subplot(111, projection='3d')
+    if points is None:
+        print(f"Skipping visualization: {title} - No valid points")
+        return
 
-    ax.scatter(points[:, 0], points[:, 1], points[:, 2],
-               c=points[:, 2], cmap='viridis', s=1, alpha=0.6)
+    original_count = len(points)
 
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-    ax.set_title(title)
+    # Filter out NaN/Inf points
+    valid_mask = ~(np.isnan(points).any(axis=1) | np.isinf(points).any(axis=1))
+    points = points[valid_mask]
 
-    # Equal aspect ratio
-    max_range = np.array([
-        points[:, 0].max() - points[:, 0].min(),
-        points[:, 1].max() - points[:, 1].min(),
-        points[:, 2].max() - points[:, 2].min()
-    ]).max() / 2.0
+    filtered_count = original_count - len(points)
+    if filtered_count > 0:
+        print(f"{title}: Filtered out {filtered_count}/{original_count} points with NaN/Inf values")
 
-    mid_x = (points[:, 0].max() + points[:, 0].min()) * 0.5
-    mid_y = (points[:, 1].max() + points[:, 1].min()) * 0.5
-    mid_z = (points[:, 2].max() + points[:, 2].min()) * 0.5
+    # Check if we have enough valid points left
+    if len(points) < 10:
+        print(f"Skipping visualization: {title} - Too few valid points ({len(points)}/10 minimum)")
+        return
 
-    ax.set_xlim(mid_x - max_range, mid_x + max_range)
-    ax.set_ylim(mid_y - max_range, mid_y + max_range)
-    ax.set_zlim(mid_z - max_range, mid_z + max_range)
+    # Check if all points are identical (degenerate case)
+    if len(points) > 1:
+        point_range = points.max(axis=0) - points.min(axis=0)
+        if np.allclose(point_range, 0, atol=1e-6):
+            print(f"Skipping visualization: {title} - Degenerate point cloud (all points identical)")
+            return
 
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close()
+    try:
+        fig = plt.figure(figsize=(10, 10))
+        ax = fig.add_subplot(111, projection='3d')
+
+        ax.scatter(points[:, 0], points[:, 1], points[:, 2],
+                   c=points[:, 2], cmap='viridis', s=1, alpha=0.6)
+
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+
+        # Add filtered count to title if any were removed
+        if filtered_count > 0:
+            title_with_info = f"{title}\n({len(points)}/{original_count} valid points)"
+        else:
+            title_with_info = title
+        ax.set_title(title_with_info)
+
+        # Equal aspect ratio with safety checks
+        ranges = np.array([
+            points[:, 0].max() - points[:, 0].min(),
+            points[:, 1].max() - points[:, 1].min(),
+            points[:, 2].max() - points[:, 2].min()
+        ])
+
+        max_range = ranges.max() / 2.0
+
+        # Avoid zero range
+        if max_range < 1e-6:
+            max_range = 1.0
+
+        mid_x = (points[:, 0].max() + points[:, 0].min()) * 0.5
+        mid_y = (points[:, 1].max() + points[:, 1].min()) * 0.5
+        mid_z = (points[:, 2].max() + points[:, 2].min()) * 0.5
+
+        ax.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            if filtered_count == 0:
+                print(f"✓ Saved visualization: {save_path.name}")
+        plt.close()
+
+    except Exception as e:
+        print(f"Error during visualization of {title}: {e}")
+        plt.close('all')  # Clean up any partial plots
 
 
 def plot_losses(train_losses, val_losses, save_path):
