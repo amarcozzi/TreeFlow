@@ -420,6 +420,8 @@ def parse_args():
     parser.add_argument('--min_lr', type=float, default=1e-6)
     parser.add_argument('--weight_decay', type=float, default=1e-5)
     parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--batch_mode', type=str, default='accumulate',
+                        choices=['accumulate', 'sample_to_min'])
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--no_cuda', action='store_true')
 
