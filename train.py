@@ -375,9 +375,10 @@ def train(args):
         if epoch % args.visualize_every == 0:
             print("Generating samples...")
             # Sample different sizes to see how the model handles it
-            sample_size = np.random.randint(1000, 5000)
-            pbar = tqdm([sample_size], desc="Sampling", dynamic_ncols=True)
-            for num_pts in pbar:
+            # sample_size = np.random.randint(1000, 5000)
+            pbar = tqdm(total=args.num_visualizations, desc="Sampling", dynamic_ncols=True)
+            for _ in pbar:
+                num_pts = np.random.randint(4000, 25000)
                 pbar.set_description(f"Sampling {num_pts} points")
                 generated = sample(
                     model,
@@ -391,6 +392,8 @@ def train(args):
                     title=f"Generated Tree (Epoch {epoch}, {num_pts} points)",
                     save_path=vis_dir / f'generated_epoch_{epoch}_size_{num_pts}.png'
                 )
+                pbar.update(1)
+
             pbar.close()
 
     print("\n" + "=" * 60)
@@ -428,13 +431,14 @@ def parse_args():
     # Sampling arguments
     parser.add_argument('--ode_method', type=str, default='euler',
                         choices=['euler', 'midpoint', 'rk4', 'dopri5'])
-    parser.add_argument('--ode_steps', type=int, default=100,
+    parser.add_argument('--ode_steps', type=int, default=1000,
                         help='Number of ODE integration steps (step_size = 1.0/ode_steps)')
     parser.add_argument('--max_points', type=int, default=None)
 
     # Logging arguments
     parser.add_argument('--save_every', type=int, default=20)
     parser.add_argument('--visualize_every', type=int, default=10)
+    parser.add_argument('--num_visualizations', type=int, default=4,)
 
     return parser.parse_args()
 
