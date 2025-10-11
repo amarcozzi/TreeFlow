@@ -17,7 +17,8 @@ class PointCloudDataset(Dataset):
             preprocessed_version: str = "raw",
             num_samples: int = None,
             sample_exponent: float = None,
-            rotation_augment: bool = False
+            rotation_augment: bool = False,
+            max_points: int = None,
     ):
         """
         Dataset for loading preprocessed point clouds (NPY format) with optional augmentation.
@@ -37,6 +38,7 @@ class PointCloudDataset(Dataset):
         self.data_path = Path(data_path)
         self.sample_exponent = sample_exponent
         self.rotation_augment = rotation_augment
+        self.max_points = max_points
 
         if split == "train":
             split_name = "dev"
@@ -142,13 +144,18 @@ class PointCloudDataset(Dataset):
         # Load from NPY (already preprocessed/voxelized if requested)
         points = np.load(filepath)
 
-        # Random point sampling (fast operation, keep it online)
+        # Random point sampling
         if self.sample_exponent is not None:
             points = self._sample_points(points)
 
-        # Random rotation around Z-axis (fast operation, keep it online)
+        # Random rotation around Z-axis
         if self.rotation_augment:
             points = self._rotate_z(points)
+
+        # Sample to max_points if specified
+        if self.max_points is not None and len(points) > self.max_points:
+            indices = np.random.choice(len(points), self.max_points, replace=False)
+            points = points[indices]
 
         return {
             'points': torch.from_numpy(points).float(),
@@ -160,6 +167,53 @@ class PointCloudDataset(Dataset):
 def collate_fn(batch):
     """Custom collate function to handle variable-length point clouds."""
     return batch  # Return list of dicts, each with variable-length tensors
+
+
+def collate_fn_batched(batch):
+    """
+    Custom collate function that samples all point clouds to the minimum size in the batch.
+    This allows proper batching for faster training, at the cost of variable resolution.
+
+    Args:
+        batch: List of dicts, each containing 'points' (N_i, 3), 'file_id', 'num_points'
+
+    Returns:
+        dict with:
+            'points': (B, N_min, 3) tensor - all point clouds sampled to minimum size
+            'file_ids': list of file IDs
+            'original_num_points': list of original point counts
+            'sampled_num_points': minimum number of points (same for all)
+    """
+    # Find minimum number of points in this batch
+    min_points = min(sample['num_points'] for sample in batch)
+
+    # Sample each point cloud to min_points
+    sampled_points = []
+    file_ids = []
+    original_num_points = []
+
+    for sample in batch:
+        points = sample['points']  # (N, 3)
+        num_points = sample['num_points']
+
+        if num_points > min_points:
+            # Randomly sample min_points from this point cloud
+            indices = torch.randperm(num_points)[:min_points]
+            points = points[indices]
+
+        sampled_points.append(points)
+        file_ids.append(sample['file_id'])
+        original_num_points.append(num_points)
+
+    # Stack into a batch tensor
+    batched_points = torch.stack(sampled_points, dim=0)  # (B, N_min, 3)
+
+    return {
+        'points': batched_points,
+        'file_ids': file_ids,
+        'original_num_points': original_num_points,
+        'sampled_num_points': min_points
+    }
 
 
 def visualize_augmentation(dataset, idx, num_samples=6):

@@ -9,6 +9,13 @@ import argparse
 import multiprocessing as mp
 from functools import partial
 
+MIN_POINTS = {
+    "raw": 1000,
+    0.05: 1000,
+    0.1: 1000,
+    0.2: 500,
+}
+
 
 def voxelize_points(points, voxel_size):
     """
@@ -76,10 +83,15 @@ def process_single_file(laz_path, output_dir, voxel_size=None):
         if voxel_size is not None:
             points = voxelize_points(points, voxel_size)
 
+        # Ensure minimum points
+        min_points = MIN_POINTS.get(voxel_size, 1000)
+        if len(points) < min_points:
+            return file_id, num_points_original, len(points), False
+
         # Save as NPY (uncompressed for speed)
         np.save(output_path, points)
 
-        return (file_id, num_points_original, len(points), True)
+        return file_id, num_points_original, len(points), True
 
     except Exception as e:
         print(f"Error processing {laz_path.name}: {e}")
