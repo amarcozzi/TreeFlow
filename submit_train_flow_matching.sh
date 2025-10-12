@@ -22,4 +22,5 @@ srun python train.py \
     --lr 1e-4 \
     --time_embed_dim 256 \
     --visualize_every 10 \
-    --save_every 20
+    --save_every 20 \
+    --no_amp
