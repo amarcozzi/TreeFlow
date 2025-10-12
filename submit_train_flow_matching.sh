@@ -16,7 +16,7 @@ srun python train.py \
     --data_path ./FOR-species20K \
     --preprocessed_version "voxel_0.1m" \
     --batch_size 8 \
-    --batch_mode accumulate \
+    --batch_mode sample_to_min \
     --num_workers 24 \
     --num_epochs 1000 \
     --lr 1e-4 \
