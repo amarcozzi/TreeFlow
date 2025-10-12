@@ -372,21 +372,83 @@ class PointNet2UnetForFlowMatching(nn.Module):
         )
 
         # Encoder (Set Abstraction)
-        self.sa1 = PointNetSetAbstraction(npoint=512, radius=0.2, nsample=32, in_channel=3, mlp=[64, 64, 128],
-                                          time_embed_dim=time_embed_dim, use_attention=False)
-        self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.4, nsample=64, in_channel=128, mlp=[128, 128, 256],
-                                          time_embed_dim=time_embed_dim, use_attention=False)
-        self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, in_channel=256, mlp=[256, 512, 1024],
-                                          time_embed_dim=time_embed_dim, use_attention=True, num_heads=4)
+        # With unit cube normalization, radii are meaningful relative to tree size
+        # Radius 0.15 = fine details (leaves, small branches)
+        # Radius 0.3 = medium scale (branch junctions)
+        # Radius 0.6 = large scale (trunk, overall structure)
 
-        # Decoder (Feature Propagation)
-        self.fp3 = PointNetFeaturePropagation(in_channel=1024 + 256, mlp=[256, 256], time_embed_dim=time_embed_dim)
-        self.fp2 = PointNetFeaturePropagation(in_channel=256 + 128, mlp=[256, 128], time_embed_dim=time_embed_dim)
-        self.fp1 = PointNetFeaturePropagation(in_channel=128 + 3, mlp=[128, 128, 128], time_embed_dim=time_embed_dim)
+        self.sa1 = PointNetSetAbstraction(
+            npoint=4096,
+            radius=0.15,
+            nsample=32,
+            in_channel=3,
+            mlp=[128, 128, 256],
+            time_embed_dim=time_embed_dim,
+            use_attention=False
+        )
+
+        self.sa2 = PointNetSetAbstraction(
+            npoint=2048,
+            radius=0.3,
+            nsample=64,
+            in_channel=256,
+            mlp=[256, 256, 512],
+            time_embed_dim=time_embed_dim,
+            use_attention=False
+        )
+
+        self.sa3 = PointNetSetAbstraction(
+            npoint=1024,
+            radius=0.6,
+            nsample=64,
+            in_channel=512,
+            mlp=[512, 512, 1024],
+            time_embed_dim=time_embed_dim,
+            use_attention=False
+        )
+
+        self.sa4 = PointNetSetAbstraction(
+            npoint=None,  # Global aggregation layer
+            radius=None,
+            nsample=None,
+            in_channel=1024,
+            mlp=[1024, 1024, 2048],
+            time_embed_dim=time_embed_dim,
+            use_attention=True,
+            num_heads=4
+        )
+
+        # Decoder (Feature Propagation) - UPDATED
+        self.fp4 = PointNetFeaturePropagation(
+            in_channel=2048 + 1024,
+            mlp=[1024, 1024],
+            time_embed_dim=time_embed_dim
+        )
+
+        self.fp3 = PointNetFeaturePropagation(
+            in_channel=1024 + 512,
+            mlp=[512, 512],
+            time_embed_dim=time_embed_dim
+        )
+
+        self.fp2 = PointNetFeaturePropagation(
+            in_channel=512 + 256,
+            mlp=[512, 256],
+            time_embed_dim=time_embed_dim
+        )
+
+        self.fp1 = PointNetFeaturePropagation(
+            in_channel=256 + 3,
+            mlp=[256, 256, 256],
+            time_embed_dim=time_embed_dim
+        )
 
         # Prediction Head
         self.head = nn.Sequential(
-            nn.Conv1d(128, 128, 1),
+            nn.Conv1d(256, 256, 1),
+            nn.BatchNorm1d(256),
+            nn.GELU(),
+            nn.Conv1d(256, 128, 1),
             nn.BatchNorm1d(128),
             nn.GELU(),
             nn.Conv1d(128, 3, 1)
@@ -407,8 +469,10 @@ class PointNet2UnetForFlowMatching(nn.Module):
         l1_xyz, l1_points = self.sa1(xyz, l0_points, t_embed)
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points, t_embed)
         l3_xyz, l3_points = self.sa3(l2_xyz, l2_points, t_embed)
+        l4_xyz, l4_points = self.sa4(l3_xyz, l3_points, t_embed)
 
         # Decoder
+        l3_points = self.fp4(l3_xyz, l4_xyz, l3_points, l4_points, t_embed)
         l2_points = self.fp3(l2_xyz, l3_xyz, l2_points, l3_points, t_embed)
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points, t_embed)
         l0_points = self.fp1(xyz, l1_xyz, l0_points, l1_points, t_embed)

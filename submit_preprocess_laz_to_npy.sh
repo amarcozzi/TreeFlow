@@ -20,7 +20,7 @@ python preprocess_laz_to_npy.py \
     --output_path ./FOR-species20K/npy \
     --include_raw \
     --voxel_sizes 0.05 0.1 0.2 \
+    --normalize \
     --splits train test \
     --num_workers 40 \
-    --verify \
-    --verify_dir voxel_0.1m
+    --verify

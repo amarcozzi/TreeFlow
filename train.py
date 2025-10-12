@@ -103,7 +103,7 @@ def train_epoch(model, train_loader, optimizer, flow_path, device, batch_mode):
 @torch.no_grad()
 def sample(model, num_points, device, method='euler', num_steps=100):
     """
-    Generate a point cloud using ODE integration.
+    Generate a point cloud using ODE integration. The initial noise is scaled to match the normalized range.
 
     Args:
         model: The velocity prediction model
@@ -117,8 +117,9 @@ def sample(model, num_points, device, method='euler', num_steps=100):
     """
     model.eval()
 
-    # Start from noise
-    x_init = torch.randn(1, 3, num_points, device=device)
+    # Start from noise - scale to reasonable range for normalized data
+    # Using std ~ 0.5 keeps most points within [-1.5, 1.5] initially
+    x_init = torch.randn(1, 3, num_points, device=device) * 0.5
 
     # Define the ODE function
     def ode_fn(t, x):
