@@ -378,7 +378,7 @@ class PointNet2UnetForFlowMatching(nn.Module):
         # Radius 0.6 = large scale (trunk, overall structure)
 
         self.sa1 = PointNetSetAbstraction(
-            npoint=4096,
+            npoint=2048,
             radius=0.15,
             nsample=32,
             in_channel=3,
@@ -388,7 +388,7 @@ class PointNet2UnetForFlowMatching(nn.Module):
         )
 
         self.sa2 = PointNetSetAbstraction(
-            npoint=2048,
+            npoint=1024,
             radius=0.3,
             nsample=64,
             in_channel=256,
@@ -398,7 +398,7 @@ class PointNet2UnetForFlowMatching(nn.Module):
         )
 
         self.sa3 = PointNetSetAbstraction(
-            npoint=1024,
+            npoint=512,
             radius=0.6,
             nsample=64,
             in_channel=512,
@@ -418,7 +418,7 @@ class PointNet2UnetForFlowMatching(nn.Module):
             num_heads=4
         )
 
-        # Decoder (Feature Propagation) - UPDATED
+        # Decoder (Feature Propagation)
         self.fp4 = PointNetFeaturePropagation(
             in_channel=2048 + 1024,
             mlp=[1024, 1024],
