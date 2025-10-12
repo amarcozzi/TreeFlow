@@ -372,17 +372,12 @@ class PointNet2UnetForFlowMatching(nn.Module):
         )
 
         # Encoder (Set Abstraction)
-        # With unit cube normalization, radii are meaningful relative to tree size
-        # Radius 0.15 = fine details (leaves, small branches)
-        # Radius 0.3 = medium scale (branch junctions)
-        # Radius 0.6 = large scale (trunk, overall structure)
-
         self.sa1 = PointNetSetAbstraction(
             npoint=2048,
             radius=0.15,
             nsample=32,
             in_channel=3,
-            mlp=[128, 128, 256],
+            mlp=[64, 64, 128],
             time_embed_dim=time_embed_dim,
             use_attention=False
         )
@@ -391,8 +386,8 @@ class PointNet2UnetForFlowMatching(nn.Module):
             npoint=1024,
             radius=0.3,
             nsample=64,
-            in_channel=256,
-            mlp=[256, 256, 512],
+            in_channel=128,
+            mlp=[128, 128, 256],
             time_embed_dim=time_embed_dim,
             use_attention=False
         )
@@ -401,18 +396,18 @@ class PointNet2UnetForFlowMatching(nn.Module):
             npoint=512,
             radius=0.6,
             nsample=64,
-            in_channel=512,
-            mlp=[512, 512, 1024],
+            in_channel=256,
+            mlp=[256, 256, 512],
             time_embed_dim=time_embed_dim,
             use_attention=False
         )
 
         self.sa4 = PointNetSetAbstraction(
-            npoint=None,  # Global aggregation layer
+            npoint=None,
             radius=None,
             nsample=None,
-            in_channel=1024,
-            mlp=[1024, 1024, 2048],
+            in_channel=512,
+            mlp=[512, 512, 1024],
             time_embed_dim=time_embed_dim,
             use_attention=True,
             num_heads=4
@@ -420,38 +415,38 @@ class PointNet2UnetForFlowMatching(nn.Module):
 
         # Decoder (Feature Propagation)
         self.fp4 = PointNetFeaturePropagation(
-            in_channel=2048 + 1024,
-            mlp=[1024, 1024],
-            time_embed_dim=time_embed_dim
-        )
-
-        self.fp3 = PointNetFeaturePropagation(
             in_channel=1024 + 512,
             mlp=[512, 512],
             time_embed_dim=time_embed_dim
         )
 
-        self.fp2 = PointNetFeaturePropagation(
+        self.fp3 = PointNetFeaturePropagation(
             in_channel=512 + 256,
-            mlp=[512, 256],
+            mlp=[256, 256],
+            time_embed_dim=time_embed_dim
+        )
+
+        self.fp2 = PointNetFeaturePropagation(
+            in_channel=256 + 128,
+            mlp=[256, 128],
             time_embed_dim=time_embed_dim
         )
 
         self.fp1 = PointNetFeaturePropagation(
-            in_channel=256 + 3,
-            mlp=[256, 256, 256],
+            in_channel=128 + 3,
+            mlp=[128, 128, 128],
             time_embed_dim=time_embed_dim
         )
 
         # Prediction Head
         self.head = nn.Sequential(
-            nn.Conv1d(256, 256, 1),
-            nn.BatchNorm1d(256),
-            nn.GELU(),
-            nn.Conv1d(256, 128, 1),
+            nn.Conv1d(128, 128, 1),
             nn.BatchNorm1d(128),
             nn.GELU(),
-            nn.Conv1d(128, 3, 1)
+            nn.Conv1d(128, 64, 1),
+            nn.BatchNorm1d(64),
+            nn.GELU(),
+            nn.Conv1d(64, 3, 1)
         )
 
     def forward(self, x_t, t):
