@@ -11,7 +11,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
@@ -41,14 +40,11 @@ def compute_loss(model, x_1, flow_path, device):
     return loss
 
 
-def train_epoch(model, train_loader, optimizer, flow_path, device, batch_mode, use_amp=True):
-    """Train for one epoch with optional mixed precision."""
+def train_epoch(model, train_loader, optimizer, flow_path, device, batch_mode):
+    """Train for one epoch."""
     model.train()
     total_loss = 0.0
     num_samples = 0
-
-    # Initialize gradient scaler for mixed precision
-    scaler = GradScaler(enabled=use_amp)
 
     pbar = tqdm(total=len(train_loader), desc="Training", dynamic_ncols=True)
 
@@ -61,19 +57,15 @@ def train_epoch(model, train_loader, optimizer, flow_path, device, batch_mode, u
                 points = sample['points']
                 points = points.unsqueeze(0).transpose(1, 2).to(device)
 
-                # Use autocast for forward pass
-                with autocast(enabled=use_amp):
-                    loss = compute_loss(model, points, flow_path, device)
+                loss = compute_loss(model, points, flow_path, device)
 
-                    # Check for NaN loss during training
-                    if torch.isnan(loss) or torch.isinf(loss):
-                        print(f"\nWarning: NaN/Inf loss detected, skipping batch")
-                        continue
+                # Check for NaN loss during training
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"\nWarning: NaN/Inf loss detected, skipping batch")
+                    continue
 
-                    normalized_loss = loss / len(batch)
-
-                # Backward with scaling
-                scaler.scale(normalized_loss).backward()
+                normalized_loss = loss / len(batch)
+                normalized_loss.backward()
 
                 total_loss += loss.item()
                 num_samples += 1
@@ -83,27 +75,21 @@ def train_epoch(model, train_loader, optimizer, flow_path, device, batch_mode, u
             points = batch['points'].to(device)  # (B, N_min, 3)
             points = points.transpose(1, 2)  # (B, 3, N_min)
 
-            with autocast(enabled=use_amp):
-                loss = compute_loss(model, points, flow_path, device)
+            loss = compute_loss(model, points, flow_path, device)
 
-                # Check for NaN loss during training
-                if torch.isnan(loss) or torch.isinf(loss):
-                    print(f"\nWarning: NaN/Inf loss detected, skipping batch")
-                    pbar.update(1)
-                    continue
+            # Check for NaN loss during training
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"\nWarning: NaN/Inf loss detected, skipping batch")
+                pbar.update(1)
+                continue
 
-            scaler.scale(loss).backward()
+            loss.backward()
 
-            total_loss += loss.item() * points.shape[0]
+            total_loss += loss.item() * points.shape[0]  # Scale by batch size
             num_samples += points.shape[0]
 
-        # Gradient clipping with unscaling
-        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-        # Optimizer step with scaler
-        scaler.step(optimizer)
-        scaler.update()
+        optimizer.step()
 
         pbar.update(1)
         if num_samples > 0:
@@ -117,7 +103,7 @@ def train_epoch(model, train_loader, optimizer, flow_path, device, batch_mode, u
 @torch.no_grad()
 def sample(model, num_points, device, method='euler', num_steps=100):
     """
-    Generate a point cloud using ODE integration. The initial noise is scaled to match the normalized range.
+    Generate a point cloud using ODE integration.
 
     Args:
         model: The velocity prediction model
@@ -354,7 +340,7 @@ def train(args):
         print(f"{'=' * 60}")
 
         # Train
-        train_loss = train_epoch(model, train_loader, optimizer, flow_path, device, args.batch_mode, args.use_amp)
+        train_loss = train_epoch(model, train_loader, optimizer, flow_path, device, args.batch_mode)
         train_losses.append(train_loss)
         print(f"Train Loss: {train_loss:.6f}")
 
@@ -442,12 +428,6 @@ def parse_args():
                         choices=['accumulate', 'sample_to_min'])
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--no_cuda', action='store_true')
-
-    # Add mixed precision argument
-    parser.add_argument('--use_amp', action='store_true', default=True,
-                        help='Use automatic mixed precision training (saves ~50%% memory)')
-    parser.add_argument('--no_amp', dest='use_amp', action='store_false',
-                        help='Disable mixed precision')
 
     # Sampling arguments
     parser.add_argument('--ode_method', type=str, default='euler',

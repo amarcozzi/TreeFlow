@@ -372,65 +372,24 @@ class PointNet2UnetForFlowMatching(nn.Module):
         )
 
         # Encoder (Set Abstraction)
-        self.sa1 = PointNetSetAbstraction(
-            npoint=1024,
-            radius=0.2,
-            nsample=32,
-            in_channel=3,
-            mlp=[64, 64, 128],
-            time_embed_dim=time_embed_dim,
-            use_attention=False
-        )
-
-        self.sa2 = PointNetSetAbstraction(
-            npoint=512,
-            radius=0.4,
-            nsample=64,
-            in_channel=128,
-            mlp=[128, 128, 256],
-            time_embed_dim=time_embed_dim,
-            use_attention=False
-        )
-
-        self.sa3 = PointNetSetAbstraction(
-            npoint=None,
-            radius=None,
-            nsample=None,
-            in_channel=256,
-            mlp=[256, 512, 1024],
-            time_embed_dim=time_embed_dim,
-            use_attention=True,
-            num_heads=4
-        )
+        self.sa1 = PointNetSetAbstraction(npoint=512, radius=0.2, nsample=32, in_channel=3, mlp=[64, 64, 128],
+                                          time_embed_dim=time_embed_dim, use_attention=False)
+        self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.4, nsample=64, in_channel=128, mlp=[128, 128, 256],
+                                          time_embed_dim=time_embed_dim, use_attention=False)
+        self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, in_channel=256, mlp=[256, 512, 1024],
+                                          time_embed_dim=time_embed_dim, use_attention=True, num_heads=4)
 
         # Decoder (Feature Propagation)
-        self.fp3 = PointNetFeaturePropagation(
-            in_channel=1024 + 256,
-            mlp=[256, 256],
-            time_embed_dim=time_embed_dim
-        )
-
-        self.fp2 = PointNetFeaturePropagation(
-            in_channel=256 + 128,
-            mlp=[256, 128],
-            time_embed_dim=time_embed_dim
-        )
-
-        self.fp1 = PointNetFeaturePropagation(
-            in_channel=128 + 3,
-            mlp=[128, 128, 128],
-            time_embed_dim=time_embed_dim
-        )
+        self.fp3 = PointNetFeaturePropagation(in_channel=1024 + 256, mlp=[256, 256], time_embed_dim=time_embed_dim)
+        self.fp2 = PointNetFeaturePropagation(in_channel=256 + 128, mlp=[256, 128], time_embed_dim=time_embed_dim)
+        self.fp1 = PointNetFeaturePropagation(in_channel=128 + 3, mlp=[128, 128, 128], time_embed_dim=time_embed_dim)
 
         # Prediction Head
         self.head = nn.Sequential(
             nn.Conv1d(128, 128, 1),
             nn.BatchNorm1d(128),
             nn.GELU(),
-            nn.Conv1d(128, 64, 1),
-            nn.BatchNorm1d(64),
-            nn.GELU(),
-            nn.Conv1d(64, 3, 1)
+            nn.Conv1d(128, 3, 1)
         )
 
     def forward(self, x_t, t):

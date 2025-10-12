@@ -145,7 +145,7 @@ class PointCloudDataset(Dataset):
         # Load from NPY (already preprocessed/voxelized/normalized)
         points = np.load(filepath)
 
-        # Random point sampling (power law distribution)
+        # Random point sampling
         if self.sample_exponent is not None:
             points = self._sample_points(points)
 
@@ -153,7 +153,7 @@ class PointCloudDataset(Dataset):
         if self.rotation_augment:
             points = self._rotate_z(points)
 
-        # Sample to max_points if specified (uniform sampling)
+        # Sample to max_points if specified
         if self.max_points is not None and len(points) > self.max_points:
             indices = np.random.choice(len(points), self.max_points, replace=False)
             points = points[indices]
@@ -262,10 +262,11 @@ def visualize_augmentation(dataset, idx, num_samples=6):
 
 
 def main():
+    # Example usage with preprocessed NPY files
     dataset = PointCloudDataset(
         data_path=Path("./FOR-species20K"),
         split="train",
-        preprocessed_version="raw",
+        preprocessed_version="voxel_0.1m",
         sample_exponent=0.3,
         rotation_augment=True,
     )
