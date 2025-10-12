@@ -3,7 +3,7 @@
 #SBATCH --partition=gpu-a100
 #SBATCH --gres=gpu:a100:1
 #SBATCH --job-name="fm_train"
-#SBATCH --cpus-per-task=12
+#SBATCH --cpus-per-task=36
 #SBATCH --time=2-0
 #SBATCH --output=log_train.out
 
@@ -18,7 +18,7 @@ srun python train.py \
     --batch_size 8 \
     --batch_mode sample_to_min \
     --rotation_augment \
-    --num_workers 8 \
+    --num_workers 24 \
     --num_epochs 1000 \
     --lr 1e-4 \
     --time_embed_dim 256 \
