@@ -14,7 +14,7 @@ conda activate canopy-flow
 
 srun python train.py \
     --data_path ./FOR-species20K \
-    --preprocessed_version "voxel_0.05m" \
+    --preprocessed_version "voxel_0.1m" \
     --batch_size 8 \
     --batch_mode sample_to_min \
     --rotation_augment \
