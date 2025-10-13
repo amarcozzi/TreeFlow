@@ -23,3 +23,4 @@ srun python train.py \
     --time_embed_dim 256 \
     --visualize_every 10 \
     --save_every 20 \
+    --ode_method "dopri5"

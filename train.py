@@ -269,7 +269,7 @@ def train(args):
     print("\nLoading datasets...")
     train_dataset = PointCloudDataset(
         Path(args.data_path),
-        split='train',
+        split='mixed',
         preprocessed_version=args.preprocessed_version,
         sample_exponent=args.sample_exponent,
         rotation_augment=args.rotation_augment,
@@ -379,20 +379,23 @@ def train(args):
             # sample_size = np.random.randint(1000, 5000)
             pbar = tqdm(total=args.num_visualizations, desc="Sampling", dynamic_ncols=True)
             for _ in range(args.num_visualizations):
-                num_pts = np.random.randint(1000, 45000)
-                pbar.set_description(f"Sampling {num_pts} points")
-                generated = sample(
-                    model,
-                    num_pts,
-                    device,
-                    method=args.ode_method,
-                    num_steps=args.ode_steps
-                )
-                visualize_point_cloud(
-                    generated,
-                    title=f"Generated Tree (Epoch {epoch}, {num_pts} points)",
-                    save_path=vis_dir / f'generated_epoch_{epoch}_size_{num_pts}.png'
-                )
+                try:
+                    num_pts = np.random.randint(1000, 45000)
+                    pbar.set_description(f"Sampling {num_pts} points")
+                    generated = sample(
+                        model,
+                        num_pts,
+                        device,
+                        method=args.ode_method,
+                        num_steps=args.ode_steps
+                    )
+                    visualize_point_cloud(
+                        generated,
+                        title=f"Generated Tree (Epoch {epoch}, {num_pts} points)",
+                        save_path=vis_dir / f'generated_epoch_{epoch}_size_{num_pts}.png'
+                    )
+                except Exception as e:
+                    print(f"Error during sampling/visualization: {e}")
                 pbar.update(1)
 
             pbar.close()
@@ -430,9 +433,9 @@ def parse_args():
     parser.add_argument('--no_cuda', action='store_true')
 
     # Sampling arguments
-    parser.add_argument('--ode_method', type=str, default='euler',
+    parser.add_argument('--ode_method', type=str, default='dopri5',
                         choices=['euler', 'midpoint', 'rk4', 'dopri5'])
-    parser.add_argument('--ode_steps', type=int, default=1000,
+    parser.add_argument('--ode_steps', type=int, default=None,
                         help='Number of ODE integration steps (step_size = 1.0/ode_steps)')
     parser.add_argument('--max_points', type=int, default=None)
 

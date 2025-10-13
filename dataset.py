@@ -25,7 +25,7 @@ class PointCloudDataset(Dataset):
 
         Args:
             data_path: Path to FOR-species20K directory
-            split: 'train' for dev set, 'test' for test set
+            split: 'train' for dev set, 'test' for test set, or 'mixed' for both combined.
             preprocessed_version: Which preprocessed version to use:
                                  - "raw": Original points (no voxelization)
                                  - "voxel_0.05m", "voxel_0.1m", etc.: Voxelized versions
@@ -41,24 +41,33 @@ class PointCloudDataset(Dataset):
         self.rotation_augment = rotation_augment
         self.max_points = max_points
 
+        # Determine which directories to load from based on the split
         if split == "train":
-            split_name = "dev"
+            split_dirs = [self.data_path / "npy" / preprocessed_version / "dev"]
         elif split == "test":
-            split_name = "test"
+            split_dirs = [self.data_path / "npy" / preprocessed_version / "test"]
+        elif split == "mixed":
+            dev_dir = self.data_path / "npy" / preprocessed_version / "dev"
+            test_dir = self.data_path / "npy" / preprocessed_version / "test"
+            split_dirs = [dev_dir, test_dir]
         else:
-            raise ValueError("Split must be 'train' or 'test'")
+            raise ValueError("Split must be 'train', 'test', or 'mixed'")
 
-        # Build path to preprocessed data
-        self.npy_directory = self.data_path / "npy" / preprocessed_version / split_name
+        # Load file paths from all specified directories
+        self.npy_files = []
+        print(f"Loading dataset for split: '{split}'")
+        for directory in split_dirs:
+            if not directory.exists():
+                raise FileNotFoundError(
+                    f"Preprocessed data not found at {directory}\n"
+                    f"Please run preprocessing first with:\n"
+                    f"  python preprocess_laz_to_npy.py --normalize --voxel_sizes <size> (or --include_raw)"
+                )
+            print(f"  - Scanning directory: {directory}")
+            self.npy_files.extend(directory.glob("*.npy"))
 
-        if not self.npy_directory.exists():
-            raise FileNotFoundError(
-                f"Preprocessed data not found at {self.npy_directory}\n"
-                f"Please run preprocessing first with:\n"
-                f"  python preprocess_laz_to_npy.py --normalize --voxel_sizes <size> (or --include_raw)"
-            )
-
-        self.npy_files = sorted(self.npy_directory.glob("*.npy"))
+        # Sort the combined list for deterministic behavior
+        self.npy_files = sorted(self.npy_files)
 
         if num_samples is not None:
             # Randomly select a subset of files
@@ -67,10 +76,9 @@ class PointCloudDataset(Dataset):
         self.file_id_to_idx = {f.stem: i for i, f in enumerate(self.npy_files)}
 
         if len(self.npy_files) == 0:
-            raise FileNotFoundError(f"No .npy files found in {self.npy_directory}")
+            raise FileNotFoundError(f"No .npy files found in the specified directories: {split_dirs}")
 
-        print(f"Loaded dataset from: {self.npy_directory}")
-        print(f"  Number of files: {len(self.npy_files)}")
+        print(f"  Total number of files found: {len(self.npy_files)}")
 
     def __len__(self):
         return len(self.npy_files)
@@ -265,7 +273,7 @@ def main():
     # Example usage with preprocessed NPY files
     dataset = PointCloudDataset(
         data_path=Path("./FOR-species20K"),
-        split="train",
+        split="mixed",
         preprocessed_version="voxel_0.1m",
         sample_exponent=0.3,
         rotation_augment=True,
