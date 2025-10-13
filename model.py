@@ -137,12 +137,12 @@ class ConditionalConv1d(nn.Module):
         # x: (B, C_in, N)
         # t_embed: (B, D_t)
         x = self.conv(x)
-        x = self.norm(x)
 
-        # Add time conditioning after convolution
+        # Add time conditioning BEFORE normalization
         t_embed = self.time_mlp(t_embed).unsqueeze(-1)  # (B, C_out, 1)
         x = x + t_embed
 
+        x = self.norm(x)
         x = self.activation(x)
         return x
 
