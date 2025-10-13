@@ -22,6 +22,6 @@ srun python train.py \
     --num_epochs 1000 \
     --lr 1e-4 \
     --time_embed_dim 256 \
-    --visualize_every 10 \
-    --save_every 20 \
+    --visualize_every 50 \
+    --save_every 50 \
     --ode_method "dopri5"
