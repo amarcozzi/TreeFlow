@@ -379,7 +379,7 @@ def train(args):
             pbar = tqdm(total=args.num_visualizations, desc="Sampling", dynamic_ncols=True)
             for _ in range(args.num_visualizations):
                 try:
-                    num_pts = np.random.randint(1000, 45000)
+                    num_pts = np.random.randint(2500, 25000)
                     pbar.set_description(f"Sampling {num_pts} points")
                     generated = sample(
                         model,
