@@ -448,6 +448,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.ode_method in ["dopri5"] and args.ode_steps is not None:
+        print(f"Warning: ode_steps is ignored when using adaptive solver '{args.ode_method}'")
+        args.ode_steps = None
     train(args)
 
 
