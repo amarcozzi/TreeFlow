@@ -8,9 +8,10 @@ from tqdm import tqdm
 import argparse
 import multiprocessing as mp
 from functools import partial
+import json
 
 MIN_POINTS = {
-    "raw": 10000,
+    None: 10000,
     0.05: 5000,
     0.1: 2500,
     0.2: 1000,
@@ -243,18 +244,35 @@ def preprocess_dataset(
                 ))
 
             # Collect statistics
-            successful = sum(1 for _, _, _, success, _ in results if success)
-            total_points_original = sum(n for _, n, _, success, _ in results if success and n is not None)
-            total_points_final = sum(n for _, _, n, success, _ in results if success)
+            successful_results = [r for r in results if r[3]]
+            successful = len(successful_results)
+            total_points_original = sum(n for _, n, _, _, _ in successful_results if n is not None)
+            final_points_counts = [n for _, _, n, _, _ in successful_results]
+            total_points_final = sum(final_points_counts)
 
             # Collect normalization stats from a few samples
-            sample_stats = [s for _, _, _, success, s in results[:5] if success and s is not None]
+            sample_stats = [s for _, _, _, _, s in successful_results[:5] if s is not None]
 
             # Handle case where we skipped already-processed files
-            if total_points_original == 0:
+            if total_points_original == 0 and successful > 0:
                 reduction_pct = None
             else:
                 reduction_pct = (total_points_final / total_points_original * 100) if total_points_original > 0 else 0
+
+            # Calculate point distribution stats
+            point_dist_stats = {}
+            if successful > 0:
+                points_arr = np.array(final_points_counts)
+                p25, p75 = np.percentile(points_arr, [25, 75])
+                point_dist_stats = {
+                    'mean': points_arr.mean(),
+                    'median': np.median(points_arr),
+                    'std_dev': points_arr.std(),
+                    'min': points_arr.min(),
+                    'max': points_arr.max(),
+                    '25th_percentile': p25,
+                    '75th_percentile': p75,
+                }
 
             stats[split] = {
                 'total_files': len(laz_files),
@@ -262,8 +280,8 @@ def preprocess_dataset(
                 'failed': len(laz_files) - successful,
                 'total_points_original': total_points_original if total_points_original > 0 else "N/A (already processed)",
                 'total_points_final': total_points_final,
-                'avg_points_final': total_points_final / successful if successful > 0 else 0,
                 'reduction_pct': f"{reduction_pct:.1f}%" if reduction_pct is not None else "N/A",
+                'point_count_distribution': {k: int(v) for k, v in point_dist_stats.items()},
                 'sample_stats': sample_stats
             }
 
@@ -272,7 +290,15 @@ def preprocess_dataset(
             if total_points_original > 0:
                 print(f"  Total points (original): {total_points_original:,}")
             print(f"  Total points (final): {total_points_final:,}")
-            print(f"  Average points per file: {stats[split]['avg_points_final']:.0f}")
+            if successful > 0:
+                dist = stats[split]['point_count_distribution']
+                print(f"  Point Count Distribution (final):")
+                print(f"    Mean: {dist['mean']:,}")
+                print(f"    Median: {dist['median']:,}")
+                print(f"    Std Dev: {dist['std_dev']:,}")
+                print(f"    Min: {dist['min']:,} | Max: {dist['max']:,}")
+                print(f"    25%-75%: [{dist['25th_percentile']:,} - {dist['75th_percentile']:,}]")
+
             if reduction_pct is not None:
                 print(f"  Point reduction: {reduction_pct:.1f}% retained")
 
@@ -300,26 +326,28 @@ def preprocess_dataset(
             for split, split_stats in stats.items():
                 f.write(f"{split.upper()} Split:\n")
                 for key, value in split_stats.items():
-                    if key != 'sample_stats':  # Skip detailed stats in text file
+                    if key == 'point_count_distribution':
+                        f.write(f"  {key}:\n")
+                        for stat_name, stat_val in value.items():
+                            f.write(f"    {stat_name}: {stat_val:,}\n")
+                    elif key != 'sample_stats':  # Skip detailed stats in text file
                         f.write(f"  {key}: {value}\n")
                 f.write("\n")
 
         print(f"\nMetadata saved to {metadata_path}")
 
     # Save global summary
-    summary_path = output_base_path / "preprocessing_summary.txt"
+    summary_path = output_base_path / "preprocessing_summary.json"
     with open(summary_path, 'w') as f:
-        f.write("LAZ to NPY Preprocessing - Global Summary\n")
-        f.write(f"Normalized to unit cube: {normalize}\n")
-        f.write("="*80 + "\n\n")
-        for voxel_name, stats in all_stats.items():
-            f.write(f"{voxel_name}:\n")
-            for split, split_stats in stats.items():
-                f.write(f"  {split}:\n")
-                for key, value in split_stats.items():
-                    if key != 'sample_stats':
-                        f.write(f"    {key}: {value}\n")
-            f.write("\n")
+        # A custom JSON encoder could handle numpy types, but this is simpler
+        def default_serializer(o):
+            if isinstance(o, (np.int64, np.int32)):
+                return int(o)
+            if isinstance(o, (np.float64, np.float32)):
+                return float(o)
+            raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+        json.dump(all_stats, f, indent=2, default=default_serializer)
+
 
     print(f"\n{'='*80}")
     print("Preprocessing complete!")
@@ -329,9 +357,9 @@ def preprocess_dataset(
     print(f"\nDirectory structure:")
     for voxel_size in voxel_sizes:
         if voxel_size is None:
-            voxel_dir_name = "raw_normalized" if normalize else "raw"
+            voxel_dir_name = "raw"
         else:
-            voxel_dir_name = f"voxel_{voxel_size}m_normalized" if normalize else f"voxel_{voxel_size}m"
+            voxel_dir_name = f"voxel_{voxel_size}m"
         print(f"  {output_base_path / voxel_dir_name}/")
         for split in splits:
             split_name = "dev" if split == "train" else "test"
@@ -340,7 +368,7 @@ def preprocess_dataset(
     return all_stats
 
 
-def verify_preprocessing(data_path, output_path, voxel_dir="raw_normalized", num_samples=5):
+def verify_preprocessing(data_path, output_path, voxel_dir="raw", num_samples=5):
     """
     Verify that preprocessing worked correctly by comparing a few samples.
 
@@ -481,9 +509,11 @@ def main():
     if args.voxel_sizes is not None:
         voxel_sizes_to_process.extend(args.voxel_sizes)
 
-    if len(voxel_sizes_to_process) == 0:
-        print("Error: Must specify at least one of --include_raw or --voxel_sizes")
-        return
+    if not voxel_sizes_to_process:
+        # Default to raw if nothing is specified
+        print("No voxel sizes specified. Defaulting to --include_raw.")
+        voxel_sizes_to_process.append(None)
+
 
     # Run preprocessing
     stats = preprocess_dataset(
