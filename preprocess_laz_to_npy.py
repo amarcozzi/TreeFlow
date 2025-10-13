@@ -10,10 +10,10 @@ import multiprocessing as mp
 from functools import partial
 
 MIN_POINTS = {
-    "raw": 1000,
-    0.05: 1000,
-    0.1: 1000,
-    0.2: 500,
+    "raw": 10000,
+    0.05: 5000,
+    0.1: 2500,
+    0.2: 1000,
 }
 
 
@@ -112,16 +112,7 @@ def process_single_file(laz_path, output_dir, voxel_size=None, normalize=True):
             }
         }
 
-        # Step 1: Initial centering (X,Y centered, Z min at 0)
-        # This is useful to establish a consistent coordinate system
-        centroid_x = (points[:, 0].max() + points[:, 0].min()) / 2
-        centroid_y = (points[:, 1].max() + points[:, 1].min()) / 2
-        centroid_z = points[:, 2].min()  # Keep bottom at z=0 initially
-        points[:, 0] -= centroid_x
-        points[:, 1] -= centroid_y
-        points[:, 2] -= centroid_z
-
-        # Step 2: Voxelize if requested (before normalization for consistent voxel sizes)
+        # Voxelize if requested (before normalization for consistent voxel sizes)
         if voxel_size is not None:
             points_before_voxel = len(points)
             points = voxelize_points(points, voxel_size)
@@ -132,7 +123,7 @@ def process_single_file(laz_path, output_dir, voxel_size=None, normalize=True):
                 'reduction_ratio': len(points) / points_before_voxel
             }
 
-        # Step 3: Normalize to unit cube
+        # Normalize to unit cube
         if normalize:
             points, scale_factor, final_centroid = normalize_to_unit_cube(points)
             stats['normalization'] = {
