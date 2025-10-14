@@ -5,7 +5,7 @@
 #SBATCH --job-name="fm_train"
 #SBATCH --cpus-per-task=36
 #SBATCH --time=2-0
-#SBATCH --output=log_train.out
+#SBATCH --output=log_train_point_net.out
 
 module load cuda
 
