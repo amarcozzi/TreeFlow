@@ -5,23 +5,24 @@
 #SBATCH --job-name="fm_train"
 #SBATCH --cpus-per-task=36
 #SBATCH --time=2-0
-#SBATCH --output=log_train_point_net.out
+#SBATCH --output=log_train_transformer.out
 
 module load cuda
 
 source /project/umontana_fire_modeling/anthony.marcozzi/miniforge3/etc/profile.d/conda.sh
 conda activate canopy-flow
 
-srun python train.py \
-    --data_path ./FOR-species20K \
-    --preprocessed_version "voxel_0.1m" \
-    --batch_size 16 \
+python train.py \
+    --data_path FOR-species20K \
+    --preprocessed_version voxel_0.1m \
+    --model_dim 256 \
+    --num_heads 8 \
+    --num_layers 8 \
+    --dropout 0.1 \
+    --batch_size 8 \
     --batch_mode sample_to_min \
     --rotation_augment \
     --num_workers 24 \
     --num_epochs 1000 \
     --lr 1e-4 \
-    --time_embed_dim 256 \
-    --visualize_every 50 \
-    --save_every 50 \
-    --ode_method "dopri5"
+    --ode_method dopri5

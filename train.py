@@ -18,7 +18,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from tqdm import tqdm
 import argparse
 
-from model import PointNet2UnetForFlowMatching
+from model import TransformerVelocityField
 from dataset import PointCloudDataset, collate_fn, collate_fn_batched
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
@@ -316,7 +316,12 @@ def train(args):
 
     # Initialize model
     print("\nInitializing model...")
-    model = PointNet2UnetForFlowMatching(time_embed_dim=args.time_embed_dim).to(device)
+    model = TransformerVelocityField(
+        model_dim=args.model_dim,
+        num_heads=args.num_heads,
+        num_layers=args.num_layers,
+        dropout=args.dropout
+    ).to(device)
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {num_params / 1e6:.2f}M")
 
