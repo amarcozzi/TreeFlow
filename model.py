@@ -112,7 +112,8 @@ class TransformerVelocityField(nn.Module):
     """
     Unconditional Transformer-based velocity field model for flow matching.
 
-    Uses self-attention with per-layer FiLM (Feature-wise Linear Modulation) for time conditioning.
+    Uses self-attention with simple time conditioning via addition + learned projection.
+    Suitable for unconditional generation like TreeFlow.
     """
 
     def __init__(
@@ -140,28 +141,27 @@ class TransformerVelocityField(nn.Module):
         # Time embedding
         self.time_mlp = SinusoidalTimeMLP(dim=model_dim)
 
-        # Initial FiLM (before transformer layers)
-        self.film_scale_input = nn.Linear(model_dim, model_dim)
-        self.film_shift_input = nn.Linear(model_dim, model_dim)
+        # Learned projection after adding time to spatial features
+        self.fusion_proj = nn.Sequential(
+            nn.Linear(model_dim, model_dim),
+            nn.GELU()
+        )
 
-        # Transformer layers with per-layer FiLM
-        self.transformer_layers = nn.ModuleList()
-        self.film_scales = nn.ModuleList()
-        self.film_shifts = nn.ModuleList()
-
-        for _ in range(num_layers):
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=model_dim,
-                nhead=num_heads,
-                dim_feedforward=dim_feedforward,
-                dropout=dropout,
-                activation='gelu',
-                batch_first=True,
-                norm_first=True
-            )
-            self.transformer_layers.append(encoder_layer)
-            self.film_scales.append(nn.Linear(model_dim, model_dim))
-            self.film_shifts.append(nn.Linear(model_dim, model_dim))
+        # Transformer encoder (self-attention only)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=model_dim,
+            nhead=num_heads,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=num_layers,
+            enable_nested_tensor=False
+        )
 
         # Output projection
         self.output_proj = nn.Sequential(
@@ -197,17 +197,14 @@ class TransformerVelocityField(nn.Module):
         # Get time embedding
         time_emb = self.time_mlp(t)  # (B, dim)
 
-        # Initial FiLM (before transformer)
-        scale = self.film_scale_input(time_emb).unsqueeze(1)  # (B, 1, dim)
-        shift = self.film_shift_input(time_emb).unsqueeze(1)  # (B, 1, dim)
-        features = scale * pos_features + shift  # (B, N, dim)
+        # Add time to spatial features (broadcast across points)
+        features = pos_features + time_emb.unsqueeze(1)  # (B, N, dim)
 
-        # Transformer with per-layer FiLM
-        for layer, scale_layer, shift_layer in zip(self.transformer_layers, self.film_scales, self.film_shifts):
-            features = layer(features)  # (B, N, dim)
-            scale = scale_layer(time_emb).unsqueeze(1)  # (B, 1, dim)
-            shift = shift_layer(time_emb).unsqueeze(1)  # (B, 1, dim)
-            features = scale * features + shift  # (B, N, dim)
+        # Learned projection to fuse time and spatial information
+        features = self.fusion_proj(features)  # (B, N, dim)
+
+        # Apply transformer (self-attention)
+        features = self.transformer(features)  # (B, N, dim)
 
         # Predict velocity
         velocity = self.output_proj(features)  # (B, N, 3)
