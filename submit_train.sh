@@ -30,4 +30,4 @@ python train.py \
     --use_amp \
     --use_flash_attention \
     --min_visualization_points 1050 \
-    --max_visualization_points 20000
+    --max_visualization_points 8000
