@@ -27,5 +27,5 @@ python train.py \
     --num_epochs 1000 \
     --lr 1e-4 \
     --ode_method dopri5 \
-    use_amp \
-    use_flash_attention
+    --use_amp \
+    --use_flash_attention
