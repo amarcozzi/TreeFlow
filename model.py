@@ -48,56 +48,71 @@ class SinusoidalTimeMLP(nn.Module):
 
 
 class PositionalEncoding3D(nn.Module):
-    """Fixed 3D sinusoidal positional encoding for point clouds."""
+    """3D positional encoding for point clouds (fixed sinusoidal or learnable MLP)."""
 
-    def __init__(self, dim: int, max_freq: float = 10000.0):
+    def __init__(self, dim: int, max_freq: float = 10000.0, learnable: bool = False):
         super().__init__()
         self.dim = dim
         self.max_freq = max_freq
+        self.learnable = learnable
 
-        dim_per_axis = dim // 3
-        freq_bands = dim_per_axis // 2
+        if learnable:
+            # Learnable MLP-based positional encoding
+            self.pos_mlp = nn.Sequential(
+                nn.Linear(3, dim * 2),
+                nn.GELU(),
+                nn.Linear(dim * 2, dim)
+            )
+        else:
+            # Fixed sinusoidal positional encoding
+            dim_per_axis = dim // 3
+            freq_bands = dim_per_axis // 2
 
-        if freq_bands == 0:
-            raise ValueError(f"Dimension {dim} is too small for 3D encoding (need at least 6)")
+            if freq_bands == 0:
+                raise ValueError(f"Dimension {dim} is too small for 3D encoding (need at least 6)")
 
-        inv_freq = 1.0 / (max_freq ** (torch.arange(0, freq_bands).float() / max(freq_bands - 1, 1)))
-        self.register_buffer('inv_freq', inv_freq)
-        self.freq_bands = freq_bands
-        self.dim_per_axis = dim_per_axis
+            inv_freq = 1.0 / (max_freq ** (torch.arange(0, freq_bands).float() / max(freq_bands - 1, 1)))
+            self.register_buffer('inv_freq', inv_freq)
+            self.freq_bands = freq_bands
+            self.dim_per_axis = dim_per_axis
 
     def forward(self, coords: torch.Tensor) -> torch.Tensor:
-        B, N, _ = coords.shape
+        if self.learnable:
+            # Use learnable MLP
+            return self.pos_mlp(coords)  # (B, N, dim)
+        else:
+            # Use fixed sinusoidal encoding
+            B, N, _ = coords.shape
 
-        x = coords[:, :, 0:1]
-        y = coords[:, :, 1:2]
-        z = coords[:, :, 2:3]
+            x = coords[:, :, 0:1]
+            y = coords[:, :, 1:2]
+            z = coords[:, :, 2:3]
 
-        x_freqs = x * self.inv_freq[None, None, :]
-        y_freqs = y * self.inv_freq[None, None, :]
-        z_freqs = z * self.inv_freq[None, None, :]
+            x_freqs = x * self.inv_freq[None, None, :]
+            y_freqs = y * self.inv_freq[None, None, :]
+            z_freqs = z * self.inv_freq[None, None, :]
 
-        x_enc = torch.cat([torch.sin(x_freqs), torch.cos(x_freqs)], dim=-1)
-        y_enc = torch.cat([torch.sin(y_freqs), torch.cos(y_freqs)], dim=-1)
-        z_enc = torch.cat([torch.sin(z_freqs), torch.cos(z_freqs)], dim=-1)
+            x_enc = torch.cat([torch.sin(x_freqs), torch.cos(x_freqs)], dim=-1)
+            y_enc = torch.cat([torch.sin(y_freqs), torch.cos(y_freqs)], dim=-1)
+            z_enc = torch.cat([torch.sin(z_freqs), torch.cos(z_freqs)], dim=-1)
 
-        encoding = torch.cat([x_enc, y_enc, z_enc], dim=-1)
+            encoding = torch.cat([x_enc, y_enc, z_enc], dim=-1)
 
-        current_dim = encoding.shape[-1]
-        if current_dim < self.dim:
-            padding = torch.zeros(B, N, self.dim - current_dim, device=coords.device)
-            encoding = torch.cat([encoding, padding], dim=-1)
-        elif current_dim > self.dim:
-            encoding = encoding[:, :, :self.dim]
+            current_dim = encoding.shape[-1]
+            if current_dim < self.dim:
+                padding = torch.zeros(B, N, self.dim - current_dim, device=coords.device)
+                encoding = torch.cat([encoding, padding], dim=-1)
+            elif current_dim > self.dim:
+                encoding = encoding[:, :, :self.dim]
 
-        return encoding
+            return encoding
 
 
 class TransformerVelocityField(nn.Module):
     """
     Unconditional Transformer-based velocity field model for flow matching.
 
-    Uses self-attention only (no conditioning on source points).
+    Uses self-attention with FiLM (Feature-wise Linear Modulation) for time conditioning.
     Suitable for unconditional generation like TreeFlow.
     """
 
@@ -108,7 +123,8 @@ class TransformerVelocityField(nn.Module):
             num_layers: int = 8,
             dim_feedforward: Optional[int] = None,
             dropout: float = 0.1,
-            max_freq: float = 10000.0
+            max_freq: float = 10000.0,
+            learnable_pos_encoding: bool = False
     ):
         super().__init__()
 
@@ -119,10 +135,14 @@ class TransformerVelocityField(nn.Module):
             dim_feedforward = model_dim * 4
 
         # Positional encoding for 3D coordinates
-        self.pos_encoding = PositionalEncoding3D(model_dim, max_freq)
+        self.pos_encoding = PositionalEncoding3D(model_dim, max_freq, learnable=learnable_pos_encoding)
 
         # Time embedding
         self.time_mlp = SinusoidalTimeMLP(dim=model_dim)
+
+        # FiLM: Feature-wise Linear Modulation
+        self.film_scale = nn.Linear(model_dim, model_dim)
+        self.film_shift = nn.Linear(model_dim, model_dim)
 
         # Transformer encoder (self-attention only)
         encoder_layer = nn.TransformerEncoderLayer(
@@ -171,19 +191,16 @@ class TransformerVelocityField(nn.Module):
         # Encode positions
         pos_features = self.pos_encoding(x_t)  # (B, N, dim)
 
-        # Add time embedding as a token
+        # Get time embedding
         time_emb = self.time_mlp(t)  # (B, dim)
-        if time_emb.dim() == 2:
-            time_emb = time_emb.unsqueeze(1)  # (B, 1, dim)
 
-        # Concatenate time token with spatial features
-        features = torch.cat([time_emb, pos_features], dim=1)  # (B, N+1, dim)
+        # FiLM: Feature-wise Linear Modulation
+        scale = self.film_scale(time_emb).unsqueeze(1)  # (B, 1, dim)
+        shift = self.film_shift(time_emb).unsqueeze(1)  # (B, 1, dim)
+        features = scale * pos_features + shift  # (B, N, dim)
 
-        # Apply transformer (self-attention over all tokens including time)
-        features = self.transformer(features)  # (B, N+1, dim)
-
-        # Remove time token, keep only spatial features
-        features = features[:, 1:, :]  # (B, N, dim)
+        # Apply transformer (self-attention)
+        features = self.transformer(features)  # (B, N, dim)
 
         # Predict velocity
         velocity = self.output_proj(features)  # (B, N, 3)
@@ -206,17 +223,16 @@ if __name__ == "__main__":
 
     print(f"Model parameters: {model.count_parameters():,}")
 
-    # Test with TreeFlow format (B, N, 3)
+    # Test with (B, N, 3) format
     batch_size = 4
     num_points = 1000
 
-    x_t = torch.randn(batch_size, num_points, 3,)
+    x_t = torch.randn(batch_size, num_points, 3)
     t = torch.rand(batch_size)
 
-    v = model(x_t, t)
-    print(f"\nTreeFlow format test:")
-    print(f"Input shape:  {x_t.shape}")
-    print(f"Output shape: {v.shape}")
-    assert v.shape == x_t.shape
+    velocity = model(x_t, t)
+    print(f"\nInput shape:  {x_t.shape}")
+    print(f"Output shape: {velocity.shape}")
+    assert velocity.shape == x_t.shape
 
     print("\n✓ Model works correctly!")
