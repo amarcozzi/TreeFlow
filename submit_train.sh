@@ -14,12 +14,13 @@ conda activate canopy-flow
 
 python train.py \
     --data_path FOR-species20K \
-    --preprocessed_version voxel_0.1m \
-    --model_dim 256 \
+    --preprocessed_version voxel_0.2m \
+    --model_dim 128 \
     --num_heads 8 \
     --num_layers 8 \
     --dropout 0.1 \
     --batch_size 8 \
+    --visualize_every 10 \
     --batch_mode sample_to_min \
     --rotation_augment \
     --num_workers 24 \
