@@ -162,38 +162,31 @@ class TransformerVelocityField(nn.Module):
         Forward pass to predict velocity field.
 
         Args:
-            x_t: Noisy points, shape (B, 3, N) or (B, N, 3)
+            x_t: Noisy points, shape (B, N, 3)
             t: Time steps, shape (B,) or scalar
 
         Returns:
-            Predicted velocity, shape (B, 3, N) or (B, N, 3) (same as input)
+            Predicted velocity, shape (B, N, 3)
         """
-        # Handle both (B, 3, N) and (B, N, 3) formats
-        if x_t.shape[1] == 3:
-            x_t = x_t.transpose(1, 2)  # (B, 3, N) -> (B, N, 3)
-            transpose_output = True
-        else:
-            transpose_output = False
-
         # Encode positions
         pos_features = self.pos_encoding(x_t)  # (B, N, dim)
 
-        # Add time embedding
+        # Add time embedding as a token
         time_emb = self.time_mlp(t)  # (B, dim)
         if time_emb.dim() == 2:
             time_emb = time_emb.unsqueeze(1)  # (B, 1, dim)
 
-        features = pos_features + time_emb  # Broadcast time to all points
+        # Concatenate time token with spatial features
+        features = torch.cat([time_emb, pos_features], dim=1)  # (B, N+1, dim)
 
-        # Apply transformer (self-attention)
-        features = self.transformer(features)  # (B, N, dim)
+        # Apply transformer (self-attention over all tokens including time)
+        features = self.transformer(features)  # (B, N+1, dim)
+
+        # Remove time token, keep only spatial features
+        features = features[:, 1:, :]  # (B, N, dim)
 
         # Predict velocity
         velocity = self.output_proj(features)  # (B, N, 3)
-
-        # Match input format
-        if transpose_output:
-            velocity = velocity.transpose(1, 2)  # (B, N, 3) -> (B, 3, N)
 
         return velocity
 
@@ -220,10 +213,10 @@ if __name__ == "__main__":
     x_t = torch.randn(batch_size, num_points, 3,)
     t = torch.rand(batch_size)
 
-    velocity = model(x_t, t)
+    v = model(x_t, t)
     print(f"\nTreeFlow format test:")
     print(f"Input shape:  {x_t.shape}")
-    print(f"Output shape: {velocity.shape}")
-    assert velocity.shape == x_t.shape
+    print(f"Output shape: {v.shape}")
+    assert v.shape == x_t.shape
 
     print("\n✓ Model works correctly!")
