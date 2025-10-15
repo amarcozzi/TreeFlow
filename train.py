@@ -424,6 +424,14 @@ def parse_args():
 
     # Model arguments
     parser.add_argument('--time_embed_dim', type=int, default=256)
+    parser.add_argument('--model_dim', type=int, default=256,
+                        help='Transformer model dimension')
+    parser.add_argument('--num_heads', type=int, default=8,
+                        help='Number of attention heads')
+    parser.add_argument('--num_layers', type=int, default=8,
+                        help='Number of transformer layers')
+    parser.add_argument('--dropout', type=float, default=0.1,
+                        help='Dropout rate')
 
     # Training arguments
     parser.add_argument('--num_epochs', type=int, default=1000)
