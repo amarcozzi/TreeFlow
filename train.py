@@ -389,6 +389,7 @@ def train(args):
     print("=" * 60)
     print(f"  Device:              {device}")
     print(f"  Model parameters:    {num_params / 1e6:.2f}M")
+    print(f"  Model dimensions:    {args.model_dim}")
     print(f"  Batch size:          {args.batch_size}")
     print(f"  Batch mode:          {args.batch_mode}")
     print(f"  Epochs:              {args.num_epochs}")
