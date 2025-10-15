@@ -1,4 +1,6 @@
 """
+treeflow/model.py
+
 Transformer for Flow Matching on 3D Tree Point Clouds
 """
 

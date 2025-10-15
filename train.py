@@ -1,5 +1,5 @@
 """
-train.py
+treeflow/train.py
 
 Train a Flow Matching model on tree point clouds from the FOR-species20K dataset.
 """
@@ -24,27 +24,48 @@ from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 
 
-def compute_loss(model, x_1, flow_path, device):
+def enable_flash_attention():
+    """Enable Flash Attention if available."""
+    try:
+        import torch.nn.functional as F
+        if hasattr(F, 'scaled_dot_product_attention'):
+            # Flash Attention is available in PyTorch 2.0+
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
+            print("✓ Flash Attention enabled")
+            return True
+        else:
+            print("⚠ Flash Attention not available (requires PyTorch 2.0+)")
+            return False
+    except Exception as e:
+        print(f"⚠ Could not enable Flash Attention: {e}")
+        return False
+
+
+def compute_loss(model, x_1, flow_path, device, use_amp=False):
     """Compute flow matching loss for a single point cloud."""
     batch_size = x_1.shape[0]
     t = torch.rand(batch_size, device=device)
     x_0 = torch.randn_like(x_1)
 
-    path_sample = flow_path.sample(t=t, x_0=x_0, x_1=x_1)
-    x_t = path_sample.x_t
-    u_t = path_sample.dx_t
+    # Use mixed precision if enabled
+    with torch.amp.autocast('cuda', enabled=use_amp):
+        path_sample = flow_path.sample(t=t, x_0=x_0, x_1=x_1)
+        x_t = path_sample.x_t
+        u_t = path_sample.dx_t
 
-    pred_u_t = model(x_t, t)
-    loss = nn.functional.mse_loss(pred_u_t, u_t)
+        pred_u_t = model(x_t, t)
+        loss = nn.functional.mse_loss(pred_u_t, u_t)
 
     return loss
 
 
-def train_epoch(model, train_loader, optimizer, flow_path, device, batch_mode):
+def train_epoch(model, train_loader, optimizer, flow_path, device, batch_mode, scaler=None, grad_clip_norm=1.0):
     """Train for one epoch."""
     model.train()
     total_loss = 0.0
     num_samples = 0
+    use_amp = scaler is not None
 
     pbar = tqdm(total=len(train_loader), desc="Training", dynamic_ncols=True)
 
@@ -57,7 +78,7 @@ def train_epoch(model, train_loader, optimizer, flow_path, device, batch_mode):
                 points = sample['points']
                 points = points.unsqueeze(0).transpose(1, 2).to(device)
 
-                loss = compute_loss(model, points, flow_path, device)
+                loss = compute_loss(model, points, flow_path, device, use_amp=use_amp)
 
                 # Check for NaN loss during training
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -65,7 +86,12 @@ def train_epoch(model, train_loader, optimizer, flow_path, device, batch_mode):
                     continue
 
                 normalized_loss = loss / len(batch)
-                normalized_loss.backward()
+
+                # Backward pass with AMP support
+                if scaler is not None:
+                    scaler.scale(normalized_loss).backward()
+                else:
+                    normalized_loss.backward()
 
                 total_loss += loss.item()
                 num_samples += 1
@@ -75,7 +101,7 @@ def train_epoch(model, train_loader, optimizer, flow_path, device, batch_mode):
             points = batch['points'].to(device)  # (B, N_min, 3)
             points = points.transpose(1, 2)  # (B, 3, N_min)
 
-            loss = compute_loss(model, points, flow_path, device)
+            loss = compute_loss(model, points, flow_path, device, use_amp=use_amp)
 
             # Check for NaN loss during training
             if torch.isnan(loss) or torch.isinf(loss):
@@ -83,13 +109,24 @@ def train_epoch(model, train_loader, optimizer, flow_path, device, batch_mode):
                 pbar.update(1)
                 continue
 
-            loss.backward()
+            # Backward pass with AMP support
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
             total_loss += loss.item() * points.shape[0]  # Scale by batch size
             num_samples += points.shape[0]
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        # Gradient clipping and optimizer step with AMP support
+        if scaler is not None:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+            optimizer.step()
 
         pbar.update(1)
         if num_samples > 0:
@@ -314,6 +351,12 @@ def train(args):
     device = torch.device('cuda' if torch.cuda.is_available() and not args.no_cuda else 'cpu')
     print(f"Using device: {device}")
 
+    # Enable Flash Attention if requested and available
+    if args.use_flash_attention and device.type == 'cuda':
+        enable_flash_attention()
+    elif args.use_flash_attention:
+        print("⚠ Flash Attention requires CUDA, skipping")
+
     # Initialize model
     print("\nInitializing model...")
     model = TransformerVelocityField(
@@ -329,11 +372,36 @@ def train(args):
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.min_lr)
 
+    # Setup AMP scaler if enabled
+    scaler = None
+    if args.use_amp and device.type == 'cuda':
+        scaler = torch.amp.GradScaler('cuda')
+        print("✓ Automatic Mixed Precision (AMP) enabled")
+    elif args.use_amp:
+        print("⚠ AMP requires CUDA, training without mixed precision")
+
     # Setup flow matching
     flow_path = CondOTProbPath()
 
+    # Print training configuration
+    print("\n" + "=" * 60)
+    print("Training Configuration:")
+    print("=" * 60)
+    print(f"  Device:              {device}")
+    print(f"  Model parameters:    {num_params / 1e6:.2f}M")
+    print(f"  Batch size:          {args.batch_size}")
+    print(f"  Batch mode:          {args.batch_mode}")
+    print(f"  Epochs:              {args.num_epochs}")
+    print(f"  Learning rate:       {args.lr}")
+    print(f"  Min learning rate:   {args.min_lr}")
+    print(f"  Weight decay:        {args.weight_decay}")
+    print(f"  Gradient clip norm:  {args.grad_clip_norm}")
+    print(f"  Use AMP:             {scaler is not None}")
+    print(f"  Flash Attention:     {args.use_flash_attention}")
+    print("=" * 60 + "\n")
+
     # Training loop
-    print("\nStarting training...")
+    print("Starting training...")
     train_losses = []
     val_losses = []
     best_train_loss = float('inf')
@@ -344,7 +412,16 @@ def train(args):
         print(f"{'=' * 60}")
 
         # Train
-        train_loss = train_epoch(model, train_loader, optimizer, flow_path, device, args.batch_mode)
+        train_loss = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            flow_path,
+            device,
+            args.batch_mode,
+            scaler=scaler,
+            grad_clip_norm=args.grad_clip_norm
+        )
         train_losses.append(train_loss)
         print(f"Train Loss: {train_loss:.6f}")
 
@@ -368,6 +445,10 @@ def train(args):
                 'args': vars(args),
             }
 
+            # Save scaler state if using AMP
+            if scaler is not None:
+                checkpoint['scaler_state_dict'] = scaler.state_dict()
+
             torch.save(checkpoint, checkpoint_dir / f'checkpoint_epoch_{epoch}.pt')
 
             if is_best:
@@ -379,8 +460,6 @@ def train(args):
         # Generate and visualize samples
         if epoch % args.visualize_every == 0:
             print("Generating samples...")
-            # Sample different sizes to see how the model handles it
-            # sample_size = np.random.randint(1000, 5000)
             pbar = tqdm(total=args.num_visualizations, desc="Sampling", dynamic_ncols=True)
             for _ in range(args.num_visualizations):
                 try:
@@ -443,6 +522,14 @@ def parse_args():
                         choices=['accumulate', 'sample_to_min'])
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--no_cuda', action='store_true')
+
+    # Training optimization
+    parser.add_argument('--use_amp', action='store_true', default=False,
+                        help='Enable Automatic Mixed Precision (AMP) training')
+    parser.add_argument('--use_flash_attention', action='store_true', default=False,
+                        help='Enable Flash Attention (requires PyTorch 2.0+)')
+    parser.add_argument('--grad_clip_norm', type=float, default=5.0,
+                        help='Gradient clipping norm')
 
     # Sampling arguments
     parser.add_argument('--ode_method', type=str, default='dopri5',
