@@ -14,7 +14,7 @@ conda activate canopy-flow
 
 python train.py \
     --data_path FOR-species20K \
-    --preprocessed_version voxel_0.1m \
+    --preprocessed_version voxel_0.2m \
     --model_dim 256 \
     --num_heads 8 \
     --num_layers 8 \
