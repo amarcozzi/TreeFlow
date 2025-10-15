@@ -28,4 +28,6 @@ python train.py \
     --lr 1e-4 \
     --ode_method dopri5 \
     --use_amp \
-    --use_flash_attention
+    --use_flash_attention \
+    --min_visualization_points 1050 \
+    --max_visualization_points 20000

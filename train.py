@@ -464,7 +464,7 @@ def train(args):
             pbar = tqdm(total=args.num_visualizations, desc="Sampling", dynamic_ncols=True)
             for _ in range(args.num_visualizations):
                 try:
-                    num_pts = np.random.randint(2500, 25000)
+                    num_pts = np.random.randint(args.min_visualization_points, args.max_visualization_points)
                     pbar.set_description(f"Sampling {num_pts} points")
                     generated = sample(
                         model,
@@ -543,6 +543,8 @@ def parse_args():
     parser.add_argument('--save_every', type=int, default=20)
     parser.add_argument('--visualize_every', type=int, default=10)
     parser.add_argument('--num_visualizations', type=int, default=4,)
+    parser.add_argument('--min_visualization_points', type=int, default=1050)
+    parser.add_argument('--max_visualization_points', type=int, default=20000)
 
     return parser.parse_args()
 
