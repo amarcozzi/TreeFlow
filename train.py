@@ -35,10 +35,10 @@ def enable_flash_attention():
             print("✓ Flash Attention enabled")
             return True
         else:
-            print("⚠ Flash Attention not available (requires PyTorch 2.0+)")
+            print("⚠  Flash Attention not available (requires PyTorch 2.0+)")
             return False
     except Exception as e:
-        print(f"⚠ Could not enable Flash Attention: {e}")
+        print(f"⚠  Could not enable Flash Attention: {e}")
         return False
 
 
@@ -76,7 +76,7 @@ def train_epoch(model, train_loader, optimizer, flow_path, device, batch_mode, s
             # Original mode: accumulate gradients for each sample
             for sample in batch:
                 points = sample['points']
-                points = points.unsqueeze(0).transpose(1, 2).to(device)
+                points = points.unsqueeze(0).to(device)  # (1, N, 3)
 
                 loss = compute_loss(model, points, flow_path, device, use_amp=use_amp)
 
@@ -99,7 +99,6 @@ def train_epoch(model, train_loader, optimizer, flow_path, device, batch_mode, s
         elif batch_mode == 'sample_to_min':
             # Process entire batch at once
             points = batch['points'].to(device)  # (B, N_min, 3)
-            points = points.transpose(1, 2)  # (B, 3, N_min)
 
             loss = compute_loss(model, points, flow_path, device, use_amp=use_amp)
 
@@ -155,7 +154,7 @@ def sample(model, num_points, device, method='euler', num_steps=100):
     model.eval()
 
     # Start from noise
-    x_init = torch.randn(1, 3, num_points, device=device)
+    x_init = torch.randn(1, num_points, 3, device=device)  # (1, N, 3)
 
     # Define the ODE function
     def ode_fn(t, x):
@@ -175,7 +174,7 @@ def sample(model, num_points, device, method='euler', num_steps=100):
         x_final = solver.sample(x_init, method=method, step_size=step_size)
 
         # Convert to numpy
-        points = x_final[0].T.cpu().numpy()  # (3, N) -> (N, 3)
+        points = x_final[0].cpu().numpy()  # (N, 3)
 
         return points
 
@@ -355,7 +354,7 @@ def train(args):
     if args.use_flash_attention and device.type == 'cuda':
         enable_flash_attention()
     elif args.use_flash_attention:
-        print("⚠ Flash Attention requires CUDA, skipping")
+        print("⚠  Flash Attention requires CUDA, skipping")
 
     # Initialize model
     print("\nInitializing model...")
@@ -378,7 +377,7 @@ def train(args):
         scaler = torch.amp.GradScaler('cuda')
         print("✓ Automatic Mixed Precision (AMP) enabled")
     elif args.use_amp:
-        print("⚠ AMP requires CUDA, training without mixed precision")
+        print("⚠  AMP requires CUDA, training without mixed precision")
 
     # Setup flow matching
     flow_path = CondOTProbPath()
