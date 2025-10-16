@@ -285,6 +285,47 @@ def plot_losses(train_losses, val_losses, save_path):
     plt.close()
 
 
+def load_checkpoint(checkpoint_path, model, optimizer, scheduler, scaler=None, device='cuda'):
+    """
+    Load checkpoint and restore training state.
+
+    Returns:
+        start_epoch: Epoch to resume from
+        train_losses: List of training losses
+        best_train_loss: Best training loss so far
+    """
+    print(f"\nLoading checkpoint from: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # Load model state
+    model.load_state_dict(checkpoint['model_state_dict'])
+    print("✓ Loaded model state")
+
+    # Load optimizer state
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    print("✓ Loaded optimizer state")
+
+    # Load scheduler state
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    print("✓ Loaded scheduler state")
+
+    # Load scaler state if using AMP
+    if scaler is not None and 'scaler_state_dict' in checkpoint:
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        print("✓ Loaded AMP scaler state")
+
+    # Get training history
+    start_epoch = checkpoint['epoch'] + 1
+    train_losses = checkpoint.get('train_losses', [])
+    best_train_loss = min(train_losses) if train_losses else float('inf')
+
+    print(f"✓ Resuming from epoch {start_epoch}")
+    print(f"✓ Training history: {len(train_losses)} epochs")
+    print(f"✓ Best train loss so far: {best_train_loss:.6f}")
+
+    return start_epoch, train_losses, best_train_loss
+
+
 def train(args):
     """Main training function."""
 
@@ -382,6 +423,21 @@ def train(args):
     # Setup flow matching
     flow_path = CondOTProbPath()
 
+    # Load checkpoint if resuming
+    start_epoch = 1
+    train_losses = []
+    val_losses = []
+    best_train_loss = float('inf')
+
+    if args.resume_from:
+        checkpoint_path = Path(args.resume_from)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        start_epoch, train_losses, best_train_loss = load_checkpoint(
+            checkpoint_path, model, optimizer, scheduler, scaler, device
+        )
+
     # Print training configuration
     print("\n" + "=" * 60)
     print("Training Configuration:")
@@ -392,21 +448,21 @@ def train(args):
     print(f"  Batch size:          {args.batch_size}")
     print(f"  Batch mode:          {args.batch_mode}")
     print(f"  Epochs:              {args.num_epochs}")
+    print(f"  Starting epoch:      {start_epoch}")
     print(f"  Learning rate:       {args.lr}")
     print(f"  Min learning rate:   {args.min_lr}")
     print(f"  Weight decay:        {args.weight_decay}")
     print(f"  Gradient clip norm:  {args.grad_clip_norm}")
     print(f"  Use AMP:             {scaler is not None}")
     print(f"  Flash Attention:     {args.use_flash_attention}")
+    if args.resume_from:
+        print(f"  Resuming from:       {args.resume_from}")
     print("=" * 60 + "\n")
 
     # Training loop
     print("Starting training...")
-    train_losses = []
-    val_losses = []
-    best_train_loss = float('inf')
 
-    for epoch in range(1, args.num_epochs + 1):
+    for epoch in range(start_epoch, args.num_epochs + 1):
         print(f"\n{'=' * 60}")
         print(f"Epoch {epoch}/{args.num_epochs}")
         print(f"{'=' * 60}")
@@ -544,6 +600,10 @@ def parse_args():
     parser.add_argument('--num_visualizations', type=int, default=4,)
     parser.add_argument('--min_visualization_points', type=int, default=1050)
     parser.add_argument('--max_visualization_points', type=int, default=20000)
+
+    # Resume training
+    parser.add_argument('--resume_from', type=str, default=None,
+                        help='Path to checkpoint to resume training from (e.g., output_flow_matching/checkpoints/best_model.pt)')
 
     return parser.parse_args()
 

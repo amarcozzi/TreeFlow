@@ -2,10 +2,10 @@
 #SBATCH --account=umontana_fire_modeling
 #SBATCH --partition=gpu-a100
 #SBATCH --gres=gpu:a100:1
-#SBATCH --job-name="fm_train"
+#SBATCH --job-name="fm_resume"
 #SBATCH --cpus-per-task=36
 #SBATCH --time=2-0
-#SBATCH --output=log_train_transformer.out
+#SBATCH --output=log_resume_transformer.out
 
 module load cuda
 
@@ -24,10 +24,11 @@ python train.py \
     --batch_mode sample_to_min \
     --rotation_augment \
     --num_workers 24 \
-    --num_epochs 1000 \
+    --num_epochs 2000 \
     --lr 1e-4 \
     --ode_method dopri5 \
     --use_amp \
     --use_flash_attention \
     --min_visualization_points 1050 \
-    --max_visualization_points 8000
+    --max_visualization_points 8000 \
+    --resume_from output_flow_matching/production/checkpoints/best_model.pt
