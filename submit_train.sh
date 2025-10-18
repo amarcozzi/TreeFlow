@@ -31,4 +31,3 @@ python train.py \
     --use_flash_attention \
     --min_visualization_points 2500 \
     --max_visualization_points 16000 \
-    --resume_from output_flow_matching/checkpoints/best_model.pt
