@@ -191,17 +191,19 @@ class TransformerVelocityField(nn.Module):
         Returns:
             Predicted velocity, shape (B, N, 3)
         """
+        B, N, _ = x_t.shape
+
         # Encode positions
         pos_features = self.pos_encoding(x_t)  # (B, N, dim)
 
         # Get time embedding
         time_emb = self.time_mlp(t)  # (B, dim)
 
-        # Concatenate time with spatial features (broadcast across points), then project back
-        features = torch.cat([pos_features, time_emb.unsqueeze(1)], dim=-1)  # (B, N, 2*dim)
-        features = self.fusion_proj(features)  # (B, N, dim)
+        # Broadcast time embedding across all points and concatenate with spatial features
+        time_emb_expanded = time_emb.unsqueeze(1).expand(-1, N, -1)  # (B, N, dim)
+        features = torch.cat([pos_features, time_emb_expanded], dim=-1)  # (B, N, 2*dim)
 
-        # Learned projection to fuse time and spatial information
+        # Project back to model_dim
         features = self.fusion_proj(features)  # (B, N, dim)
 
         # Apply transformer (self-attention)
