@@ -143,7 +143,7 @@ class TransformerVelocityField(nn.Module):
 
         # Learned projection after adding time to spatial features
         self.fusion_proj = nn.Sequential(
-            nn.Linear(model_dim, model_dim),
+            nn.Linear(model_dim * 2, model_dim),
             nn.GELU()
         )
 
@@ -197,8 +197,9 @@ class TransformerVelocityField(nn.Module):
         # Get time embedding
         time_emb = self.time_mlp(t)  # (B, dim)
 
-        # Add time to spatial features (broadcast across points)
-        features = pos_features + time_emb.unsqueeze(1)  # (B, N, dim)
+        # Concatenate time with spatial features (broadcast across points), then project back
+        features = torch.cat([pos_features, time_emb.unsqueeze(1)], dim=-1)  # (B, N, 2*dim)
+        features = self.fusion_proj(features)  # (B, N, dim)
 
         # Learned projection to fuse time and spatial information
         features = self.fusion_proj(features)  # (B, N, dim)
