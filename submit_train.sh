@@ -19,9 +19,9 @@ python train.py \
     --num_heads 8 \
     --num_layers 8 \
     --dropout 0.1 \
-    --batch_size 64 \
+    --batch_size 4 \
     --visualize_every 5 \
-    --batch_mode accumulate \
+    --batch_mode sample_to_min \
     --rotation_augment \
     --num_workers 24 \
     --num_epochs 2000 \
