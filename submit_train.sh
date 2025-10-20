@@ -19,7 +19,7 @@ python train.py \
     --num_heads 8 \
     --num_layers 8 \
     --dropout 0.1 \
-    --batch_size 4 \
+    --batch_size 8 \
     --visualize_every 5 \
     --batch_mode sample_to_min \
     --rotation_augment \
@@ -30,4 +30,5 @@ python train.py \
     --use_amp \
     --use_flash_attention \
     --min_visualization_points 2500 \
-    --max_visualization_points 16000 \
+    --max_visualization_points 50000 \
+    --resume_from "output_flow_matching/checkpoints/best_model.pt"
