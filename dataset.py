@@ -18,6 +18,7 @@ class PointCloudDataset(Dataset):
             num_samples: int = None,
             sample_exponent: float = None,
             rotation_augment: bool = False,
+            shuffle_augment: bool = False,
             max_points: int = None,
     ):
         """
@@ -34,11 +35,13 @@ class PointCloudDataset(Dataset):
                            0.5 = moderate skew, 0.3 = aggressive skew, 1.0 = uniform
                            None = no sampling
             rotation_augment: Whether to apply random rotation around Z-axis
+            shuffle_augment: Whether to shuffle point order
             max_points: Maximum number of points per sample (uniformly samples if exceeded)
         """
         self.data_path = Path(data_path)
         self.sample_exponent = sample_exponent
         self.rotation_augment = rotation_augment
+        self.shuffle_augment = shuffle_augment
         self.max_points = max_points
 
         # Determine which directories to load from based on the split
@@ -161,6 +164,10 @@ class PointCloudDataset(Dataset):
         if self.rotation_augment:
             points = self._rotate_z(points)
 
+        # Shuffle points
+        if self.shuffle_augment:
+            np.random.shuffle(points)
+
         # Sample to max_points if specified
         if self.max_points is not None and len(points) > self.max_points:
             indices = np.random.choice(len(points), self.max_points, replace=False)
@@ -274,9 +281,10 @@ def main():
     dataset = PointCloudDataset(
         data_path=Path("./FOR-species20K"),
         split="mixed",
-        preprocessed_version="voxel_0.1m",
+        preprocessed_version="voxel_0.2m",
         sample_exponent=0.3,
         rotation_augment=True,
+        shuffle_augment=True,
     )
     print(f"Dataset size: {len(dataset)}")
 
