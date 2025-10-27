@@ -19,31 +19,12 @@ from tqdm import tqdm
 import argparse
 import json
 from datetime import datetime
-import random
 
 from model import TransformerVelocityField
 from dataset import PointCloudDataset, collate_fn, collate_fn_batched
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 
-
-def set_seed(seed):
-    """
-    Set random seeds for reproducibility across all libraries.
-
-    Args:
-        seed: Random seed value
-    """
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-
-    # Make cuDNN deterministic (may impact performance)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-    print(f"✓ Random seed set to {seed} for reproducibility")
 
 def save_config(args, output_dir):
     """
@@ -62,11 +43,6 @@ def save_config(args, output_dir):
     if torch.cuda.is_available():
         config['cuda_version'] = torch.version.cuda
         config['gpu_name'] = torch.cuda.get_device_name(0)
-
-    # Add reproducibility information
-    config['random_seed'] = args.seed
-    config['cudnn_deterministic'] = True
-    config['cudnn_benchmark'] = False
 
     config_path = output_dir / 'config.json'
     with open(config_path, 'w') as f:
@@ -502,9 +478,6 @@ def train(args):
     # Setup directories
     dirs = setup_directories(args.output_dir, args.experiment_name)
 
-    # Set random seed for reproducibility (before any random operations)
-    set_seed(args.seed)
-
     # Save configuration first
     config_path = save_config(args, dirs['experiment'])
 
@@ -611,7 +584,6 @@ def train(args):
     print("\n" + "=" * 60)
     print("Training Configuration:")
     print("=" * 60)
-    print(f"  Random seed:         {args.seed}")
     print(f"  Device:              {device}")
     print(f"  Model parameters:    {num_params / 1e6:.2f}M")
     print(f"  Model dimensions:    {args.model_dim}")
@@ -732,10 +704,6 @@ def parse_args():
     parser.add_argument('--experiment_name', type=str, default=None,
                         help='Name of the experiment (creates subdirectory under output_dir). '
                              'If not provided, uses timestamp.')
-
-    # Reproducibility
-    parser.add_argument('--seed', type=int, default=72683,
-                        help='Random seed for reproducibility')
 
     # Data arguments
     parser.add_argument('--data_path', type=str, default='FOR-species20K')
