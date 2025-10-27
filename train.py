@@ -383,45 +383,62 @@ def plot_losses(train_losses, val_losses, save_path):
     plt.close()
 
 
-def load_checkpoint(checkpoint_path, model, optimizer, scheduler, scaler=None, device='cuda'):
+def load_checkpoint(checkpoint_path, model, optimizer, scheduler, scaler=None, device='cuda', load_weights_only=False):
     """
-    Load checkpoint and restore training state.
+    Load checkpoint and optionally restore training state.
+
+    Args:
+        checkpoint_path: Path to checkpoint file
+        model: Model to load weights into
+        optimizer: Optimizer (state loaded only if load_weights_only=False)
+        scheduler: Scheduler (state loaded only if load_weights_only=False)
+        scaler: AMP scaler (state loaded only if load_weights_only=False)
+        device: Device to load checkpoint to
+        load_weights_only: If True, only load model weights (reset optimizer/scheduler)
 
     Returns:
         start_epoch: Epoch to resume from
-        train_losses: List of training losses
-        best_train_loss: Best training loss so far
+        train_losses: List of training losses (empty if load_weights_only=True)
+        best_train_loss: Best training loss so far (inf if load_weights_only=True)
     """
     print(f"\nLoading checkpoint from: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
-    # Load model state
+    # Always load model state
     model.load_state_dict(checkpoint['model_state_dict'])
     print("✓ Loaded model state")
 
-    # Load optimizer state
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    print("✓ Loaded optimizer state")
-
-    # Load scheduler state
-    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-    print("✓ Loaded scheduler state")
-
-    # Load scaler state if using AMP
-    if scaler is not None and 'scaler_state_dict' in checkpoint:
-        scaler.load_state_dict(checkpoint['scaler_state_dict'])
-        print("✓ Loaded AMP scaler state")
-
-    # Get training history
+    # Get epoch from checkpoint
     start_epoch = checkpoint['epoch'] + 1
-    train_losses = checkpoint.get('train_losses', [])
-    best_train_loss = min(train_losses) if train_losses else float('inf')
 
-    print(f"✓ Resuming from epoch {start_epoch}")
-    print(f"✓ Training history: {len(train_losses)} epochs")
-    print(f"✓ Best train loss so far: {best_train_loss:.6f}")
+    if load_weights_only:
+        # Skip loading optimizer, scheduler, and scaler state
+        print("⚠  load_weights_only=True: Skipping optimizer, scheduler, and scaler state")
+        print(f"⚠  Continuing from epoch {start_epoch} with reset optimizer/scheduler")
+        return start_epoch, [], float('inf')
+    else:
+        # Load optimizer state
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print("✓ Loaded optimizer state")
 
-    return start_epoch, train_losses, best_train_loss
+        # Load scheduler state
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        print("✓ Loaded scheduler state")
+
+        # Load scaler state if using AMP
+        if scaler is not None and 'scaler_state_dict' in checkpoint:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            print("✓ Loaded AMP scaler state")
+
+        # Get training history
+        train_losses = checkpoint.get('train_losses', [])
+        best_train_loss = min(train_losses) if train_losses else float('inf')
+
+        print(f"✓ Resuming from epoch {start_epoch}")
+        print(f"✓ Training history: {len(train_losses)} epochs")
+        print(f"✓ Best train loss so far: {best_train_loss:.6f}")
+
+        return start_epoch, train_losses, best_train_loss
 
 
 def setup_directories(output_dir, experiment_name):
@@ -579,7 +596,8 @@ def train(args):
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
         start_epoch, train_losses, best_train_loss = load_checkpoint(
-            checkpoint_path, model, optimizer, scheduler, scaler, device
+            checkpoint_path, model, optimizer, scheduler, scaler, device,
+            load_weights_only=args.load_weights_only
         )
 
     # Print training configuration
@@ -603,6 +621,7 @@ def train(args):
     print(f"  Flash Attention:     {args.use_flash_attention}")
     if args.resume_from:
         print(f"  Resuming from:       {args.resume_from}")
+        print(f"  Load weights only:   {args.load_weights_only}")
     print("=" * 60 + "\n")
 
     # Training loop
@@ -763,6 +782,8 @@ def parse_args():
     # Resume training
     parser.add_argument('--resume_from', type=str, default=None,
                         help='Path to checkpoint to resume training from (e.g., experiments/baseline/checkpoints/best_model.pt)')
+    parser.add_argument('--load_weights_only', action='store_true', default=False,
+                        help='Load only model weights from checkpoint, reset optimizer and scheduler (for transfer learning or new training tasks)')
 
     return parser.parse_args()
 

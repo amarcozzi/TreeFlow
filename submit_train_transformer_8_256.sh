@@ -36,4 +36,5 @@ python train.py \
     --use_flash_attention \
     --min_visualization_points 1000 \
     --max_visualization_points 8000 \
-    --resume_from "experiments/transformer-8-256/checkpoints/checkpoint_epoch_500.pt"
+    --resume_from "experiments/transformer-8-256/checkpoints/checkpoint_epoch_500.pt" \
+    --load_weights_only
