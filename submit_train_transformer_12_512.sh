@@ -4,6 +4,7 @@
 #SBATCH --gres=gpu:a100:1
 #SBATCH --job-name="tf_12_512"
 #SBATCH --cpus-per-task=36
+#SBATCH --mem=128G
 #SBATCH --time=2-0
 #SBATCH --output=log_train_transformer_12_512.out
 
