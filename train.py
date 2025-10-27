@@ -17,11 +17,70 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from tqdm import tqdm
 import argparse
+import json
+from datetime import datetime
 
 from model import TransformerVelocityField
 from dataset import PointCloudDataset, collate_fn, collate_fn_batched
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
+
+
+def save_config(args, output_dir):
+    """
+    Save training configuration to JSON for reproducibility.
+
+    Args:
+        args: Parsed command-line arguments
+        output_dir: Directory to save config
+    """
+    config = vars(args).copy()
+
+    # Add metadata
+    config['timestamp'] = datetime.now().isoformat()
+    config['pytorch_version'] = torch.__version__
+    config['cuda_available'] = torch.cuda.is_available()
+    if torch.cuda.is_available():
+        config['cuda_version'] = torch.version.cuda
+        config['gpu_name'] = torch.cuda.get_device_name(0)
+
+    config_path = output_dir / 'config.json'
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=2)
+
+    print(f"✓ Configuration saved to: {config_path}")
+    return config_path
+
+
+def save_losses_json(train_losses, val_losses, output_dir, epoch=None):
+    """
+    Save training losses to JSON file.
+
+    Args:
+        train_losses: List of training losses
+        val_losses: List of validation losses
+        output_dir: Directory to save losses
+        epoch: Current epoch (optional, for metadata)
+    """
+    losses_data = {
+        'train_losses': train_losses,
+        'val_losses': val_losses,
+        'num_epochs': len(train_losses),
+        'best_train_loss': float(min(train_losses)) if train_losses else None,
+        'best_val_loss': float(min(val_losses)) if val_losses else None,
+        'final_train_loss': float(train_losses[-1]) if train_losses else None,
+        'final_val_loss': float(val_losses[-1]) if val_losses else None,
+        'timestamp': datetime.now().isoformat(),
+    }
+
+    if epoch is not None:
+        losses_data['current_epoch'] = epoch
+
+    losses_path = output_dir / 'losses.json'
+    with open(losses_path, 'w') as f:
+        json.dump(losses_data, f, indent=2)
+
+    return losses_path
 
 
 def enable_flash_attention():
@@ -326,18 +385,62 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler, scaler=None, d
     return start_epoch, train_losses, best_train_loss
 
 
+def setup_directories(output_dir, experiment_name):
+    """
+    Setup output directories for training.
+
+    Args:
+        output_dir: Base output directory
+        experiment_name: Name of the experiment
+
+    Returns:
+        Dictionary containing all output paths
+    """
+    # Create base output directory
+    base_dir = Path(output_dir)
+    base_dir.mkdir(exist_ok=True, parents=True)
+
+    # Create experiment directory
+    if experiment_name:
+        exp_dir = base_dir / experiment_name
+    else:
+        # Use timestamp if no experiment name provided
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        exp_dir = base_dir / f"exp_{timestamp}"
+
+    exp_dir.mkdir(exist_ok=True, parents=True)
+
+    # Create subdirectories
+    dirs = {
+        'experiment': exp_dir,
+        'checkpoints': exp_dir / "checkpoints",
+        'logs': exp_dir / "logs",
+        'visualizations': exp_dir / "visualizations",
+    }
+
+    for dir_path in dirs.values():
+        dir_path.mkdir(exist_ok=True, parents=True)
+
+    print(f"\n{'='*60}")
+    print(f"Output Directory Structure:")
+    print(f"{'='*60}")
+    print(f"  Experiment root:  {dirs['experiment']}")
+    print(f"  Checkpoints:      {dirs['checkpoints']}")
+    print(f"  Logs:             {dirs['logs']}")
+    print(f"  Visualizations:   {dirs['visualizations']}")
+    print(f"{'='*60}\n")
+
+    return dirs
+
+
 def train(args):
     """Main training function."""
 
     # Setup directories
-    output_dir = Path('output_flow_matching')
-    output_dir.mkdir(exist_ok=True)
-    checkpoint_dir = output_dir / "checkpoints"
-    checkpoint_dir.mkdir(exist_ok=True)
-    log_dir = output_dir / "logs"
-    log_dir.mkdir(exist_ok=True)
-    vis_dir = output_dir / "visualizations"
-    vis_dir.mkdir(exist_ok=True)
+    dirs = setup_directories(args.output_dir, args.experiment_name)
+
+    # Save configuration first
+    config_path = save_config(args, dirs['experiment'])
 
     print(f"Using preprocessed version: {args.preprocessed_version}")
 
@@ -445,6 +548,8 @@ def train(args):
     print(f"  Device:              {device}")
     print(f"  Model parameters:    {num_params / 1e6:.2f}M")
     print(f"  Model dimensions:    {args.model_dim}")
+    print(f"  Number of layers:    {args.num_layers}")
+    print(f"  Number of heads:     {args.num_heads}")
     print(f"  Batch size:          {args.batch_size}")
     print(f"  Batch mode:          {args.batch_mode}")
     print(f"  Epochs:              {args.num_epochs}")
@@ -489,7 +594,7 @@ def train(args):
         is_best = train_loss < best_train_loss
         if is_best:
             best_train_loss = train_loss
-            print(f"New best model! Train Loss: {best_train_loss:.6f}")
+            print(f"✓ New best model! Train Loss: {best_train_loss:.6f}")
 
         if epoch % args.save_every == 0 or is_best:
             checkpoint = {
@@ -505,13 +610,15 @@ def train(args):
             if scaler is not None:
                 checkpoint['scaler_state_dict'] = scaler.state_dict()
 
-            torch.save(checkpoint, checkpoint_dir / f'checkpoint_epoch_{epoch}.pt')
+            torch.save(checkpoint, dirs['checkpoints'] / f'checkpoint_epoch_{epoch}.pt')
 
             if is_best:
-                torch.save(checkpoint, checkpoint_dir / 'best_model.pt')
+                torch.save(checkpoint, dirs['checkpoints'] / 'best_model.pt')
+                print(f"✓ Saved best model checkpoint")
 
-        # Plot losses
-        plot_losses(train_losses, val_losses, log_dir / 'losses.png')
+        # Save losses (both plot and JSON)
+        plot_losses(train_losses, val_losses, dirs['logs'] / 'losses.png')
+        losses_json_path = save_losses_json(train_losses, val_losses, dirs['logs'], epoch=epoch)
 
         # Generate and visualize samples
         if epoch % args.visualize_every == 0:
@@ -531,7 +638,7 @@ def train(args):
                     visualize_point_cloud(
                         generated,
                         title=f"Generated Tree (Epoch {epoch}, {num_pts} points)",
-                        save_path=vis_dir / f'generated_epoch_{epoch}_size_{num_pts}.png'
+                        save_path=dirs['visualizations'] / f'generated_epoch_{epoch}_size_{num_pts}.png'
                     )
                 except Exception as e:
                     print(f"Error during sampling/visualization: {e}")
@@ -542,12 +649,22 @@ def train(args):
     print("\n" + "=" * 60)
     print("Training completed!")
     print(f"Best training loss: {best_train_loss:.6f}")
-    print(f"Checkpoints saved in: {checkpoint_dir}")
-    print(f"Visualizations saved in: {vis_dir}")
+    print(f"Experiment directory: {dirs['experiment']}")
+    print(f"Checkpoints saved in: {dirs['checkpoints']}")
+    print(f"Visualizations saved in: {dirs['visualizations']}")
+    print(f"Configuration saved in: {config_path}")
+    print(f"Losses saved in: {losses_json_path}")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Flow Matching model on tree point clouds')
+
+    # Output directory arguments
+    parser.add_argument('--output_dir', type=str, default='experiments',
+                        help='Base output directory for all experiments')
+    parser.add_argument('--experiment_name', type=str, default=None,
+                        help='Name of the experiment (creates subdirectory under output_dir). '
+                             'If not provided, uses timestamp.')
 
     # Data arguments
     parser.add_argument('--data_path', type=str, default='FOR-species20K')
@@ -603,7 +720,7 @@ def parse_args():
 
     # Resume training
     parser.add_argument('--resume_from', type=str, default=None,
-                        help='Path to checkpoint to resume training from (e.g., output_flow_matching/checkpoints/best_model.pt)')
+                        help='Path to checkpoint to resume training from (e.g., experiments/baseline/checkpoints/best_model.pt)')
 
     return parser.parse_args()
 
