@@ -14,7 +14,7 @@ conda activate canopy-flow
 
 python train.py \
     --output_dir experiments \
-    --experiment_name "transformer-24-256" \
+    --experiment_name "transformer-12-512" \
     --data_path FOR-species20K \
     --preprocessed_version voxel_0.1m \
     --model_dim 512 \
