@@ -268,9 +268,33 @@ def sample(model, num_points, device, method='euler', num_steps=100):
         return None
 
 
+def rotate_point_cloud_z(points, angle_degrees):
+    """
+    Rotate point cloud around Z-axis by a specified angle.
+
+    Args:
+        points: (N, 3) numpy array of points
+        angle_degrees: Rotation angle in degrees
+
+    Returns:
+        rotated_points: (N, 3) numpy array of rotated points
+    """
+    theta = np.radians(angle_degrees)
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
+
+    rotation_matrix = np.array([
+        [cos_theta, -sin_theta, 0],
+        [sin_theta, cos_theta, 0],
+        [0, 0, 1]
+    ], dtype=np.float32)
+
+    return points @ rotation_matrix.T
+
+
 def visualize_point_cloud(points, title="Point Cloud", save_path=None):
     """
-    Visualize a 3D point cloud with NaN/Inf filtering.
+    Visualize a 3D point cloud with NaN/Inf filtering, showing 4 rotations in a 2x2 grid.
 
     Args:
         points: (N, 3) numpy array of points
@@ -304,24 +328,20 @@ def visualize_point_cloud(points, title="Point Cloud", save_path=None):
             return
 
     try:
-        fig = plt.figure(figsize=(10, 10))
-        ax = fig.add_subplot(111, projection='3d')
+        # Create 2x2 grid of subplots
+        fig = plt.figure(figsize=(16, 16))
 
-        ax.scatter(points[:, 0], points[:, 1], points[:, 2],
-                   c=points[:, 2], cmap='viridis', s=1, alpha=0.6)
-
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_zlabel('Z')
-
-        # Add filtered count to title if any were removed
+        # Add main title
         if filtered_count > 0:
             title_with_info = f"{title}\n({len(points)}/{original_count} valid points)"
         else:
             title_with_info = title
-        ax.set_title(title_with_info)
+        fig.suptitle(title_with_info, fontsize=16)
 
-        # Equal aspect ratio with safety checks
+        # Four rotation angles: 0°, 90°, 180°, 270°
+        rotation_angles = [0, 90, 180, 270]
+
+        # Compute global bounds for consistent axis limits across all views
         ranges = np.array([
             points[:, 0].max() - points[:, 0].min(),
             points[:, 1].max() - points[:, 1].min(),
@@ -338,9 +358,28 @@ def visualize_point_cloud(points, title="Point Cloud", save_path=None):
         mid_y = (points[:, 1].max() + points[:, 1].min()) * 0.5
         mid_z = (points[:, 2].max() + points[:, 2].min()) * 0.5
 
-        ax.set_xlim(mid_x - max_range, mid_x + max_range)
-        ax.set_ylim(mid_y - max_range, mid_y + max_range)
-        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+        # Create 4 subplots with different rotations
+        for i, angle in enumerate(rotation_angles):
+            ax = fig.add_subplot(2, 2, i + 1, projection='3d')
+
+            # Rotate points around Z-axis
+            rotated_points = rotate_point_cloud_z(points, angle)
+
+            # Plot with color based on height (z-coordinate)
+            ax.scatter(rotated_points[:, 0], rotated_points[:, 1], rotated_points[:, 2],
+                      c=rotated_points[:, 2], cmap='viridis', s=1, alpha=0.6)
+
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+            ax.set_title(f'Rotation: {angle}°')
+
+            # Set equal aspect ratio with same limits for all views
+            ax.set_xlim(mid_x - max_range, mid_x + max_range)
+            ax.set_ylim(mid_y - max_range, mid_y + max_range)
+            ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+        plt.tight_layout()
 
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
