@@ -491,6 +491,7 @@ def train(args):
         preprocessed_version=args.preprocessed_version,
         sample_exponent=args.sample_exponent,
         rotation_augment=args.rotation_augment,
+        shuffle_augment=args.shuffle_augment,
         max_points=args.max_points
     )
     print(f"Loaded training dataset\n"
@@ -498,6 +499,7 @@ def train(args):
           f" - Preprocessed version: {args.preprocessed_version}\n"
           f" - Sample exponent: {args.sample_exponent}\n"
           f" - Rotation augment: {args.rotation_augment}"
+          f" - Shuffle augment: {args.shuffle_augment}\n"
           f" - Max points: {args.max_points}"
           )
 
@@ -712,6 +714,7 @@ def parse_args():
     # Augmentation arguments
     parser.add_argument('--sample_exponent', type=float, default=None)
     parser.add_argument('--rotation_augment', action='store_true', default=False)
+    parser.add_argument('--shuffle_augment', action='store_true', default=False)
 
     # Model arguments
     parser.add_argument('--time_embed_dim', type=int, default=256)
@@ -740,7 +743,7 @@ def parse_args():
                         help='Enable Automatic Mixed Precision (AMP) training')
     parser.add_argument('--use_flash_attention', action='store_true', default=False,
                         help='Enable Flash Attention (requires PyTorch 2.0+)')
-    parser.add_argument('--grad_clip_norm', type=float, default=5.0,
+    parser.add_argument('--grad_clip_norm', type=float, default=2.0,
                         help='Gradient clipping norm')
 
     # Sampling arguments
