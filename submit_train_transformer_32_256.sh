@@ -17,7 +17,7 @@ python train.py \
     --output_dir experiments \
     --experiment_name "transformer-32-256" \
     --data_path FOR-species20K \
-    --preprocessed_version voxel_0.1m \
+    --preprocessed_version voxel_0.2m \
     --model_dim 256 \
     --num_heads 8 \
     --num_layers 32 \
@@ -26,11 +26,12 @@ python train.py \
     --visualize_every 5 \
     --batch_mode sample_to_min \
     --rotation_augment \
+    --shuffle_augment \
     --num_workers 24 \
-    --num_epochs 2000 \
+    --num_epochs 500 \
     --lr 1e-4 \
     --ode_method dopri5 \
     --use_amp \
     --use_flash_attention \
-    --min_visualization_points 2500 \
-    --max_visualization_points 50000
+    --min_visualization_points 1000 \
+    --max_visualization_points 8000
