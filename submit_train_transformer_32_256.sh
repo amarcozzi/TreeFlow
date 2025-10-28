@@ -22,7 +22,7 @@ python train.py \
     --num_heads 8 \
     --num_layers 32 \
     --dropout 0.1 \
-    --batch_size 8 \
+    --batch_size 64 \
     --visualize_every 5 \
     --batch_mode accumulate \
     --sample_exponent 0.3 \
