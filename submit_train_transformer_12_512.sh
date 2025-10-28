@@ -24,14 +24,17 @@ python train.py \
     --dropout 0.1 \
     --batch_size 8 \
     --visualize_every 5 \
-    --batch_mode sample_to_min \
+    --batch_mode accumulate \
+    --sample_exponent 0.3 \
     --rotation_augment \
     --shuffle_augment \
     --num_workers 24 \
-    --num_epochs 500 \
+    --num_epochs 1000 \
     --lr 1e-4 \
     --ode_method dopri5 \
     --use_amp \
     --use_flash_attention \
     --min_visualization_points 1000 \
-    --max_visualization_points 8000
+    --max_visualization_points 8000 \
+    --resume_from "experiments/transformer-12-512/checkpoints/checkpoint_epoch_500.pt" \
+    --load_weights_only
