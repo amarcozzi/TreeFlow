@@ -15,8 +15,9 @@ conda activate canopy-flow
 
 python train.py \
     --output_dir experiments \
-    --experiment_name "transformer-8-256" \
+    --experiment_name "transformer-8-256-0.2" \
     --data_path FOR-species20K \
+    --csv_path FOR-species20K/tree_metadata_dev.csv \
     --preprocessed_version voxel_0.2m \
     --model_dim 256 \
     --num_heads 8 \
@@ -24,7 +25,6 @@ python train.py \
     --dropout 0.1 \
     --batch_size 64 \
     --visualize_every 5 \
-    --batch_mode accumulate \
     --sample_exponent 0.3 \
     --rotation_augment \
     --shuffle_augment \
@@ -33,8 +33,4 @@ python train.py \
     --lr 1e-4 \
     --ode_method dopri5 \
     --use_amp \
-    --use_flash_attention \
-    --min_visualization_points 1000 \
-    --max_visualization_points 8000 \
-    --resume_from "experiments/transformer-8-256/checkpoints/checkpoint_epoch_500.pt" \
-    --load_weights_only
+    --cfg_dropout_prob 0.1 \

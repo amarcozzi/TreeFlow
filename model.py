@@ -1,50 +1,48 @@
 """
 treeflow/model.py
-
-Transformer for Flow Matching on 3D Tree Point Clouds
 """
 
 import torch
 import torch.nn as nn
 import math
-from typing import Optional, Literal
+
+def modulate(x, shift, scale):
+    """
+    FiLM / AdaLN modulation function.
+    x: (B, N, D)
+    shift, scale: (B, D)
+    """
+    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
-class SinusoidalTimeMLP(nn.Module):
-    """Sinusoidal time embedding with MLP projection."""
+class TimestepEmbedder(nn.Module):
+    """Embeds scalar timesteps into vector representations."""
 
-    def __init__(self, dim: int):
+    def __init__(self, hidden_dim, frequency_embedding_size=256):
         super().__init__()
-        self.dim = dim
-        if dim < 2:
-            raise ValueError(f"Dimension must be at least 2, got {dim}")
-        self.half_dim = dim // 2
-
         self.mlp = nn.Sequential(
-            nn.Linear(dim, dim * 4),
-            nn.GELU(),
-            nn.Linear(dim * 4, dim)
+            nn.Linear(frequency_embedding_size, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
         )
+        self.frequency_embedding_size = frequency_embedding_size
 
-    def forward(self, time: torch.Tensor) -> torch.Tensor:
-        if time.dim() == 0:
-            time = time.unsqueeze(0)
+    @staticmethod
+    def timestep_embedding(t, dim, max_period=10000):
+        """Standard sinusoidal embedding."""
+        half = dim // 2
+        freqs = torch.exp(
+            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+        ).to(device=t.device)
+        args = t[:, None].float() * freqs[None]
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        if dim % 2:
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+        return embedding
 
-        device = time.device
-        freqs = math.log(10000) / max(self.half_dim - 1, 1)
-        freqs = torch.exp(torch.arange(self.half_dim, device=device) * -freqs)
-
-        embeddings = time[:, None] * freqs[None, :]
-        embeddings = torch.cat([embeddings.sin(), embeddings.cos()], dim=-1)
-
-        current_dim = embeddings.shape[-1]
-        if current_dim < self.dim:
-            padding = torch.zeros(embeddings.shape[0], self.dim - current_dim, device=device)
-            embeddings = torch.cat([embeddings, padding], dim=-1)
-        elif current_dim > self.dim:
-            embeddings = embeddings[:, :self.dim]
-
-        return self.mlp(embeddings)
+    def forward(self, t):
+        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+        return self.mlp(t_freq)
 
 
 class PositionalEncoding3D(nn.Module):
@@ -108,138 +106,217 @@ class PositionalEncoding3D(nn.Module):
             return encoding
 
 
-class TransformerVelocityField(nn.Module):
+class DiTBlock(nn.Module):
     """
-    Unconditional Transformer-based velocity field model for flow matching.
-
-    Uses self-attention with simple time conditioning via addition + learned projection.
-    Suitable for unconditional generation like TreeFlow.
+    Diffusion Transformer Block with Adaptive Layer Norm (AdaLN).
     """
-
-    def __init__(
-            self,
-            model_dim: int = 256,
-            num_heads: int = 8,
-            num_layers: int = 8,
-            dim_feedforward: Optional[int] = None,
-            dropout: float = 0.1,
-            max_freq: float = 10000.0,
-            learnable_pos_encoding: bool = False
-    ):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, dropout=0.1):
         super().__init__()
 
-        self.model_dim = model_dim
-        self.num_heads = num_heads
-        self.num_layers = num_layers
+        # 1. Norms (elementwise_affine=False because AdaLN handles the affine part)
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
-        if dim_feedforward is None:
-            dim_feedforward = model_dim * 4
+        # 2. Attention
+        self.attn = nn.MultiheadAttention(hidden_size, num_heads, batch_first=True, dropout=dropout)
 
-        # Positional encoding for 3D coordinates
-        self.pos_encoding = PositionalEncoding3D(model_dim, max_freq, learnable=learnable_pos_encoding)
-
-        # Time embedding
-        self.time_mlp = SinusoidalTimeMLP(dim=model_dim)
-
-        # Learned projection after adding time to spatial features
-        self.fusion_proj = nn.Sequential(
-            nn.Linear(model_dim * 2, model_dim),
-            nn.GELU()
-        )
-
-        # Transformer encoder (self-attention only)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=model_dim,
-            nhead=num_heads,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            activation='gelu',
-            batch_first=True,
-            norm_first=True
-        )
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=num_layers,
-            enable_nested_tensor=False
-        )
-
-        # Output projection
-        self.output_proj = nn.Sequential(
-            nn.Linear(model_dim, model_dim),
+        # 3. MLP
+        mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_size, mlp_hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(model_dim, 3)
+            nn.Linear(mlp_hidden_dim, hidden_size),
+            nn.Dropout(dropout)
         )
 
-        self._init_weights()
+        # 4. AdaLN Modulation Regressor
+        # Predicts 6 vectors: shift/scale/gate for Attn, shift/scale/gate for MLP
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        )
 
-    def _init_weights(self):
-        for module in self.modules():
+    def forward(self, x, c):
+        # Predict modulation parameters
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = \
+            self.adaLN_modulation(c).chunk(6, dim=1)
+
+        # --- Block Part 1: Attention ---
+        x_norm = modulate(self.norm1(x), shift_msa, scale_msa)
+        attn_out, _ = self.attn(x_norm, x_norm, x_norm)
+        x = x + gate_msa.unsqueeze(1) * attn_out
+
+        # --- Block Part 2: MLP ---
+        x_norm = modulate(self.norm2(x), shift_mlp, scale_mlp)
+        mlp_out = self.mlp(x_norm)
+        x = x + gate_mlp.unsqueeze(1) * mlp_out
+
+        return x
+
+
+class ConditionalFlowMatching(nn.Module):
+    """
+    Conditional DiT for Flow Matching.
+    Input: Noisy Points (x_t) + Time (t) + Conditions (Species, Type, Height)
+    Output: Velocity field (v)
+    """
+    def __init__(
+        self,
+        model_dim: int = 256,
+        num_layers: int = 8,
+        num_heads: int = 8,
+        num_species: int = 10,
+        num_types: int = 3,
+        dropout: float = 0.1,
+        max_freq: float = 10000.0,
+        learnable_pos_encoding: bool = False
+    ):
+        super().__init__()
+        self.model_dim = model_dim
+
+        # 1. Spatial Embeddings
+        self.pos_encoding = PositionalEncoding3D(model_dim, max_freq, learnable=learnable_pos_encoding)
+
+        # 2. Conditioning Embedders
+        self.t_embedder = TimestepEmbedder(model_dim)
+
+        # +1 for the "Null/Unconditional" token for CFG
+        self.species_embedder = nn.Embedding(num_species + 1, model_dim)
+        self.type_embedder = nn.Embedding(num_types + 1, model_dim)
+
+        # Height: Continuous + Null handling
+        self.height_mlp = nn.Sequential(
+            nn.Linear(1, model_dim),
+            nn.SiLU(),
+            nn.Linear(model_dim, model_dim)
+        )
+        self.null_height_embed = nn.Parameter(torch.randn(1, model_dim))
+
+        # 3. Transformer Backbone
+        self.blocks = nn.ModuleList([
+            DiTBlock(model_dim, num_heads, dropout=dropout) for _ in range(num_layers)
+        ])
+
+        # 4. Final Output Head
+        self.final_norm = nn.LayerNorm(model_dim, elementwise_affine=False, eps=1e-6)
+        self.adaLN_final = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(model_dim, 2 * model_dim, bias=True)
+        )
+        self.head = nn.Linear(model_dim, 3)
+
+        self.initialize_weights()
+
+        # Store the indices for null tokens
+        self.null_species_idx = num_species
+        self.null_type_idx = num_types
+
+    def initialize_weights(self):
+        # Xavier initialization for standard layers
+        def _basic_init(module):
             if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
+                torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
-                    nn.init.zeros_(module.bias)
+                    nn.init.constant_(module.bias, 0)
+        self.apply(_basic_init)
 
-    def forward(self, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        # Zero-Init for AdaLN modulators
+        for block in self.blocks:
+            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+
+        # Zero-Init for final block
+        nn.init.constant_(self.adaLN_final[-1].weight, 0)
+        nn.init.constant_(self.adaLN_final[-1].bias, 0)
+
+    def forward(self, x, t, species_idx, type_idx, height_norm, drop_mask=None):
         """
-        Forward pass to predict velocity field.
-
         Args:
-            x_t: Noisy points, shape (B, N, 3)
-            t: Time steps, shape (B,) or scalar
-
-        Returns:
-            Predicted velocity, shape (B, N, 3)
+            x: (B, N, 3) - Points
+            t: (B,) - Timesteps
+            species_idx: (B,) - Species Integers
+            type_idx: (B,) - Type Integers
+            height_norm: (B,) - Normalized Height (Log scale)
+            drop_mask: (B,) - Boolean tensor. True = Drop condition (CFG).
         """
-        B, N, _ = x_t.shape
+        # 1. Embed Spatial Inputs
+        x = self.pos_encoding(x)
 
-        # Encode positions
-        pos_features = self.pos_encoding(x_t)  # (B, N, dim)
+        # 2. Embed Time
+        t_emb = self.t_embedder(t)
 
-        # Get time embedding
-        time_emb = self.time_mlp(t)  # (B, dim)
+        # 3. Handle CFG / Dropping
+        if drop_mask is not None:
+            mask = drop_mask.unsqueeze(1).float()
 
-        # Broadcast time embedding across all points and concatenate with spatial features
-        time_emb_expanded = time_emb.unsqueeze(1).expand(-1, N, -1)  # (B, N, dim)
-        features = torch.cat([pos_features, time_emb_expanded], dim=-1)  # (B, N, 2*dim)
+            # Embed real
+            s_real = self.species_embedder(species_idx)
+            type_real = self.type_embedder(type_idx)
 
-        # Project back to model_dim
-        features = self.fusion_proj(features)  # (B, N, dim)
+            # Embed null
+            B = x.shape[0]
+            s_null = self.species_embedder(torch.full((B,), self.null_species_idx, device=x.device))
+            type_null = self.type_embedder(torch.full((B,), self.null_type_idx, device=x.device))
 
-        # Apply transformer (self-attention)
-        features = self.transformer(features)  # (B, N, dim)
+            # Interpolate
+            s_emb = s_real * (1 - mask) + s_null * mask
+            type_emb = type_real * (1 - mask) + type_null * mask
 
-        # Predict velocity
-        velocity = self.output_proj(features)  # (B, N, 3)
+            # Height
+            h_real = self.height_mlp(height_norm.unsqueeze(1))
+            h_null = self.null_height_embed.expand(B, -1)
+            h_emb = h_real * (1 - mask) + h_null * mask
 
-        return velocity
+        else:
+            s_emb = self.species_embedder(species_idx)
+            type_emb = self.type_embedder(type_idx)
+            h_emb = self.height_mlp(height_norm.unsqueeze(1))
+
+        # 4. Sum Conditioning Context
+        cond = t_emb + s_emb + type_emb + h_emb
+
+        # 5. Transformer
+        for block in self.blocks:
+            x = block(x, cond)
+
+        # 6. Output
+        shift, scale = self.adaLN_final(cond).chunk(2, dim=1)
+        x = modulate(self.final_norm(x), shift, scale)
+
+        return self.head(x)
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
 if __name__ == "__main__":
-    print("Testing TransformerVelocityField...")
+    print("Testing ConditionalFlowMatching (DiT)...")
 
-    model = TransformerVelocityField(
-        model_dim=64,
+    model = ConditionalFlowMatching(
+        model_dim=256,
+        num_layers=8,
         num_heads=8,
-        num_layers=2,
-        dropout=0.1
+        num_species=10,
+        num_types=3
     )
 
     print(f"Model parameters: {model.count_parameters():,}")
 
-    # Test with (B, N, 3) format
-    batch_size = 4
-    num_points = 1000
+    B, N = 4, 1000
+    x_0 = torch.randn(B, N, 3)
+    t_0 = torch.rand(B)
+    s_0 = torch.randint(0, 10, (B,))
+    dt_0 = torch.randint(0, 3, (B,))
+    h_0 = torch.randn(B)
 
-    x_t = torch.randn(batch_size, num_points, 3)
-    t = torch.rand(batch_size)
+    # Test standard forward
+    velocity = model(x_0, t_0, s_0, dt_0, h_0)
+    assert velocity.shape == x_0.shape
 
-    velocity = model(x_t, t)
-    print(f"\nInput shape:  {x_t.shape}")
-    print(f"Output shape: {velocity.shape}")
-    assert velocity.shape == x_t.shape
+    # Test with masking
+    mask = torch.tensor([True, False, True, False])
+    velocity_masked = model(x_0, t_0, s_0, dt_0, h_0, drop_mask=mask)
+    assert velocity_masked.shape == x_0.shape
 
     print("\n✓ Model works correctly!")
