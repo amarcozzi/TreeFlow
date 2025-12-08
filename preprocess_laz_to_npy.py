@@ -17,37 +17,27 @@ MIN_POINTS = {
     0.2: 1000,
 }
 
-
-def normalize_to_unit_cube(points):
+def normalize_point_cloud(points, height):
     """
-    Normalize point cloud to unit cube [-1, 1]³.
+    Normalize point cloud by height while preserving aspect ratio.
 
-    This centers the point cloud at the origin and scales it so that
-    the maximum extent in any dimension is 2.0 (fitting in [-1, 1]).
-
-    Args:
-        points: Input points, shape (N, 3)
-
-    Returns:
-        normalized_points: Points in [-1, 1]³, shape (N, 3)
-        scale_factor: The scaling factor applied (for reference)
-        centroid: The original centroid (for reference)
+    1. Center of Mass -> 0,0,0 (Optimal for Flow Matching transport)
+    2. Scale by Height (Preserves aspect ratio)
+    3. Scale by 2.0 (Matches Variance of Gaussian Noise)
     """
-    # Center at origin
+    # 1. Center at mean (Center of Mass)
     centroid = points.mean(axis=0)
     points_centered = points - centroid
 
-    # Find maximum extent in any dimension
-    max_extent = np.abs(points_centered).max()
+    # 2. Normalize by height
+    # Z-axis now spans approx [-0.5, 0.5] * aspect_ratio logic
+    points_normalized = points_centered / height
 
-    # Scale to [-1, 1]³
-    if max_extent > 1e-6:
-        points_normalized = points_centered / max_extent
-    else:
-        points_normalized = points_centered
-        max_extent = 1.0
+    # 3. Apply Variance Scaling
+    # Expands Z-axis to approx [-1.0, 1.0] to match Gaussian noise input
+    points_final = points_normalized * 2.0
 
-    return points_normalized.astype(np.float32), max_extent, centroid
+    return points_final.astype(np.float32), centroid
 
 
 def voxelize_points(points, voxel_size):
@@ -126,10 +116,14 @@ def process_single_file(laz_path, output_dir, voxel_size=None, normalize=True):
 
         # Normalize to unit cube
         if normalize:
-            points, scale_factor, final_centroid = normalize_to_unit_cube(points)
+            x_extent = points[:, 0].max() - points[:, 0].min()
+            y_extent = points[:, 1].max() - points[:, 1].min()
+            z_extent = points[:, 2].max() - points[:, 2].min()
+            # points_test, scale_factor_test, final_centroid_test = normalize_to_unit_cube(points)
+            points, centroid = normalize_point_cloud(points, float(z_extent))
             stats['normalization'] = {
-                'scale_factor': float(scale_factor),
-                'centroid': final_centroid.tolist(),
+                'scale_factor': float(z_extent),
+                'centroid': centroid.tolist(),
                 'normalized_bounds': {
                     'x': (points[:, 0].min(), points[:, 0].max()),
                     'y': (points[:, 1].min(), points[:, 1].max()),
