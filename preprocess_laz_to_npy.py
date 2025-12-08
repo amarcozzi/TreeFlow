@@ -1,6 +1,7 @@
 """
 preprocess_laz_to_npy.py - Convert LAZ files to NPY format with optional voxelization and normalization
 """
+
 import laspy
 import numpy as np
 from pathlib import Path
@@ -11,11 +12,12 @@ from functools import partial
 import json
 
 MIN_POINTS = {
-    None: 10000,
-    0.05: 5000,
-    0.1: 2500,
-    0.2: 1000,
+    None: 0,
+    0.05: 0,
+    0.1: 0,
+    0.2: 0,
 }
+
 
 def normalize_point_cloud(points, height):
     """
@@ -96,10 +98,10 @@ def process_single_file(laz_path, output_dir, voxel_size=None, normalize=True):
         num_points_original = len(points)
 
         stats = {
-            'original_bounds': {
-                'x': (points[:, 0].min(), points[:, 0].max()),
-                'y': (points[:, 1].min(), points[:, 1].max()),
-                'z': (points[:, 2].min(), points[:, 2].max())
+            "original_bounds": {
+                "x": (points[:, 0].min(), points[:, 0].max()),
+                "y": (points[:, 1].min(), points[:, 1].max()),
+                "z": (points[:, 2].min(), points[:, 2].max()),
             }
         }
 
@@ -107,11 +109,11 @@ def process_single_file(laz_path, output_dir, voxel_size=None, normalize=True):
         if voxel_size is not None:
             points_before_voxel = len(points)
             points = voxelize_points(points, voxel_size)
-            stats['voxelization'] = {
-                'voxel_size': voxel_size,
-                'points_before': points_before_voxel,
-                'points_after': len(points),
-                'reduction_ratio': len(points) / points_before_voxel
+            stats["voxelization"] = {
+                "voxel_size": voxel_size,
+                "points_before": points_before_voxel,
+                "points_after": len(points),
+                "reduction_ratio": len(points) / points_before_voxel,
             }
 
         # Normalize to unit cube
@@ -121,18 +123,18 @@ def process_single_file(laz_path, output_dir, voxel_size=None, normalize=True):
             z_extent = points[:, 2].max() - points[:, 2].min()
             # points_test, scale_factor_test, final_centroid_test = normalize_to_unit_cube(points)
             points, centroid = normalize_point_cloud(points, float(z_extent))
-            stats['normalization'] = {
-                'scale_factor': float(z_extent),
-                'centroid': centroid.tolist(),
-                'normalized_bounds': {
-                    'x': (points[:, 0].min(), points[:, 0].max()),
-                    'y': (points[:, 1].min(), points[:, 1].max()),
-                    'z': (points[:, 2].min(), points[:, 2].max())
-                }
+            stats["normalization"] = {
+                "scale_factor": float(z_extent),
+                "centroid": centroid.tolist(),
+                "normalized_bounds": {
+                    "x": (points[:, 0].min(), points[:, 0].max()),
+                    "y": (points[:, 1].min(), points[:, 1].max()),
+                    "z": (points[:, 2].min(), points[:, 2].max()),
+                },
             }
 
         # Ensure minimum points
-        min_points = MIN_POINTS.get(voxel_size, 1000)
+        min_points = MIN_POINTS.get(voxel_size, 0)
         if len(points) < min_points:
             return file_id, num_points_original, len(points), False, stats
 
@@ -150,9 +152,9 @@ def preprocess_dataset(
     data_path,
     output_base_path,
     voxel_sizes=None,
-    splits=('train', 'test'),
+    splits=("train", "test"),
     num_workers=None,
-    normalize=True
+    normalize=True,
 ):
     """
     Preprocess all LAZ files in the dataset with multiple voxel resolutions.
@@ -197,13 +199,13 @@ def preprocess_dataset(
         for split in splits:
             print(f"\n{'-'*60}")
             print(f"Split: {split}")
-            print('-'*60)
+            print("-" * 60)
 
             # Setup paths
-            if split == 'train':
+            if split == "train":
                 laz_dir = data_path / "laz" / "dev"
                 split_name = "dev"  # Keep original naming
-            elif split == 'test':
+            elif split == "test":
                 laz_dir = data_path / "laz" / "test"
                 split_name = "test"
             else:
@@ -227,31 +229,41 @@ def preprocess_dataset(
                 process_single_file,
                 output_dir=output_dir,
                 voxel_size=voxel_size,
-                normalize=normalize
+                normalize=normalize,
             )
 
             with mp.Pool(num_workers) as pool:
-                results = list(tqdm(
-                    pool.imap(process_fn, laz_files),
-                    total=len(laz_files),
-                    desc=f"Converting {split}"
-                ))
+                results = list(
+                    tqdm(
+                        pool.imap(process_fn, laz_files),
+                        total=len(laz_files),
+                        desc=f"Converting {split}",
+                    )
+                )
 
             # Collect statistics
             successful_results = [r for r in results if r[3]]
             successful = len(successful_results)
-            total_points_original = sum(n for _, n, _, _, _ in successful_results if n is not None)
+            total_points_original = sum(
+                n for _, n, _, _, _ in successful_results if n is not None
+            )
             final_points_counts = [n for _, _, n, _, _ in successful_results]
             total_points_final = sum(final_points_counts)
 
             # Collect normalization stats from a few samples
-            sample_stats = [s for _, _, _, _, s in successful_results[:5] if s is not None]
+            sample_stats = [
+                s for _, _, _, _, s in successful_results[:5] if s is not None
+            ]
 
             # Handle case where we skipped already-processed files
             if total_points_original == 0 and successful > 0:
                 reduction_pct = None
             else:
-                reduction_pct = (total_points_final / total_points_original * 100) if total_points_original > 0 else 0
+                reduction_pct = (
+                    (total_points_final / total_points_original * 100)
+                    if total_points_original > 0
+                    else 0
+                )
 
             # Calculate point distribution stats
             point_dist_stats = {}
@@ -259,24 +271,32 @@ def preprocess_dataset(
                 points_arr = np.array(final_points_counts)
                 p25, p75 = np.percentile(points_arr, [25, 75])
                 point_dist_stats = {
-                    'mean': points_arr.mean(),
-                    'median': np.median(points_arr),
-                    'std_dev': points_arr.std(),
-                    'min': points_arr.min(),
-                    'max': points_arr.max(),
-                    '25th_percentile': p25,
-                    '75th_percentile': p75,
+                    "mean": points_arr.mean(),
+                    "median": np.median(points_arr),
+                    "std_dev": points_arr.std(),
+                    "min": points_arr.min(),
+                    "max": points_arr.max(),
+                    "25th_percentile": p25,
+                    "75th_percentile": p75,
                 }
 
             stats[split] = {
-                'total_files': len(laz_files),
-                'successful': successful,
-                'failed': len(laz_files) - successful,
-                'total_points_original': total_points_original if total_points_original > 0 else "N/A (already processed)",
-                'total_points_final': total_points_final,
-                'reduction_pct': f"{reduction_pct:.1f}%" if reduction_pct is not None else "N/A",
-                'point_count_distribution': {k: int(v) for k, v in point_dist_stats.items()},
-                'sample_stats': sample_stats
+                "total_files": len(laz_files),
+                "successful": successful,
+                "failed": len(laz_files) - successful,
+                "total_points_original": (
+                    total_points_original
+                    if total_points_original > 0
+                    else "N/A (already processed)"
+                ),
+                "total_points_final": total_points_final,
+                "reduction_pct": (
+                    f"{reduction_pct:.1f}%" if reduction_pct is not None else "N/A"
+                ),
+                "point_count_distribution": {
+                    k: int(v) for k, v in point_dist_stats.items()
+                },
+                "sample_stats": sample_stats,
             }
 
             print(f"\n{split.upper()} Split Summary:")
@@ -285,13 +305,15 @@ def preprocess_dataset(
                 print(f"  Total points (original): {total_points_original:,}")
             print(f"  Total points (final): {total_points_final:,}")
             if successful > 0:
-                dist = stats[split]['point_count_distribution']
+                dist = stats[split]["point_count_distribution"]
                 print(f"  Point Count Distribution (final):")
                 print(f"    Mean: {dist['mean']:,}")
                 print(f"    Median: {dist['median']:,}")
                 print(f"    Std Dev: {dist['std_dev']:,}")
                 print(f"    Min: {dist['min']:,} | Max: {dist['max']:,}")
-                print(f"    25%-75%: [{dist['25th_percentile']:,} - {dist['75th_percentile']:,}]")
+                print(
+                    f"    25%-75%: [{dist['25th_percentile']:,} - {dist['75th_percentile']:,}]"
+                )
 
             if reduction_pct is not None:
                 print(f"  Point reduction: {reduction_pct:.1f}% retained")
@@ -300,31 +322,35 @@ def preprocess_dataset(
             if normalize and sample_stats:
                 print(f"\n  Sample normalization stats (first 5 files):")
                 for i, s in enumerate(sample_stats):
-                    if 'normalization' in s:
-                        norm = s['normalization']
-                        bounds = norm['normalized_bounds']
-                        print(f"    File {i+1}: scale={norm['scale_factor']:.2f}, "
-                              f"bounds X:[{bounds['x'][0]:.3f}, {bounds['x'][1]:.3f}], "
-                              f"Y:[{bounds['y'][0]:.3f}, {bounds['y'][1]:.3f}], "
-                              f"Z:[{bounds['z'][0]:.3f}, {bounds['z'][1]:.3f}]")
+                    if "normalization" in s:
+                        norm = s["normalization"]
+                        bounds = norm["normalized_bounds"]
+                        print(
+                            f"    File {i+1}: scale={norm['scale_factor']:.2f}, "
+                            f"bounds X:[{bounds['x'][0]:.3f}, {bounds['x'][1]:.3f}], "
+                            f"Y:[{bounds['y'][0]:.3f}, {bounds['y'][1]:.3f}], "
+                            f"Z:[{bounds['z'][0]:.3f}, {bounds['z'][1]:.3f}]"
+                        )
 
         all_stats[voxel_dir_name] = stats
 
         # Save metadata for this voxel size
         metadata_path = output_base_path / voxel_dir_name / "preprocessing_info.txt"
-        with open(metadata_path, 'w') as f:
+        with open(metadata_path, "w") as f:
             f.write(f"LAZ to NPY Preprocessing Summary\n")
-            f.write(f"Voxel size: {voxel_size if voxel_size is not None else 'None (raw)'}\n")
+            f.write(
+                f"Voxel size: {voxel_size if voxel_size is not None else 'None (raw)'}\n"
+            )
             f.write(f"Normalized to unit cube: {normalize}\n")
-            f.write("="*60 + "\n\n")
+            f.write("=" * 60 + "\n\n")
             for split, split_stats in stats.items():
                 f.write(f"{split.upper()} Split:\n")
                 for key, value in split_stats.items():
-                    if key == 'point_count_distribution':
+                    if key == "point_count_distribution":
                         f.write(f"  {key}:\n")
                         for stat_name, stat_val in value.items():
                             f.write(f"    {stat_name}: {stat_val:,}\n")
-                    elif key != 'sample_stats':  # Skip detailed stats in text file
+                    elif key != "sample_stats":  # Skip detailed stats in text file
                         f.write(f"  {key}: {value}\n")
                 f.write("\n")
 
@@ -332,16 +358,18 @@ def preprocess_dataset(
 
     # Save global summary
     summary_path = output_base_path / "preprocessing_summary.json"
-    with open(summary_path, 'w') as f:
+    with open(summary_path, "w") as f:
         # A custom JSON encoder could handle numpy types, but this is simpler
         def default_serializer(o):
             if isinstance(o, (np.int64, np.int32)):
                 return int(o)
             if isinstance(o, (np.float64, np.float32)):
                 return float(o)
-            raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
-        json.dump(all_stats, f, indent=2, default=default_serializer)
+            raise TypeError(
+                f"Object of type {o.__class__.__name__} is not JSON serializable"
+            )
 
+        json.dump(all_stats, f, indent=2, default=default_serializer)
 
     print(f"\n{'='*80}")
     print("Preprocessing complete!")
@@ -372,9 +400,9 @@ def verify_preprocessing(data_path, output_path, voxel_dir="raw", num_samples=5)
         voxel_dir: Which voxel directory to verify
         num_samples: Number of samples to verify
     """
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print(f"Verifying preprocessing ({voxel_dir})...")
-    print("="*60)
+    print("=" * 60)
 
     data_path = Path(data_path)
     output_path = Path(output_path)
@@ -405,19 +433,18 @@ def verify_preprocessing(data_path, output_path, voxel_dir="raw", num_samples=5)
 
         # Compute statistics
         centroid = npy_points.mean(axis=0)
-        bounds = [
-            (npy_points[:, i].min(), npy_points[:, i].max())
-            for i in range(3)
-        ]
+        bounds = [(npy_points[:, i].min(), npy_points[:, i].max()) for i in range(3)]
 
         status = "✓" if is_normalized else "⚠"
         norm_str = "normalized" if is_normalized else "NOT normalized"
 
         print(f"{status} {npy_path.stem}: {len(npy_points)} points, {norm_str}")
         print(f"   Centroid: [{centroid[0]:.4f}, {centroid[1]:.4f}, {centroid[2]:.4f}]")
-        print(f"   Bounds: X:[{bounds[0][0]:.3f}, {bounds[0][1]:.3f}], "
-              f"Y:[{bounds[1][0]:.3f}, {bounds[1][1]:.3f}], "
-              f"Z:[{bounds[2][0]:.3f}, {bounds[2][1]:.3f}]")
+        print(
+            f"   Bounds: X:[{bounds[0][0]:.3f}, {bounds[0][1]:.3f}], "
+            f"Y:[{bounds[1][0]:.3f}, {bounds[1][1]:.3f}], "
+            f"Z:[{bounds[2][0]:.3f}, {bounds[2][1]:.3f}]"
+        )
 
         if not is_normalized:
             all_valid = False
@@ -438,60 +465,60 @@ def main():
         "--data_path",
         type=str,
         default="./FOR-species20K",
-        help="Path to FOR-species20K directory"
+        help="Path to FOR-species20K directory",
     )
     parser.add_argument(
         "--output_path",
         type=str,
         default="./FOR-species20K/npy",
-        help="Base path for NPY files (subdirs will be created for each voxel size)"
+        help="Base path for NPY files (subdirs will be created for each voxel size)",
     )
     parser.add_argument(
         "--voxel_sizes",
-        nargs='+',
+        nargs="+",
         type=float,
         default=None,
-        help="Voxel sizes to process in meters (e.g., 0.05 0.1 0.2). Omit for raw only."
+        help="Voxel sizes to process in meters (e.g., 0.05 0.1 0.2). Omit for raw only.",
     )
     parser.add_argument(
         "--include_raw",
-        action='store_true',
-        help="Also process raw (non-voxelized) version"
+        action="store_true",
+        help="Also process raw (non-voxelized) version",
     )
     parser.add_argument(
         "--normalize",
-        action='store_true',
+        action="store_true",
         default=True,
-        help="Normalize to unit cube [-1, 1]³ (default: True)"
+        help="Normalize to unit cube [-1, 1]³ (default: True)",
     )
     parser.add_argument(
         "--no_normalize",
-        dest='normalize',
-        action='store_false',
-        help="Disable normalization"
+        dest="normalize",
+        action="store_false",
+        help="Disable normalization",
     )
     parser.add_argument(
         "--splits",
-        nargs='+',
-        default=['train', 'test'],
-        help="Splits to process (train and/or test)"
+        nargs="+",
+        default=["train", "test"],
+        help="Splits to process (train and/or test)",
     )
     parser.add_argument(
         "--num_workers",
         type=int,
         default=None,
-        help="Number of parallel workers (default: CPU count)"
+        help="Number of parallel workers (default: CPU count)",
     )
     parser.add_argument(
         "--verify",
-        action='store_true',
-        help="Verify preprocessing by comparing samples"
+        action="store_true",
+        help="Verify preprocessing by comparing samples",
     )
     parser.add_argument(
         "--verify_dir",
         type=str,
         default="raw",
-        help="Which directory to verify (e.g., 'raw', 'voxel_0.1m')"
+        help="Which directory to verify (e.g., 'raw', 'voxel_0.1m')",
     )
 
     args = parser.parse_args()
@@ -508,7 +535,6 @@ def main():
         print("No voxel sizes specified. Defaulting to --include_raw.")
         voxel_sizes_to_process.append(None)
 
-
     # Run preprocessing
     stats = preprocess_dataset(
         data_path=args.data_path,
@@ -516,7 +542,7 @@ def main():
         voxel_sizes=voxel_sizes_to_process,
         splits=args.splits,
         num_workers=args.num_workers,
-        normalize=args.normalize
+        normalize=args.normalize,
     )
 
     # Optional verification
@@ -525,7 +551,7 @@ def main():
             data_path=args.data_path,
             output_path=args.output_path,
             voxel_dir=args.verify_dir,
-            num_samples=5
+            num_samples=5,
         )
 
 
