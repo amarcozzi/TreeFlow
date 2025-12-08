@@ -190,7 +190,7 @@ def sample_conditional(
 
     # Solve
     solver = ODESolver(velocity_model=ode_fn)
-    x_final = solver.sample(x_init, method="dopri5")[0].cpu().numpy()
+    x_final = solver.sample(x_init, method="dopri5", step_size=None)[0].cpu().numpy()
 
     # --- RECONSTRUCTION ---
     # x_norm = (x_centered / height) * 2.0
