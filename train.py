@@ -195,6 +195,7 @@ def sample_conditional(
     # --- RECONSTRUCTION ---
     # x_norm = (x_centered / height) * 2.0
     x_meters = (x_final / 2.0) * target_height
+    x_meters[:, 2] -= x_meters[:, 2].min()
 
     return x_meters
 

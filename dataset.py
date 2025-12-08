@@ -286,6 +286,11 @@ def visualize_augmentation(dataset, idx, num_samples=6):
         s = dataset[idx]
         points = s["points"].numpy()
 
+        # Scale points to meters
+        # points *= 2.0
+        points = (points / 2.0) * s["height_raw"].numpy()
+        points[:, 2] -= points[:, 2].min()
+
         ax = fig.add_subplot(2, 3, i + 1, projection="3d")
         ax.scatter(
             points[:, 0],
