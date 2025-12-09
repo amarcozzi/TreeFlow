@@ -34,8 +34,13 @@ def index_points(points, idx):
         .view(view_shape)
         .repeat(repeat_shape)
     )
+
+    # Advanced indexing: points[batch, :, idx] results in shape [B, S, C]
+    # because the indexed dimensions (0 and 2) are broadcasted to the front.
     new_points = points[batch_indices, :, idx]
-    return new_points
+
+    # Transpose back to [B, C, S] to maintain channel-first convention
+    return new_points.transpose(1, 2)
 
 
 def square_distance(src, dst):
@@ -46,9 +51,14 @@ def square_distance(src, dst):
     """
     B, C, N = src.shape
     _, _, M = dst.shape
+
+    # Matrix multiplication: [B, N, C] x [B, C, M] -> [B, N, M]
     dist = -2 * torch.matmul(src.transpose(1, 2), dst)
-    dist += torch.sum(src**2, -1).view(B, N, 1)
-    dist += torch.sum(dst**2, -1).view(B, 1, M)
+
+    # Add squared norms
+    # src is [B, C, N], so we sum over dim 1 (Channels) to get norm per point
+    dist += torch.sum(src**2, dim=1).view(B, N, 1)
+    dist += torch.sum(dst**2, dim=1).view(B, 1, M)
     return dist
 
 
@@ -470,7 +480,7 @@ class FlowMatchingPointNeXt(nn.Module):
 
 if __name__ == "__main__":
     print("Testing Dual-FiLM PointNeXt...")
-    model = ConditionalFlowMatching(model_dim=32, num_species=5, num_types=2)
+    model = FlowMatchingPointNeXt(model_dim=32, num_species=5, num_types=2)
     print(f"Params: {model.count_parameters():,}")
 
     x = torch.randn(2, 4096, 3)
