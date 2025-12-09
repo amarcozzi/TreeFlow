@@ -110,6 +110,12 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
     group_idx = group_idx.sort(dim=-1)[0][:, :, :nsample]
 
     group_first = group_idx[:, :, 0].view(B, S, 1).repeat(1, 1, nsample)
+
+    # Safety Check: If a point has NO neighbors (group_first is still N),
+    # replace it with 0 to prevent CUDA crash.
+    mask_empty = group_first == N
+    group_first[mask_empty] = 0
+
     mask = group_idx == N
     group_idx[mask] = group_first[mask]
 
@@ -250,7 +256,6 @@ class SetAbstraction(nn.Module):
         # new_xyz: [B, 3, S]
         group_idx = query_ball_point(self.radius, self.nsample, xyz, new_xyz)
 
-        # NOTE: Using .reshape() instead of .view() to be safe against non-contiguous tensors
         grouped_xyz = index_points(xyz, group_idx.reshape(B, -1)).reshape(
             B, 3, self.npoint, self.nsample
         )
