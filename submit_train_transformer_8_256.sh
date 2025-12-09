@@ -23,7 +23,7 @@ python train.py \
     --num_heads 8 \
     --num_layers 8 \
     --dropout 0.1 \
-    --batch_size 4 \
+    --batch_size 8 \
     --visualize_every 10 \
     --sample_exponent 0.3 \
     --rotation_augment \
@@ -33,4 +33,4 @@ python train.py \
     --lr 1e-4 \
     --use_amp \
     --cfg_dropout_prob 0.1 \
-    --max_points 32000
+    --max_points 8192
