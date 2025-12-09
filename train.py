@@ -460,7 +460,12 @@ def main():
     parser.add_argument("--grad_clip_norm", type=float, default=2.0)
     parser.add_argument("--use_amp", action="store_true", default=True)
     parser.add_argument("--compile", action="store_true", default=False)
-    parser.add_argument("--resume_from", type=str, default=None, help="Path to checkpoint to resume from")
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume from",
+    )
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--cfg_dropout_prob", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=None)
