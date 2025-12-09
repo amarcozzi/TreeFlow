@@ -1,5 +1,7 @@
 """
 treeflow/train.py
+
+Train a Flow Matching model on tree point clouds from the FOR-species20K dataset.
 """
 
 import matplotlib
@@ -193,6 +195,7 @@ def sample_conditional(
     x_final = solver.sample(x_init, method="dopri5", step_size=None)[0].cpu().numpy()
 
     # --- RECONSTRUCTION ---
+    # x_norm = (x_centered / height) * 2.0
     x_meters = (x_final / 2.0) * target_height
 
     return x_meters
@@ -229,6 +232,7 @@ def visualize_validation_comparisons(
         real_points_meters = (real_points_norm / 2.0) * h_raw
 
         # 3. Generate Synthetic Counterpart
+        # Using the exact same point count and conditions
         cfg_scale = np.random.uniform(2.0, 5.0)
         gen_points_meters = sample_conditional(
             model,
@@ -240,13 +244,17 @@ def visualize_validation_comparisons(
             cfg_scale=cfg_scale,
         )
 
-        # 4. Plot Side-by-Side
+        # 4. Shift to Ground (Visualization Only)
+        real_points_meters[:, 2] -= real_points_meters[:, 2].min()
+        gen_points_meters[:, 2] -= gen_points_meters[:, 2].min()
+
+        # 5. Plot Side-by-Side
         fig = plt.figure(figsize=(12, 6))
 
         # Determine axis limits (shared for both plots for fair comparison)
-        # Use height to set reasonable fixed bounds, centered at 0
+        # Trees are now grounded at Z=0. Height is h_raw.
         limit = h_raw / 2.0 * 1.2
-        z_min, z_max = -h_raw * 0.6, h_raw * 0.6
+        z_min, z_max = -h_raw * 0.05, h_raw * 1.05
 
         # --- Plot Real ---
         ax1 = fig.add_subplot(1, 2, 1, projection="3d")
@@ -259,7 +267,7 @@ def visualize_validation_comparisons(
             cmap="viridis",
         )
         ax1.set_title(
-            f"REAL | S={s_name} | H={h_raw:.2f}m | N={num_points} | T={t_name}"
+            f"REAL | S={s_name}\nH={h_raw:.2f}m | N={num_points} | T={t_name}"
         )
         ax1.set_xlim(-limit, limit)
         ax1.set_ylim(-limit, limit)
@@ -389,7 +397,7 @@ def train(args):
                     epoch=epoch,
                     save_dir=dirs["viz"],
                     device=device,
-                    num_samples=4,
+                    num_samples=args.num_viz_samples,
                 )
             except Exception as e:
                 print(f"Visualization error: {e}")
@@ -434,6 +442,7 @@ def main():
     # Misc
     parser.add_argument("--save_every", type=int, default=50)
     parser.add_argument("--visualize_every", type=int, default=10)
+    parser.add_argument("--num_viz_samples", type=int, default=4)
 
     args = parser.parse_args()
     train(args)
