@@ -107,8 +107,21 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
     )
     group_idx[sqrdists > radius**2] = N  # Sentinel
 
+    # Sort so that valid neighbors (distance < radius) come first
     group_idx = group_idx.sort(dim=-1)[0][:, :, :nsample]
 
+    # Handle case where N < nsample (e.g. tiny point clouds)
+    # The sort above might result in shape [B, S, N] if N < nsample.
+    # We must pad it to [B, S, nsample].
+    B_idx, S_idx, k_current = group_idx.shape
+    if k_current < nsample:
+        pad_size = nsample - k_current
+        # Replicate the first column (nearest neighbor) to fill the gap
+        first_col = group_idx[:, :, 0:1]
+        padding = first_col.repeat(1, 1, pad_size)
+        group_idx = torch.cat([group_idx, padding], dim=-1)
+
+    # Now group_idx is guaranteed to be [B, S, nsample]
     group_first = group_idx[:, :, 0].view(B, S, 1).repeat(1, 1, nsample)
 
     # Safety Check: If a point has NO neighbors (group_first is still N),
@@ -259,7 +272,8 @@ class SetAbstraction(nn.Module):
 
         group_idx = query_ball_point(self.radius, self.nsample, xyz, new_xyz)
 
-        # Use dynamic shape S instead of self.npoint
+        # NOTE: Using .reshape() instead of .view() to be safe against non-contiguous tensors
+        # Also use dynamic S instead of self.npoint to handle N < npoint case
         grouped_xyz = index_points(xyz, group_idx.reshape(B, -1)).reshape(
             B, 3, S, self.nsample
         )
