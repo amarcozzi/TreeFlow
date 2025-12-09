@@ -341,16 +341,14 @@ def train(args):
     args.type_list = type_list
     model = get_model(args, device)
 
-    # model = ConditionalFlowMatching(
-    #     model_dim=args.model_dim,
-    #     num_layers=args.num_layers,
-    #     num_heads=args.num_heads,
-    #     num_species=len(species_list),
-    #     num_types=len(type_list),
-    #     dropout=args.dropout,
-    # ).to(device)
-
     print(f"Model Parameters: {model.count_parameters()/1e6:.2f}M")
+
+    if args.compile:
+        try:
+            print("Compiling model with torch.compile...")
+            model = torch.compile(model)
+        except Exception as e:
+            print(f"Compilation failed (safe to ignore): {e}")
 
     optimizer = optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
@@ -441,6 +439,7 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--grad_clip_norm", type=float, default=2.0)
     parser.add_argument("--use_amp", action="store_true", default=True)
+    parser.add_argument("--compile", action="store_true", default=False)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--cfg_dropout_prob", type=float, default=0.1)
 
