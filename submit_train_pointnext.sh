@@ -22,7 +22,7 @@ python train.py \
     --preprocessed_version raw \
     --model_dim 64 \
     --dropout 0.1 \
-    --batch_size 64 \
+    --batch_size 16 \
     --visualize_every 5 \
     --sample_exponent 0.3 \
     --rotation_augment \
