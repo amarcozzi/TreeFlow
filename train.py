@@ -381,12 +381,18 @@ def train(args):
         scheduler.step()
 
         # Save Checkpoint
+        checkpoint = {
+            "model": model.state_dict(),
+            "seed": args.seed,
+            "epoch": epoch,
+        }
+
         if train_loss < best_loss:
             best_loss = train_loss
-            torch.save(model.state_dict(), dirs["ckpt"] / "best_model.pt")
+            torch.save(checkpoint, dirs["ckpt"] / "best_model.pt")
 
         if epoch % args.save_every == 0:
-            torch.save(model.state_dict(), dirs["ckpt"] / f"epoch_{epoch}.pt")
+            torch.save(checkpoint, dirs["ckpt"] / f"epoch_{epoch}.pt")
 
         # Visualization (Validation Comparisons)
         if epoch % args.visualize_every == 0:
@@ -442,6 +448,7 @@ def main():
     parser.add_argument("--compile", action="store_true", default=False)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--cfg_dropout_prob", type=float, default=0.1)
+    parser.add_argument("--seed", type=int, default=None)
 
     # Augmentation
     parser.add_argument("--sample_exponent", type=float, default=0.3)
@@ -455,6 +462,12 @@ def main():
     parser.add_argument("--num_viz_samples", type=int, default=4)
 
     args = parser.parse_args()
+
+    if args.seed is None:
+        args.seed = random.randint(0, 100000)
+
+    print(f"Random Seed: {args.seed}")
+
     train(args)
 
 
