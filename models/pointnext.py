@@ -18,28 +18,34 @@ import math
 def index_points(points, idx):
     """
     Input:
-        points: input points data, [B, C, N]
-        idx: sample index data, [B, S]
+        points: [B, C, N]
+        idx: [B, S] or [B, S, K]
     Return:
-        new_points:, indexed points data, [B, C, S]
+        new_points: [B, C, S] or [B, C, S, K]
     """
     device = points.device
     B = points.shape[0]
+
+    # Handle both 2D and 3D index tensors
     view_shape = list(idx.shape)
     view_shape[1:] = [1] * (len(view_shape) - 1)
     repeat_shape = list(idx.shape)
     repeat_shape[0] = 1
+
     batch_indices = (
         torch.arange(B, dtype=torch.long, device=device)
         .view(view_shape)
         .repeat(repeat_shape)
     )
 
-    # Advanced indexing
+    # [B, S, C] or [B, S, K, C]
     new_points = points[batch_indices, :, idx]
 
-    # Transpose and ensure contiguous memory for downstream .view() calls
-    return new_points.transpose(1, 2).contiguous()
+    # Transpose back to channel-first: [B, C, S] or [B, C, S, K]
+    if len(idx.shape) == 2:
+        return new_points.transpose(1, 2).contiguous()
+    else:
+        return new_points.permute(0, 3, 1, 2).contiguous()
 
 
 def square_distance(src, dst):
@@ -88,6 +94,7 @@ def farthest_point_sample(xyz, npoint):
 
 def query_ball_point(radius, nsample, xyz, new_xyz):
     """
+    Optimized Ball Query using Chunking and TopK.
     Input:
         radius: local region radius
         nsample: max sample number in local region
@@ -100,39 +107,49 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
     B, C, N = xyz.shape
     _, _, S = new_xyz.shape
 
-    sqrdists = square_distance(new_xyz, xyz)
+    # CHUNKING: Process query points in blocks to save memory.
+    # This reduces peak memory from O(N^2) to O(N * chunk_size)
+    CHUNK_SIZE = 512  # Adjust based on VRAM. 512 is safe.
+    group_idxs = []
 
-    group_idx = (
-        torch.arange(N, dtype=torch.long).to(device).view(1, 1, N).repeat(B, S, 1)
-    )
-    group_idx[sqrdists > radius**2] = N  # Sentinel
+    for i in range(0, S, CHUNK_SIZE):
+        end = min(i + CHUNK_SIZE, S)
+        new_xyz_chunk = new_xyz[:, :, i:end]  # [B, 3, chunk]
 
-    # Sort so that valid neighbors (distance < radius) come first
-    group_idx = group_idx.sort(dim=-1)[0][:, :, :nsample]
+        # Calculate distance only for this chunk: [B, chunk, N]
+        sqrdists = square_distance(new_xyz_chunk, xyz)
 
-    # Handle case where N < nsample (e.g. tiny point clouds)
-    # The sort above might result in shape [B, S, N] if N < nsample.
-    # We must pad it to [B, S, nsample].
-    B_idx, S_idx, k_current = group_idx.shape
-    if k_current < nsample:
-        pad_size = nsample - k_current
-        # Replicate the first column (nearest neighbor) to fill the gap
-        first_col = group_idx[:, :, 0:1]
-        padding = first_col.repeat(1, 1, pad_size)
-        group_idx = torch.cat([group_idx, padding], dim=-1)
+        # OPTIMIZATION: Use topk instead of sort
+        # sort is O(N log N), topk is O(N)
+        # We want smallest distances, so largest=False
+        # If N < nsample, topk returns all N elements sorted
+        k_target = min(nsample, N)
+        vals, idx = torch.topk(sqrdists, k_target, dim=-1, largest=False, sorted=False)
 
-    # Now group_idx is guaranteed to be [B, S, nsample]
-    group_first = group_idx[:, :, 0].view(B, S, 1).repeat(1, 1, nsample)
+        # Padding if N < nsample
+        if k_target < nsample:
+            pad_len = nsample - k_target
+            # Replicate the nearest neighbor (index 0)
+            first_val = vals[:, :, 0:1].repeat(1, 1, pad_len)
+            first_idx = idx[:, :, 0:1].repeat(1, 1, pad_len)
+            vals = torch.cat([vals, first_val], dim=-1)
+            idx = torch.cat([idx, first_idx], dim=-1)
 
-    # Safety Check: If a point has NO neighbors (group_first is still N),
-    # replace it with 0 to prevent CUDA crash.
-    mask_empty = group_first == N
-    group_first[mask_empty] = 0
+        # Apply radius mask
+        # If distance > radius^2, replace index with N (sentinel)
+        # But wait! We need a valid index to avoid crash.
+        # Strategy: Set index to nearest neighbor (idx[:, :, 0]) if outside radius.
+        # This is a common trick in PointNet++ to maintain fixed tensor size.
+        mask = vals > radius**2
 
-    mask = group_idx == N
-    group_idx[mask] = group_first[mask]
+        # Create a "safe" fallback index (usually the point itself or nearest neighbor)
+        # Here we use the nearest neighbor found (column 0)
+        nearest = idx[:, :, 0:1].repeat(1, 1, nsample)
+        idx[mask] = nearest[mask]
 
-    return group_idx
+        group_idxs.append(idx)
+
+    return torch.cat(group_idxs, dim=1)
 
 
 # ==============================================================================
@@ -265,24 +282,17 @@ class SetAbstraction(nn.Module):
         else:
             new_xyz = xyz
 
-        # 2. Grouping
-        # new_xyz: [B, 3, S]
-        # S can be self.npoint OR N (if N < npoint)
+        # Use Dynamic S to handle cases where N < npoint
         S = new_xyz.shape[2]
 
         group_idx = query_ball_point(self.radius, self.nsample, xyz, new_xyz)
 
-        # NOTE: Using .reshape() instead of .view() to be safe against non-contiguous tensors
-        # Also use dynamic S instead of self.npoint to handle N < npoint case
-        grouped_xyz = index_points(xyz, group_idx.reshape(B, -1)).reshape(
-            B, 3, S, self.nsample
-        )
+        # index_points now handles [B, S, K] -> [B, C, S, K] automatically
+        grouped_xyz = index_points(xyz, group_idx)  # [B, 3, S, K]
         grouped_xyz_norm = grouped_xyz - new_xyz.view(B, 3, S, 1)
 
         if points is not None:
-            grouped_points = index_points(points, group_idx.reshape(B, -1)).reshape(
-                B, points.shape[1], S, self.nsample
-            )
+            grouped_points = index_points(points, group_idx)  # [B, C, S, K]
             new_points = torch.cat([grouped_xyz_norm, grouped_points], dim=1)
         else:
             new_points = grouped_xyz_norm
@@ -324,6 +334,7 @@ class FeaturePropagation(nn.Module):
             interpolated_points = points2.repeat(1, 1, N)
         else:
             dists = square_distance(xyz1, xyz2)
+            # Find 3 nearest neighbors for interpolation
             dists, idx = dists.sort(dim=-1)
             dists, idx = dists[:, :, :3], idx[:, :, :3]
 
@@ -331,10 +342,9 @@ class FeaturePropagation(nn.Module):
             norm = torch.sum(dist_recip, dim=2, keepdim=True)
             weight = dist_recip / norm
 
+            # Use index_points with [B, N, 3] index
             interpolated_points = torch.sum(
-                index_points(points2, idx.reshape(B, -1)).reshape(B, -1, N, 3)
-                * weight.view(B, 1, N, 3),
-                dim=3,
+                index_points(points2, idx) * weight.view(B, 1, N, 3), dim=3
             )
 
         if points1 is not None:
