@@ -1,5 +1,5 @@
 """
-treeflow/model.py
+treeflow/models/transformer.py
 """
 
 import torch
@@ -168,7 +168,7 @@ class DiTBlock(nn.Module):
         return x
 
 
-class ConditionalFlowMatching(nn.Module):
+class FlowMatchingDiT(nn.Module):
     """
     Conditional DiT for Flow Matching.
     Input: Noisy Points (x_t) + Time (t) + Conditions (Species, Type, Height)

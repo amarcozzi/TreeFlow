@@ -21,7 +21,7 @@ import json
 from datetime import datetime
 import random
 
-from model import ConditionalFlowMatching
+from models import get_model
 from dataset import create_datasets, collate_fn_batched
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
@@ -337,14 +337,18 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    model = ConditionalFlowMatching(
-        model_dim=args.model_dim,
-        num_layers=args.num_layers,
-        num_heads=args.num_heads,
-        num_species=len(species_list),
-        num_types=len(type_list),
-        dropout=args.dropout,
-    ).to(device)
+    args.species_list = species_list
+    args.type_list = type_list
+    model = get_model(args, device)
+
+    # model = ConditionalFlowMatching(
+    #     model_dim=args.model_dim,
+    #     num_layers=args.num_layers,
+    #     num_heads=args.num_heads,
+    #     num_species=len(species_list),
+    #     num_types=len(type_list),
+    #     dropout=args.dropout,
+    # ).to(device)
 
     print(f"Model Parameters: {model.count_parameters()/1e6:.2f}M")
 
@@ -417,6 +421,13 @@ def main():
     parser.add_argument("--preprocessed_version", type=str, default="voxel_0.2m")
 
     # Model
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        default="dit",
+        choices=["dit", "pointnext"],
+        help="Architecture to use: 'dit' (Transformer) or 'pointnext' (U-Net)",
+    )
     parser.add_argument("--model_dim", type=int, default=256)
     parser.add_argument("--num_layers", type=int, default=12)
     parser.add_argument("--num_heads", type=int, default=8)

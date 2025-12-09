@@ -1,6 +1,7 @@
 """
 debug_profiling.py - Enhanced profiling to identify DataLoader bottlenecks
 """
+
 import torch
 import time
 import numpy as np
@@ -8,39 +9,35 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from model import PointNet2UnetForFlowMatching
+from models.transformer import PointNet2UnetForFlowMatching
 from dataset import PointCloudDataset, collate_fn
 from flow_matching.path import CondOTProbPath
 
 
 def profile_dataset_components(data_path, num_samples=100):
     """Profile individual components of the dataset __getitem__ method."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("PROFILING DATASET COMPONENTS (Detailed Breakdown)")
-    print("="*80)
+    print("=" * 80)
 
     dataset = PointCloudDataset(
         Path(data_path),
-        split='train',
+        split="train",
         voxel_size=0.1,
         sample_exponent=0.5,
-        rotation_augment=True
+        rotation_augment=True,
     )
 
     times = {
-        'file_io': [],
-        'voxelization': [],
-        'sampling': [],
-        'rotation': [],
-        'tensor_conversion': [],
-        'total': []
+        "file_io": [],
+        "voxelization": [],
+        "sampling": [],
+        "rotation": [],
+        "tensor_conversion": [],
+        "total": [],
     }
 
-    point_counts = {
-        'raw': [],
-        'after_voxel': [],
-        'after_sample': []
-    }
+    point_counts = {"raw": [], "after_voxel": [], "after_sample": []}
 
     print(f"\nProcessing {num_samples} samples...")
 
@@ -53,67 +50,81 @@ def profile_dataset_components(data_path, num_samples=100):
         # 1. FILE I/O
         io_start = time.time()
         points = np.load(filepath)
-        times['file_io'].append(time.time() - io_start)
-        point_counts['raw'].append(len(points))
+        times["file_io"].append(time.time() - io_start)
+        point_counts["raw"].append(len(points))
 
         # 2. VOXELIZATION
         voxel_start = time.time()
         if dataset.voxel_size is not None:
             points = dataset._voxelize(points)
-        times['voxelization'].append(time.time() - voxel_start)
-        point_counts['after_voxel'].append(len(points))
+        times["voxelization"].append(time.time() - voxel_start)
+        point_counts["after_voxel"].append(len(points))
 
         # 3. SAMPLING
         sample_start = time.time()
         if dataset.sample_exponent is not None:
             points = dataset._sample_points(points)
-        times['sampling'].append(time.time() - sample_start)
-        point_counts['after_sample'].append(len(points))
+        times["sampling"].append(time.time() - sample_start)
+        point_counts["after_sample"].append(len(points))
 
         # 4. ROTATION
         rotation_start = time.time()
         if dataset.rotation_augment:
             points = dataset._rotate_z(points)
-        times['rotation'].append(time.time() - rotation_start)
+        times["rotation"].append(time.time() - rotation_start)
 
         # 5. TENSOR CONVERSION
         tensor_start = time.time()
         _ = torch.from_numpy(points).float()
-        times['tensor_conversion'].append(time.time() - tensor_start)
+        times["tensor_conversion"].append(time.time() - tensor_start)
 
-        times['total'].append(time.time() - total_start)
+        times["total"].append(time.time() - total_start)
 
     # Print results
-    print("\n" + "-"*80)
+    print("\n" + "-" * 80)
     print("TIME BREAKDOWN (per sample)")
-    print("-"*80)
+    print("-" * 80)
 
-    total_avg = np.mean(times['total']) * 1000
+    total_avg = np.mean(times["total"]) * 1000
 
-    for key in ['file_io', 'voxelization', 'sampling', 'rotation', 'tensor_conversion']:
+    for key in ["file_io", "voxelization", "sampling", "rotation", "tensor_conversion"]:
         avg = np.mean(times[key]) * 1000
         std = np.std(times[key]) * 1000
-        pct = (np.mean(times[key]) / np.mean(times['total'])) * 100
+        pct = (np.mean(times[key]) / np.mean(times["total"])) * 100
         print(f"  {key:20s}: {avg:7.2f}ms ± {std:6.2f}ms  ({pct:5.1f}%)")
 
     print(f"  {'TOTAL':20s}: {total_avg:7.2f}ms")
 
     # Print point count statistics
-    print("\n" + "-"*80)
+    print("\n" + "-" * 80)
     print("POINT COUNT STATISTICS")
-    print("-"*80)
-    print(f"  Raw points:          {np.mean(point_counts['raw']):8.0f} ± {np.std(point_counts['raw']):7.0f} (min={min(point_counts['raw'])}, max={max(point_counts['raw'])})")
-    print(f"  After voxelization:  {np.mean(point_counts['after_voxel']):8.0f} ± {np.std(point_counts['after_voxel']):7.0f} (min={min(point_counts['after_voxel'])}, max={max(point_counts['after_voxel'])})")
-    print(f"  After sampling:      {np.mean(point_counts['after_sample']):8.0f} ± {np.std(point_counts['after_sample']):7.0f} (min={min(point_counts['after_sample'])}, max={max(point_counts['after_sample'])})")
+    print("-" * 80)
+    print(
+        f"  Raw points:          {np.mean(point_counts['raw']):8.0f} ± {np.std(point_counts['raw']):7.0f} (min={min(point_counts['raw'])}, max={max(point_counts['raw'])})"
+    )
+    print(
+        f"  After voxelization:  {np.mean(point_counts['after_voxel']):8.0f} ± {np.std(point_counts['after_voxel']):7.0f} (min={min(point_counts['after_voxel'])}, max={max(point_counts['after_voxel'])})"
+    )
+    print(
+        f"  After sampling:      {np.mean(point_counts['after_sample']):8.0f} ± {np.std(point_counts['after_sample']):7.0f} (min={min(point_counts['after_sample'])}, max={max(point_counts['after_sample'])})"
+    )
 
     # Calculate reduction ratios
-    voxel_reduction = np.mean(point_counts['after_voxel']) / np.mean(point_counts['raw']) * 100
-    sample_reduction = np.mean(point_counts['after_sample']) / np.mean(point_counts['after_voxel']) * 100
-    total_reduction = np.mean(point_counts['after_sample']) / np.mean(point_counts['raw']) * 100
+    voxel_reduction = (
+        np.mean(point_counts["after_voxel"]) / np.mean(point_counts["raw"]) * 100
+    )
+    sample_reduction = (
+        np.mean(point_counts["after_sample"])
+        / np.mean(point_counts["after_voxel"])
+        * 100
+    )
+    total_reduction = (
+        np.mean(point_counts["after_sample"]) / np.mean(point_counts["raw"]) * 100
+    )
 
-    print("\n" + "-"*80)
+    print("\n" + "-" * 80)
     print("REDUCTION RATIOS")
-    print("-"*80)
+    print("-" * 80)
     print(f"  Voxelization keeps:  {voxel_reduction:5.1f}% of points")
     print(f"  Sampling keeps:      {sample_reduction:5.1f}% of voxelized points")
     print(f"  Total reduction:     {total_reduction:5.1f}% of original points")
@@ -121,14 +132,14 @@ def profile_dataset_components(data_path, num_samples=100):
 
 def profile_voxelization_algorithms(data_path, num_samples=50):
     """Compare different voxelization approaches."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("TESTING VOXELIZATION ALGORITHMS")
-    print("="*80)
+    print("=" * 80)
 
     dataset = PointCloudDataset(
         Path(data_path),
-        split='train',
-        voxel_size=None  # We'll do voxelization manually
+        split="train",
+        voxel_size=None,  # We'll do voxelization manually
     )
 
     # Load some sample point clouds
@@ -169,24 +180,24 @@ def profile_voxelization_algorithms(data_path, num_samples=50):
             voxel_dict[voxel_idx].append(point)
 
         # Use voxel centers
-        voxel_centers = np.array([(np.array(k) + 0.5) * voxel_size for k in voxel_dict.keys()])
+        voxel_centers = np.array(
+            [(np.array(k) + 0.5) * voxel_size for k in voxel_dict.keys()]
+        )
         times_dict.append(time.time() - start)
 
-    print(f"   Time: {np.mean(times_dict)*1000:.2f}ms ± {np.std(times_dict)*1000:.2f}ms")
+    print(
+        f"   Time: {np.mean(times_dict)*1000:.2f}ms ± {np.std(times_dict)*1000:.2f}ms"
+    )
     print(f"   Speedup vs current: {np.mean(times_dict)/np.mean(times_np):.2f}x")
 
 
 def profile_file_io_formats(data_path, num_samples=50):
     """Test if NPY loading is the bottleneck."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("PROFILING FILE I/O")
-    print("="*80)
+    print("=" * 80)
 
-    dataset = PointCloudDataset(
-        Path(data_path),
-        split='train',
-        voxel_size=None
-    )
+    dataset = PointCloudDataset(Path(data_path), split="train", voxel_size=None)
 
     times = []
     file_sizes = []
@@ -205,9 +216,9 @@ def profile_file_io_formats(data_path, num_samples=50):
         points = np.load(filepath)
         times.append(time.time() - start)
 
-    print("\n" + "-"*80)
+    print("\n" + "-" * 80)
     print("FILE I/O STATISTICS")
-    print("-"*80)
+    print("-" * 80)
     print(f"  Avg load time:  {np.mean(times)*1000:.2f}ms ± {np.std(times)*1000:.2f}ms")
     print(f"  Avg file size:  {np.mean(file_sizes):.1f}KB ± {np.std(file_sizes):.1f}KB")
     print(f"  Min load time:  {min(times)*1000:.2f}ms")
@@ -217,27 +228,59 @@ def profile_file_io_formats(data_path, num_samples=50):
 
 def profile_with_different_configs(data_path, batch_size=64):
     """Test different dataset configurations."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("COMPARING DATASET CONFIGURATIONS")
-    print("="*80)
+    print("=" * 80)
 
     configs = [
-        {"name": "Baseline (no processing)", "voxel_size": None, "sample_exponent": None, "rotation_augment": False},
-        {"name": "Only voxelization", "voxel_size": 0.1, "sample_exponent": None, "rotation_augment": False},
-        {"name": "Only sampling", "voxel_size": None, "sample_exponent": 0.5, "rotation_augment": False},
-        {"name": "Only rotation", "voxel_size": None, "sample_exponent": None, "rotation_augment": True},
-        {"name": "Voxel + sampling", "voxel_size": 0.1, "sample_exponent": 0.5, "rotation_augment": False},
-        {"name": "All augmentations", "voxel_size": 0.1, "sample_exponent": 0.5, "rotation_augment": True},
+        {
+            "name": "Baseline (no processing)",
+            "voxel_size": None,
+            "sample_exponent": None,
+            "rotation_augment": False,
+        },
+        {
+            "name": "Only voxelization",
+            "voxel_size": 0.1,
+            "sample_exponent": None,
+            "rotation_augment": False,
+        },
+        {
+            "name": "Only sampling",
+            "voxel_size": None,
+            "sample_exponent": 0.5,
+            "rotation_augment": False,
+        },
+        {
+            "name": "Only rotation",
+            "voxel_size": None,
+            "sample_exponent": None,
+            "rotation_augment": True,
+        },
+        {
+            "name": "Voxel + sampling",
+            "voxel_size": 0.1,
+            "sample_exponent": 0.5,
+            "rotation_augment": False,
+        },
+        {
+            "name": "All augmentations",
+            "voxel_size": 0.1,
+            "sample_exponent": 0.5,
+            "rotation_augment": True,
+        },
     ]
 
     for config in configs:
         print(f"\n{config['name']}:")
-        print(f"  voxel_size={config['voxel_size']}, sample_exponent={config['sample_exponent']}, rotation={config['rotation_augment']}")
+        print(
+            f"  voxel_size={config['voxel_size']}, sample_exponent={config['sample_exponent']}, rotation={config['rotation_augment']}"
+        )
 
         dataset = PointCloudDataset(
             Path(data_path),
-            split='train',
-            **{k: v for k, v in config.items() if k != 'name'}
+            split="train",
+            **{k: v for k, v in config.items() if k != "name"},
         )
 
         loader = DataLoader(
@@ -266,16 +309,16 @@ def profile_with_different_configs(data_path, batch_size=64):
 
 def profile_data_loading(data_path, batch_size=64, num_batches=10):
     """Profile data loading speed."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("PROFILING DATA LOADING")
-    print("="*80)
+    print("=" * 80)
 
     dataset = PointCloudDataset(
         Path(data_path),
-        split='train',
+        split="train",
         voxel_size=0.1,
         sample_exponent=0.5,
-        rotation_augment=True
+        rotation_augment=True,
     )
 
     # Test different worker configurations
@@ -302,20 +345,22 @@ def profile_data_loading(data_path, batch_size=64, num_batches=10):
                 break
             batch_time = time.time()
             times.append(batch_time - start)
-            point_counts.append(batch[0]['num_points'] if len(batch) > 0 else 0)
+            point_counts.append(batch[0]["num_points"] if len(batch) > 0 else 0)
             start = batch_time
 
         print(f"  Avg time per batch: {np.mean(times):.3f}s")
         print(f"  First batch time: {times[0]:.3f}s")
         print(f"  Subsequent batches: {np.mean(times[1:]):.3f}s")
-        print(f"  Point counts: min={min(point_counts)}, max={max(point_counts)}, avg={np.mean(point_counts):.0f}")
+        print(
+            f"  Point counts: min={min(point_counts)}, max={max(point_counts)}, avg={np.mean(point_counts):.0f}"
+        )
 
 
-def profile_model_forward(device='cuda', batch_size=64):
+def profile_model_forward(device="cuda", batch_size=64):
     """Profile model forward pass with different point counts."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("PROFILING MODEL FORWARD PASS")
-    print("="*80)
+    print("=" * 80)
 
     model = PointNet2UnetForFlowMatching(time_embed_dim=256).to(device)
     model.eval()
@@ -342,23 +387,25 @@ def profile_model_forward(device='cuda', batch_size=64):
             torch.cuda.synchronize()
             times.append(time.time() - start)
 
-        print(f"  {num_points} points: {np.mean(times)*1000:.2f}ms ± {np.std(times)*1000:.2f}ms")
+        print(
+            f"  {num_points} points: {np.mean(times)*1000:.2f}ms ± {np.std(times)*1000:.2f}ms"
+        )
         print(f"    Throughput: {batch_size / np.mean(times):.1f} samples/sec")
 
 
-def profile_full_training_step(data_path, device='cuda', batch_size=64):
+def profile_full_training_step(data_path, device="cuda", batch_size=64):
     """Profile a complete training iteration."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("PROFILING FULL TRAINING STEP")
-    print("="*80)
+    print("=" * 80)
 
     # Setup
     dataset = PointCloudDataset(
         Path(data_path),
-        split='train',
+        split="train",
         voxel_size=0.1,
         sample_exponent=0.5,
-        rotation_augment=True
+        rotation_augment=True,
     )
 
     loader = DataLoader(
@@ -380,12 +427,12 @@ def profile_full_training_step(data_path, device='cuda', batch_size=64):
 
     # Profile 10 iterations
     times = {
-        'data_loading': [],
-        'to_device': [],
-        'forward': [],
-        'backward': [],
-        'optimizer': [],
-        'total': []
+        "data_loading": [],
+        "to_device": [],
+        "forward": [],
+        "backward": [],
+        "optimizer": [],
+        "total": [],
     }
 
     data_iter = iter(loader)
@@ -396,15 +443,15 @@ def profile_full_training_step(data_path, device='cuda', batch_size=64):
         # Data loading
         load_start = time.time()
         batch = next(data_iter)
-        times['data_loading'].append(time.time() - load_start)
+        times["data_loading"].append(time.time() - load_start)
 
         # Transfer to device
         device_start = time.time()
         sample = batch[0]
-        points = sample['points'].to(device)
+        points = sample["points"].to(device)
         points = points.unsqueeze(0).transpose(1, 2)
         torch.cuda.synchronize()
-        times['to_device'].append(time.time() - device_start)
+        times["to_device"].append(time.time() - device_start)
 
         # Forward pass
         optimizer.zero_grad()
@@ -418,42 +465,46 @@ def profile_full_training_step(data_path, device='cuda', batch_size=64):
         loss = torch.nn.functional.mse_loss(pred, path_sample.dx_t)
 
         torch.cuda.synchronize()
-        times['forward'].append(time.time() - forward_start)
+        times["forward"].append(time.time() - forward_start)
 
         # Backward pass
         backward_start = time.time()
         loss.backward()
         torch.cuda.synchronize()
-        times['backward'].append(time.time() - backward_start)
+        times["backward"].append(time.time() - backward_start)
 
         # Optimizer step
         opt_start = time.time()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         torch.cuda.synchronize()
-        times['optimizer'].append(time.time() - opt_start)
+        times["optimizer"].append(time.time() - opt_start)
 
-        times['total'].append(time.time() - iter_start)
+        times["total"].append(time.time() - iter_start)
 
-        print(f"  Iteration {i+1}: {times['total'][-1]:.3f}s (pts={sample['num_points']})")
+        print(
+            f"  Iteration {i+1}: {times['total'][-1]:.3f}s (pts={sample['num_points']})"
+        )
 
     print("\n  Average times:")
     for key, values in times.items():
-        print(f"    {key:15s}: {np.mean(values)*1000:.2f}ms ± {np.std(values)*1000:.2f}ms")
+        print(
+            f"    {key:15s}: {np.mean(values)*1000:.2f}ms ± {np.std(values)*1000:.2f}ms"
+        )
 
     # Calculate percentages
-    total_avg = np.mean(times['total'])
+    total_avg = np.mean(times["total"])
     print("\n  Time breakdown:")
-    for key in ['data_loading', 'to_device', 'forward', 'backward', 'optimizer']:
+    for key in ["data_loading", "to_device", "forward", "backward", "optimizer"]:
         pct = (np.mean(times[key]) / total_avg) * 100
         print(f"    {key:15s}: {pct:.1f}%")
 
 
-def check_memory_usage(device='cuda', batch_size=64):
+def check_memory_usage(device="cuda", batch_size=64):
     """Check memory usage with different configurations."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("CHECKING MEMORY USAGE")
-    print("="*80)
+    print("=" * 80)
 
     model = PointNet2UnetForFlowMatching(time_embed_dim=256).to(device)
 
@@ -478,14 +529,15 @@ def check_memory_usage(device='cuda', batch_size=64):
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path', type=str, default='FOR-species20K')
-    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument("--data_path", type=str, default="FOR-species20K")
+    parser.add_argument("--batch_size", type=int, default=64)
     args = parser.parse_args()
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\nUsing device: {device}")
-    if device == 'cuda':
+    if device == "cuda":
         print(f"GPU: {torch.cuda.get_device_name()}")
 
     # Run enhanced profiling - focus on data loading bottleneck
@@ -498,11 +550,13 @@ def main():
     profile_data_loading(args.data_path, batch_size=args.batch_size, num_batches=10)
     profile_model_forward(device=device, batch_size=args.batch_size)
     check_memory_usage(device=device, batch_size=args.batch_size)
-    profile_full_training_step(args.data_path, device=device, batch_size=args.batch_size)
+    profile_full_training_step(
+        args.data_path, device=device, batch_size=args.batch_size
+    )
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("PROFILING COMPLETE")
-    print("="*80)
+    print("=" * 80)
     print("\nKEY INSIGHTS TO LOOK FOR:")
     print("  1. Which operation takes the most time in dataset loading?")
     print("  2. Is file I/O fast enough or is disk a bottleneck?")
@@ -510,5 +564,5 @@ def main():
     print("  4. What's the speedup potential from optimizing each component?")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -324,7 +324,7 @@ if __name__ == "__main__":
         train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
             data_path=data_path,
             csv_path=csv_path,
-            preprocessed_version="voxel_0.1m",
+            preprocessed_version="voxel_0.2m",
             sample_exponent=0.3,
             rotation_augment=True,
         )
