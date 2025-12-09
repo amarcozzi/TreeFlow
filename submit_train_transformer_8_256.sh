@@ -23,8 +23,8 @@ python train.py \
     --num_heads 8 \
     --num_layers 8 \
     --dropout 0.1 \
-    --batch_size 64 \
-    --visualize_every 5 \
+    --batch_size 4 \
+    --visualize_every 10 \
     --sample_exponent 0.3 \
     --rotation_augment \
     --shuffle_augment \
