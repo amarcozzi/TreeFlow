@@ -20,7 +20,7 @@ python train.py \
     --data_path FOR-species20K \
     --csv_path FOR-species20K/tree_metadata_dev.csv \
     --preprocessed_version raw \
-    --model_dim 64 \
+    --model_dim 16 \
     --dropout 0.1 \
     --batch_size 16 \
     --visualize_every 20 \
@@ -32,4 +32,3 @@ python train.py \
     --lr 1e-3 \
     --use_amp \
     --cfg_dropout_prob 0.1 \
-    --max_points 8192
