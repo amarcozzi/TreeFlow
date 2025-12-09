@@ -54,17 +54,14 @@ def square_distance(src, dst):
     src: [B, C, N]
     dst: [B, C, M]
     """
-    B, C, N = src.shape
-    _, _, M = dst.shape
+    # Use torch.cdist for numerical stability with mixed precision
+    # cdist expects [B, N, C]
+    src_t = src.transpose(1, 2)
+    dst_t = dst.transpose(1, 2)
 
-    # Matrix multiplication: [B, N, C] x [B, C, M] -> [B, N, M]
-    dist = -2 * torch.matmul(src.transpose(1, 2), dst)
-
-    # Add squared norms
-    # src is [B, C, N], so we sum over dim 1 (Channels) to get norm per point
-    dist += torch.sum(src**2, dim=1).view(B, N, 1)
-    dist += torch.sum(dst**2, dim=1).view(B, 1, M)
-    return dist
+    # cdist calculates actual euclidean distance, so we square it
+    # to match the expected output of the original function
+    return torch.cdist(src_t, dst_t, p=2.0).pow(2)
 
 
 def farthest_point_sample(xyz, npoint):
