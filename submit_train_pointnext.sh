@@ -22,14 +22,13 @@ python train.py \
     --preprocessed_version raw \
     --model_dim 64 \
     --dropout 0.1 \
-    --batch_size 16 \
-    --visualize_every 20 \
+    --batch_size 64 \
+    --visualize_every 5 \
     --sample_exponent 0.3 \
     --rotation_augment \
     --shuffle_augment \
     --num_workers 24 \
     --num_epochs 1000 \
-    --lr 1e-3 \
+    --lr 1e-4 \
     --use_amp \
     --cfg_dropout_prob 0.1 \
-    --max_points 8192
