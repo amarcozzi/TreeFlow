@@ -360,10 +360,24 @@ def train(args):
     scaler = torch.amp.GradScaler("cuda") if args.use_amp else None
     flow_path = CondOTProbPath()
 
+    start_epoch = 1
+    if args.resume_from:
+        print(f"Loading checkpoint from {args.resume_from}")
+        checkpoint = torch.load(args.resume_from, map_location=device)
+
+        if isinstance(checkpoint, dict) and "model" in checkpoint:
+            model.load_state_dict(checkpoint["model"])
+            if "epoch" in checkpoint:
+                start_epoch = checkpoint["epoch"] + 1
+        else:
+            model.load_state_dict(checkpoint)
+
+        print(f"Resuming training from epoch {start_epoch}")
+
     # 4. Training Loop
     best_loss = float("inf")
 
-    for epoch in range(1, args.num_epochs + 1):
+    for epoch in range(start_epoch, args.num_epochs + 1):
         print(f"\nEpoch {epoch}/{args.num_epochs}")
 
         train_loss = train_epoch(
@@ -446,6 +460,7 @@ def main():
     parser.add_argument("--grad_clip_norm", type=float, default=2.0)
     parser.add_argument("--use_amp", action="store_true", default=True)
     parser.add_argument("--compile", action="store_true", default=False)
+    parser.add_argument("--resume_from", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--cfg_dropout_prob", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=None)
