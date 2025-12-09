@@ -254,16 +254,20 @@ class SetAbstraction(nn.Module):
 
         # 2. Grouping
         # new_xyz: [B, 3, S]
+        # S can be self.npoint OR N (if N < npoint)
+        S = new_xyz.shape[2]
+
         group_idx = query_ball_point(self.radius, self.nsample, xyz, new_xyz)
 
+        # Use dynamic shape S instead of self.npoint
         grouped_xyz = index_points(xyz, group_idx.reshape(B, -1)).reshape(
-            B, 3, self.npoint, self.nsample
+            B, 3, S, self.nsample
         )
-        grouped_xyz_norm = grouped_xyz - new_xyz.view(B, 3, self.npoint, 1)
+        grouped_xyz_norm = grouped_xyz - new_xyz.view(B, 3, S, 1)
 
         if points is not None:
             grouped_points = index_points(points, group_idx.reshape(B, -1)).reshape(
-                B, points.shape[1], self.npoint, self.nsample
+                B, points.shape[1], S, self.nsample
             )
             new_points = torch.cat([grouped_xyz_norm, grouped_points], dim=1)
         else:
