@@ -31,4 +31,5 @@ python train.py \
     --num_epochs 1000 \
     --lr 1e-3 \
     --use_amp \
-    --cfg_dropout_prob 0.1
+    --cfg_dropout_prob 0.1 \
+    --max_points 8192
