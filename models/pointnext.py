@@ -35,12 +35,11 @@ def index_points(points, idx):
         .repeat(repeat_shape)
     )
 
-    # Advanced indexing: points[batch, :, idx] results in shape [B, S, C]
-    # because the indexed dimensions (0 and 2) are broadcasted to the front.
+    # Advanced indexing
     new_points = points[batch_indices, :, idx]
 
-    # Transpose back to [B, C, S] to maintain channel-first convention
-    return new_points.transpose(1, 2)
+    # Transpose and ensure contiguous memory for downstream .view() calls
+    return new_points.transpose(1, 2).contiguous()
 
 
 def square_distance(src, dst):
@@ -250,15 +249,15 @@ class SetAbstraction(nn.Module):
         # 2. Grouping
         # new_xyz: [B, 3, S]
         group_idx = query_ball_point(self.radius, self.nsample, xyz, new_xyz)
-        grouped_xyz = index_points(xyz, group_idx.view(B, -1)).view(
+
+        # NOTE: Using .reshape() instead of .view() to be safe against non-contiguous tensors
+        grouped_xyz = index_points(xyz, group_idx.reshape(B, -1)).reshape(
             B, 3, self.npoint, self.nsample
         )
-        grouped_xyz_norm = grouped_xyz - new_xyz.view(
-            B, 3, self.npoint, 1
-        )  # Center neighbors
+        grouped_xyz_norm = grouped_xyz - new_xyz.view(B, 3, self.npoint, 1)
 
         if points is not None:
-            grouped_points = index_points(points, group_idx.view(B, -1)).view(
+            grouped_points = index_points(points, group_idx.reshape(B, -1)).reshape(
                 B, points.shape[1], self.npoint, self.nsample
             )
             new_points = torch.cat([grouped_xyz_norm, grouped_points], dim=1)
@@ -310,7 +309,7 @@ class FeaturePropagation(nn.Module):
             weight = dist_recip / norm
 
             interpolated_points = torch.sum(
-                index_points(points2, idx.view(B, -1)).view(B, -1, N, 3)
+                index_points(points2, idx.reshape(B, -1)).reshape(B, -1, N, 3)
                 * weight.view(B, 1, N, 3),
                 dim=3,
             )
