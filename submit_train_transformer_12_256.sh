@@ -11,7 +11,7 @@
 module load cuda
 
 source /project/umontana_fire_modeling/anthony.marcozzi/miniforge3/etc/profile.d/conda.sh
-conda activate canopy-flow
+conda activate treeflow
 
 python train.py \
     --output_dir experiments \
