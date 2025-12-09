@@ -479,7 +479,7 @@ class FlowMatchingPointNeXt(nn.Module):
 
 if __name__ == "__main__":
     print("Testing Dual-FiLM PointNeXt...")
-    model = FlowMatchingPointNeXt(model_dim=32, num_species=5, num_types=2)
+    model = FlowMatchingPointNeXt(model_dim=64, num_species=33, num_types=3)
     print(f"Params: {model.count_parameters():,}")
 
     x = torch.randn(2, 4096, 3)
