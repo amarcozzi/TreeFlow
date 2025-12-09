@@ -397,7 +397,7 @@ def train(args):
                     epoch=epoch,
                     save_dir=dirs["viz"],
                     device=device,
-                    num_samples=3,  # Adjust as needed
+                    num_samples=args.num_viz_samples,
                 )
             except Exception as e:
                 print(f"Visualization error: {e}")
@@ -442,6 +442,7 @@ def main():
     # Misc
     parser.add_argument("--save_every", type=int, default=50)
     parser.add_argument("--visualize_every", type=int, default=10)
+    parser.add_argument("--num_viz_samples", type=int, default=4)
 
     args = parser.parse_args()
     train(args)
