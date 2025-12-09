@@ -20,7 +20,7 @@ python train.py \
     --data_path FOR-species20K \
     --csv_path FOR-species20K/tree_metadata_dev.csv \
     --preprocessed_version raw \
-    --model_dim 16 \
+    --model_dim 64 \
     --dropout 0.1 \
     --batch_size 16 \
     --visualize_every 20 \
