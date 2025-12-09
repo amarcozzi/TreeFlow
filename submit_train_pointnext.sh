@@ -19,7 +19,7 @@ python train.py \
     --model_type pointnext \
     --data_path FOR-species20K \
     --csv_path FOR-species20K/tree_metadata_dev.csv \
-    --preprocessed_version voxel_0.2m \
+    --preprocessed_version raw \
     --model_dim 64 \
     --dropout 0.1 \
     --batch_size 16 \
