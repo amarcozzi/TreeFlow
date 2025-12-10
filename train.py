@@ -272,7 +272,7 @@ def visualize_validation_comparisons(
         ax1.set_xlim(-limit, limit)
         ax1.set_ylim(-limit, limit)
         ax1.set_zlim(z_min, z_max)
-        ax1.axis("off")
+        # ax1.axis("off")
 
         # --- Plot Generated ---
         ax2 = fig.add_subplot(1, 2, 2, projection="3d")
@@ -288,10 +288,10 @@ def visualize_validation_comparisons(
         ax2.set_xlim(-limit, limit)
         ax2.set_ylim(-limit, limit)
         ax2.set_zlim(z_min, z_max)
-        ax2.axis("off")
+        # ax2.axis("off")
 
-        plt.tight_layout()
-        plt.savefig(save_dir / f"ep{epoch}_val_{idx}_{s_name}.png", dpi=150)
+        # plt.tight_layout()
+        plt.savefig(save_dir / f"ep{epoch}_val_{idx}_{s_name}.png", dpi=300)
         plt.close()
 
 
