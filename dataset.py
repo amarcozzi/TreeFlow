@@ -82,7 +82,11 @@ class PointCloudDataset(Dataset):
         # Load NPY file
         points = np.load(row["file_path"])
 
-        # 1. Augmentation (Sampling/Rotation)
+        # Augmentation (Sampling/Rotation)
+        if self.max_points is not None and len(points) > self.max_points:
+            indices = np.random.choice(len(points), self.max_points, replace=False)
+            points = points[indices]
+
         if self.sample_exponent is not None:
             points = self._sample_points(points)
 
@@ -92,11 +96,7 @@ class PointCloudDataset(Dataset):
         if self.shuffle_augment:
             np.random.shuffle(points)
 
-        if self.max_points is not None and len(points) > self.max_points:
-            indices = np.random.choice(len(points), self.max_points, replace=False)
-            points = points[indices]
-
-        # 2. Normalization & Conditioning
+        # Normalization & Conditioning
         # Strategy: Center at Mass -> Scale by Height -> Scale by 2.0 (for variance matching)
         height = float(row["tree_H"])
 
