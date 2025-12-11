@@ -362,10 +362,7 @@ def train(args):
 
     start_epoch = 1
     if args.resume_from:
-        current_dir = Path(__file__).resolve().parent
-        checkpoint_dir = (
-            current_dir / output_dir / exp_name / "checkpoints" / args.resume_from
-        )
+        checkpoint_dir = output_dir / "checkpoints" / args.resume_from
         print(f"Loading checkpoint from {checkpoint_dir}")
         checkpoint = torch.load(checkpoint_dir, map_location=device)
 
