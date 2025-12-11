@@ -362,8 +362,11 @@ def train(args):
 
     start_epoch = 1
     if args.resume_from:
-        print(f"Loading checkpoint from {args.resume_from}")
-        checkpoint = torch.load(args.resume_from, map_location=device)
+        checkpoint_dir = (
+            args.output_dir / args.experiment_name / "checkpoints" / args.resume_from
+        )
+        print(f"Loading checkpoint from {checkpoint_dir}")
+        checkpoint = torch.load(checkpoint_dir, map_location=device)
 
         if isinstance(checkpoint, dict) and "model" in checkpoint:
             model.load_state_dict(checkpoint["model"])
