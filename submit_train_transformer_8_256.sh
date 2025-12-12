@@ -37,4 +37,5 @@ python train.py \
     --cfg_dropout_prob 0.1 \
     --max_points 8192 \
     --batch_mode "accumulate" \
+    --use_flash_attention \
     --resume_from "epoch_3500.pt"

@@ -27,6 +27,23 @@ from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 
 
+def enable_flash_attention():
+    """Enable Flash Attention if available."""
+    try:
+        if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
+            # Flash Attention is available in PyTorch 2.0+
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
+            print("✓ Flash Attention enabled")
+            return True
+        else:
+            print("⚠  Flash Attention not available (requires PyTorch 2.0+)")
+            return False
+    except Exception as e:
+        print(f"⚠  Could not enable Flash Attention: {e}")
+        return False
+
+
 def save_config(args, output_dir, species_list, type_list):
     """Save training config and mappings."""
     config = vars(args).copy()
@@ -107,7 +124,7 @@ def train_epoch(
     for batch in train_loader:
         optimizer.zero_grad()
 
-        if batch_mode == 'accumulate':
+        if batch_mode == "accumulate":
             # Process each sample individually and accumulate gradients
             for sample in batch:
                 # Move single sample to device
@@ -148,7 +165,7 @@ def train_epoch(
                 total_loss += loss.item()
                 num_samples += 1
 
-        elif batch_mode == 'sample':
+        elif batch_mode == "sample":
             # Process entire batch at once
             points = batch["points"].to(device)  # (B, N, 3)
             species = batch["species_idx"].to(device)  # (B,)
@@ -390,6 +407,12 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # Enable Flash Attention if requested and on CUDA
+    if args.use_flash_attention and device.type == "cuda":
+        enable_flash_attention()
+    elif args.use_flash_attention:
+        print("⚠  Flash Attention requires CUDA, skipping")
+
     args.species_list = species_list
     args.type_list = type_list
     model = get_model(args, device)
@@ -517,6 +540,7 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--grad_clip_norm", type=float, default=2.0)
     parser.add_argument("--use_amp", action="store_true", default=True)
+    parser.add_argument("--use_flash_attention", action="store_true", default=True)
     parser.add_argument("--compile", action="store_true", default=False)
     parser.add_argument(
         "--resume_from",
