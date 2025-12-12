@@ -370,6 +370,9 @@ def train(args):
             model.load_state_dict(checkpoint["model"])
             if "epoch" in checkpoint:
                 start_epoch = checkpoint["epoch"] + 1
+            if "seed" in checkpoint:
+                args.seed = checkpoint["seed"]
+                print(f"Resumed seed: {args.seed}")
         else:
             model.load_state_dict(checkpoint)
 
