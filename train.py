@@ -482,7 +482,9 @@ def main():
     parser.add_argument("--rotation_augment", action="store_true", default=True)
     parser.add_argument("--shuffle_augment", action="store_true", default=True)
     parser.add_argument("--max_points", type=int, default=None)
-    parser.add_argument("--batch_mode", type=str, default="sample", choices=["sample", "accumulate"])
+    parser.add_argument(
+        "--batch_mode", type=str, default="sample", choices=["sample", "accumulate"]
+    )
 
     # Misc
     parser.add_argument("--save_every", type=int, default=50)
