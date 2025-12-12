@@ -92,6 +92,7 @@ def train_epoch(
     optimizer,
     flow_path,
     device,
+    batch_mode,
     cfg_dropout_prob=0.1,
     scaler=None,
     grad_clip_norm=1.0,
@@ -106,48 +107,97 @@ def train_epoch(
     for batch in train_loader:
         optimizer.zero_grad()
 
-        # Move data to device
-        points = batch["points"].to(device)  # (B, N, 3)
-        species = batch["species_idx"].to(device)  # (B,)
-        dtype = batch["type_idx"].to(device)  # (B,)
-        h_norm = batch["height_norm"].to(device)  # (B,)
+        if batch_mode == 'accumulate':
+            # Process each sample individually and accumulate gradients
+            for sample in batch:
+                # Move single sample to device
+                points = sample["points"].unsqueeze(0).to(device)  # (1, N, 3)
+                species = sample["species_idx"].unsqueeze(0).to(device)  # (1,)
+                dtype = sample["type_idx"].unsqueeze(0).to(device)  # (1,)
+                h_norm = sample["height_norm"].unsqueeze(0).to(device)  # (1,)
 
-        # Sample random timesteps
-        t = torch.rand(points.shape[0], device=device)
+                # Sample random timestep
+                t = torch.rand(1, device=device)
 
-        loss = compute_loss(
-            model,
-            points,
-            t,
-            species,
-            dtype,
-            h_norm,
-            flow_path,
-            device,
-            use_amp=use_amp,
-            p_uncond=cfg_dropout_prob,
-        )
+                loss = compute_loss(
+                    model,
+                    points,
+                    t,
+                    species,
+                    dtype,
+                    h_norm,
+                    flow_path,
+                    device,
+                    use_amp=use_amp,
+                    p_uncond=cfg_dropout_prob,
+                )
 
-        if torch.isnan(loss) or torch.isinf(loss):
-            print("Warning: NaN/Inf loss detected, skipping batch")
-            continue
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print("Warning: NaN/Inf loss detected, skipping sample")
+                    continue
 
+                # Normalize loss by batch size
+                normalized_loss = loss / len(batch)
+
+                # Backward pass with gradient accumulation
+                if scaler is not None:
+                    scaler.scale(normalized_loss).backward()
+                else:
+                    normalized_loss.backward()
+
+                total_loss += loss.item()
+                num_samples += 1
+
+        elif batch_mode == 'sample':
+            # Process entire batch at once
+            points = batch["points"].to(device)  # (B, N, 3)
+            species = batch["species_idx"].to(device)  # (B,)
+            dtype = batch["type_idx"].to(device)  # (B,)
+            h_norm = batch["height_norm"].to(device)  # (B,)
+
+            # Sample random timesteps
+            t = torch.rand(points.shape[0], device=device)
+
+            loss = compute_loss(
+                model,
+                points,
+                t,
+                species,
+                dtype,
+                h_norm,
+                flow_path,
+                device,
+                use_amp=use_amp,
+                p_uncond=cfg_dropout_prob,
+            )
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                print("Warning: NaN/Inf loss detected, skipping batch")
+                pbar.update(1)
+                continue
+
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+            total_loss += loss.item() * points.shape[0]
+            num_samples += points.shape[0]
+
+        # Gradient clipping and optimizer step (happens once per batch)
         if scaler is not None:
-            scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
             scaler.step(optimizer)
             scaler.update()
         else:
-            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
             optimizer.step()
 
-        total_loss += loss.item() * points.shape[0]
-        num_samples += points.shape[0]
-
         pbar.update(1)
-        pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+        if num_samples > 0:
+            avg_loss = total_loss / num_samples
+            pbar.set_postfix({"loss": f"{avg_loss:.4f}"})
 
     pbar.close()
     return total_loss / num_samples if num_samples > 0 else 0.0
@@ -393,6 +443,7 @@ def train(args):
             optimizer,
             flow_path,
             device,
+            batch_mode=args.batch_mode,
             cfg_dropout_prob=args.cfg_dropout_prob,
             scaler=scaler,
             grad_clip_norm=args.grad_clip_norm,
