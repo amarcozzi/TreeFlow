@@ -23,7 +23,7 @@ python train.py \
     --num_heads 8 \
     --num_layers 8 \
     --dropout 0.1 \
-    --batch_size 16 \
+    --batch_size 64 \
     --visualize_every 10 \
     --save_every 100 \
     --sample_exponent 0.3 \
@@ -36,4 +36,5 @@ python train.py \
     --compile \
     --cfg_dropout_prob 0.1 \
     --max_points 8192 \
-    --resume_from "epoch_2500.pt"
+    --batch_mode "accumulate" \
+    --resume_from "epoch_3500.pt"

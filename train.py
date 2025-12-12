@@ -22,7 +22,7 @@ from datetime import datetime
 import random
 
 from models import get_model
-from dataset import create_datasets, collate_fn_batched
+from dataset import create_datasets, collate_fn_batched, collate_fn
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 
@@ -324,12 +324,15 @@ def train(args):
     save_config(args, output_dir, species_list, type_list)
 
     # 2. Dataloaders
+    print(f"\nCreating dataloaders...")
+    print(f"Batch Mode: {args.batch_mode}")
+    collate_function = collate_fn_batched if args.batch_mode == "sample" else collate_fn
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        collate_fn=collate_fn_batched,
+        collate_fn=collate_function,
         pin_memory=True,
     )
 
@@ -479,6 +482,7 @@ def main():
     parser.add_argument("--rotation_augment", action="store_true", default=True)
     parser.add_argument("--shuffle_augment", action="store_true", default=True)
     parser.add_argument("--max_points", type=int, default=None)
+    parser.add_argument("--batch_mode", type=str, default="sample", choices=["sample", "accumulate"])
 
     # Misc
     parser.add_argument("--save_every", type=int, default=50)
