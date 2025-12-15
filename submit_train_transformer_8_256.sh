@@ -23,7 +23,7 @@ python train.py \
     --num_heads 8 \
     --num_layers 8 \
     --dropout 0.1 \
-    --batch_size 32 \
+    --batch_size 64 \
     --visualize_every 10 \
     --save_every 100 \
     --rotation_augment \
