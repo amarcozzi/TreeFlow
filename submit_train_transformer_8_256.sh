@@ -26,7 +26,6 @@ python train.py \
     --batch_size 64 \
     --visualize_every 10 \
     --save_every 100 \
-    --sample_exponent 0.3 \
     --rotation_augment \
     --shuffle_augment \
     --num_workers 24 \
@@ -35,7 +34,5 @@ python train.py \
     --use_amp \
     --compile \
     --cfg_dropout_prob 0.1 \
-    --max_points 8192 \
-    --batch_mode "accumulate" \
-    --use_flash_attention \
-    --resume_from "epoch_3500.pt"
+    --max_points 4096 \
+    --use_flash_attention

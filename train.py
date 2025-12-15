@@ -4,6 +4,13 @@ treeflow/train.py
 Train a Flow Matching model on tree point clouds from the FOR-species20K dataset.
 """
 
+import torch
+
+if torch.cuda.is_available():
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
 import matplotlib
 
 matplotlib.use("Agg")
@@ -553,7 +560,7 @@ def main():
     parser.add_argument("--seed", type=int, default=None)
 
     # Augmentation
-    parser.add_argument("--sample_exponent", type=float, default=0.3)
+    parser.add_argument("--sample_exponent", type=float, default=None)
     parser.add_argument("--rotation_augment", action="store_true", default=True)
     parser.add_argument("--shuffle_augment", action="store_true", default=True)
     parser.add_argument("--max_points", type=int, default=None)
