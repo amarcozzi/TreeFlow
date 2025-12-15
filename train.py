@@ -365,7 +365,7 @@ def visualize_validation_comparisons(
         # ax2.axis("off")
 
         # plt.tight_layout()
-        plt.savefig(save_dir / f"ep{epoch}_val_{idx}_{s_name}.png", dpi=300)
+        plt.savefig(save_dir / f"epoch_{epoch}_{idx}.png", dpi=300)
         plt.close()
 
 
