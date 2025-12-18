@@ -383,6 +383,20 @@ def train(args):
     for d in dirs.values():
         d.mkdir(parents=True, exist_ok=True)
 
+    # Load checkpoint seed if resuming (before dataset creation)
+    if args.resume_from:
+        checkpoint_path = dirs["ckpt"] / args.resume_from
+        if checkpoint_path.exists():
+            print(f"Loading seed from checkpoint: {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            if isinstance(checkpoint, dict) and "seed" in checkpoint:
+                args.seed = checkpoint["seed"]
+                print(f"Using checkpoint seed: {args.seed}")
+            else:
+                print(f"Warning: No seed found in checkpoint, using seed: {args.seed}")
+        else:
+            print(f"Warning: Checkpoint not found at {checkpoint_path}, using seed: {args.seed}")
+
     # 1. Create Datasets (CSV Metadata Split)
     print(f"\nPreparing datasets from {args.csv_path}...")
     train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
@@ -393,6 +407,7 @@ def train(args):
         rotation_augment=args.rotation_augment,
         shuffle_augment=args.shuffle_augment,
         max_points=args.max_points,
+        seed=args.seed,
     )
 
     save_config(args, output_dir, species_list, type_list)
@@ -446,16 +461,13 @@ def train(args):
     start_epoch = 1
     if args.resume_from:
         checkpoint_dir = output_dir / "checkpoints" / args.resume_from
-        print(f"Loading checkpoint from {checkpoint_dir}")
+        print(f"Loading model state from checkpoint: {checkpoint_dir}")
         checkpoint = torch.load(checkpoint_dir, map_location=device)
 
         if isinstance(checkpoint, dict) and "model" in checkpoint:
             model.load_state_dict(checkpoint["model"])
             if "epoch" in checkpoint:
                 start_epoch = checkpoint["epoch"] + 1
-            if "seed" in checkpoint:
-                args.seed = checkpoint["seed"]
-                print(f"Resumed seed: {args.seed}")
         else:
             model.load_state_dict(checkpoint)
 
