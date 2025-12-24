@@ -30,7 +30,7 @@ python train.py \
     --rotation_augment \
     --shuffle_augment \
     --num_workers 24 \
-    --num_epochs 2500 \
+    --num_epochs 10000 \
     --lr 1e-4 \
     --use_amp \
     --compile \
