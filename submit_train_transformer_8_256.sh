@@ -2,11 +2,11 @@
 #SBATCH --account=umontana_fire_modeling
 #SBATCH --partition=gpu-a100
 #SBATCH --gres=gpu:a100:1
-#SBATCH --job-name="tf_8_256"
+#SBATCH --job-name="treeflow"
 #SBATCH --cpus-per-task=36
 #SBATCH --mem=128G
 #SBATCH --time=2-0
-#SBATCH --output=log_train_transformer_8_256_raw.out
+#SBATCH --output=log_train_transformer_8_256_4096.out
 
 module load cuda
 
@@ -15,7 +15,7 @@ conda activate treeflow
 
 python train.py \
     --output_dir experiments \
-    --experiment_name "transformer-8-256-raw" \
+    --experiment_name "transformer-8-256-4096" \
     --data_path FOR-species20K \
     --csv_path FOR-species20K/tree_metadata_dev.csv \
     --preprocessed_version raw \
@@ -35,5 +35,4 @@ python train.py \
     --use_amp \
     --compile \
     --cfg_dropout_prob 0.1 \
-    --max_points 8192 \
-    --resume_from "epoch_2500.pt"
+    --max_points 4096 \
