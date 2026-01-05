@@ -87,10 +87,10 @@ def sample_conditional(
     solver = ODESolver(velocity_model=ode_fn)
 
     if solver_method == "dopri5":
-        x_final = solver.sample(x_init, method="dopri5", step_size=None)[0]
+        x_final = solver.sample(x_init, method="dopri5", step_size=None)
     else:
         step_size = 1.0 / num_steps
-        x_final = solver.sample(x_init, method=solver_method, step_size=step_size)[0]
+        x_final = solver.sample(x_init, method=solver_method, step_size=step_size)
 
     x_final = x_final.cpu().numpy()
 
