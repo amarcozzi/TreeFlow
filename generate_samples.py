@@ -38,11 +38,19 @@ def load_checkpoint(checkpoint_path: Path, model, device):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     if isinstance(checkpoint, dict) and "model" in checkpoint:
-        model.load_state_dict(checkpoint["model"])
+        state_dict = checkpoint["model"]
         epoch = checkpoint.get("epoch", "unknown")
-        print(f"  Loaded model from epoch {epoch}")
     else:
-        model.load_state_dict(checkpoint)
+        state_dict = checkpoint
+        epoch = "unknown"
+
+    # Handle torch.compile() prefix: compiled models save keys with "_orig_mod." prefix
+    if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+        print("  Detected compiled model checkpoint, stripping '_orig_mod.' prefix...")
+        state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+
+    model.load_state_dict(state_dict)
+    print(f"  Loaded model from epoch {epoch}")
 
     return model
 
