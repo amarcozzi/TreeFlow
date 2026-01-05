@@ -30,9 +30,10 @@ python train.py \
     --rotation_augment \
     --shuffle_augment \
     --num_workers 24 \
-    --num_epochs 10000 \
+    --num_epochs 20000 \
     --lr 1e-4 \
     --use_amp \
     --compile \
     --cfg_dropout_prob 0.1 \
     --max_points 4096 \
+    --resume_from epoch_17600.pt
