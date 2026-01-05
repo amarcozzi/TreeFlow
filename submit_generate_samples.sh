@@ -51,6 +51,5 @@ python generate_samples.py \
     --num_samples_per_tree ${NUM_SAMPLES} \
     --cfg_scale "${CFG_SCALE}" \
     --solver_method ${SOLVER_METHOD} \
-    --num_ode_steps ${NUM_ODE_STEPS} \
     --output_dir ${OUTPUT_DIR} \
     --output_format ${OUTPUT_FORMAT} \
