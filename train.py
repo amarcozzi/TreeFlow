@@ -23,8 +23,8 @@ import random
 
 from models import get_model
 from dataset import create_datasets, collate_fn_batched
+from sample import sample_conditional
 from flow_matching.path import CondOTProbPath
-from flow_matching.solver import ODESolver
 
 
 def save_config(args, output_dir, species_list, type_list):
@@ -153,54 +153,6 @@ def train_epoch(
     return total_loss / num_samples if num_samples > 0 else 0.0
 
 
-@torch.no_grad()
-def sample_conditional(
-    model, num_points, device, target_height, species_idx, type_idx, cfg_scale=1.0
-):
-    """
-    Generate a tree with specific conditions using CFG.
-    Reconstructs from Unit Cube -> Meters.
-    """
-    model.eval()
-
-    # Prepare single-item batch
-    x_init = torch.randn(1, num_points, 3, device=device)
-    s_tensor = torch.tensor([species_idx], device=device, dtype=torch.long)
-    t_tensor = torch.tensor([type_idx], device=device, dtype=torch.long)
-    h_val_log = np.log(target_height + 1e-6)
-    h_tensor = torch.tensor([h_val_log], device=device, dtype=torch.float32)
-
-    # ODE Function with CFG
-    def ode_fn(t, x):
-        t_batch = torch.full((x.shape[0],), t, device=device, dtype=x.dtype)
-
-        # 1. Unconditional Pass (Mask = True)
-        drop_mask_uncond = torch.ones(x.shape[0], dtype=torch.bool, device=device)
-        v_uncond = model(
-            x, t_batch, s_tensor, t_tensor, h_tensor, drop_mask=drop_mask_uncond
-        )
-
-        # 2. Conditional Pass (Mask = False)
-        if cfg_scale != 0:
-            drop_mask_cond = torch.zeros(x.shape[0], dtype=torch.bool, device=device)
-            v_cond = model(
-                x, t_batch, s_tensor, t_tensor, h_tensor, drop_mask=drop_mask_cond
-            )
-            return v_uncond + cfg_scale * (v_cond - v_uncond)
-        else:
-            return v_uncond
-
-    # Solve
-    solver = ODESolver(velocity_model=ode_fn)
-    x_final = solver.sample(x_init, method="dopri5", step_size=None)[0].cpu().numpy()
-
-    # --- RECONSTRUCTION ---
-    # x_norm = (x_centered / height) * 2.0
-    x_meters = (x_final / 2.0) * target_height
-
-    return x_meters
-
-
 def visualize_validation_comparisons(
     model, val_ds, species_list, type_list, epoch, save_dir, device, num_samples=3
 ):
@@ -241,7 +193,7 @@ def visualize_validation_comparisons(
             target_height=h_raw,
             species_idx=s_idx,
             type_idx=t_idx,
-            cfg_scale=cfg_scale,
+            cfg_values=cfg_scale,
         )
 
         # 4. Shift to Ground (Visualization Only)
