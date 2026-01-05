@@ -370,7 +370,7 @@ def main():
     parser.add_argument(
         "--num_ode_steps",
         type=int,
-        default=50,
+        default=None,
         help="Number of ODE solver steps (for euler/midpoint)",
     )
     parser.add_argument(
