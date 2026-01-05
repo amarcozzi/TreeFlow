@@ -237,7 +237,9 @@ def generate_samples(args):
                 zip(generated_samples, cfg_values)
             ):
                 sample_counter += 1
-                sample_id = f"gen_{sample_counter:06d}"
+                # Name samples based on source tree: {tree_id}_{sample_index}
+                sample_id = f"{source_tree_id}_{i + 1}"
+                sample_filename = f"{sample_id}.{args.output_format}"
 
                 # Save point cloud
                 save_point_cloud(
@@ -248,6 +250,7 @@ def generate_samples(args):
                 metadata_rows.append(
                     {
                         "sample_id": sample_id,
+                        "sample_file": sample_filename,
                         "source_tree_id": source_tree_id,
                         "source_split": split_name,
                         "species": species_name,
