@@ -362,10 +362,12 @@ def train(args):
             optimizer, T_max=args.num_epochs, eta_min=args.min_lr
         )
     elif args.lr_scheduler == "warmup_constant":
+
         def warmup_lambda(epoch):
             if epoch < args.warmup_epochs:
                 return epoch / args.warmup_epochs
             return 1.0
+
         scheduler = optim.lr_scheduler.LambdaLR(optimizer, warmup_lambda)
     elif args.lr_scheduler == "plateau":
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -374,7 +376,14 @@ def train(args):
     else:
         scheduler = None
 
-    print(f"LR Scheduler: {args.lr_scheduler}" + (f" (warmup: {args.warmup_epochs} epochs)" if args.lr_scheduler == "warmup_constant" else ""))
+    print(
+        f"LR Scheduler: {args.lr_scheduler}"
+        + (
+            f" (warmup: {args.warmup_epochs} epochs)"
+            if args.lr_scheduler == "warmup_constant"
+            else ""
+        )
+    )
 
     scaler = torch.amp.GradScaler("cuda") if args.use_amp else None
     flow_path = CondOTProbPath()
@@ -516,7 +525,7 @@ def main():
     parser.add_argument("--seed", type=int, default=None)
 
     # Augmentation
-    parser.add_argument("--sample_exponent", type=float, default=0.3)
+    parser.add_argument("--sample_exponent", type=float, default=None)
     parser.add_argument("--rotation_augment", action="store_true", default=True)
     parser.add_argument("--shuffle_augment", action="store_true", default=True)
     parser.add_argument("--max_points", type=int, default=None)
