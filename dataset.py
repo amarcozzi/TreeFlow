@@ -23,6 +23,7 @@ class PointCloudDataset(Dataset):
         rotation_augment: bool = False,
         shuffle_augment: bool = False,
         max_points: int = None,
+        split_name: str = None,
     ):
         """
         Dataset for loading preprocessed point clouds (NPY format) with conditioning info.
@@ -45,7 +46,12 @@ class PointCloudDataset(Dataset):
         self.species_map = species_map
         self.type_map = type_map
 
-        print(f"  Initialized dataset with {len(self.metadata)} samples.")
+        print(
+            f"  Initialized {split_name + ' ' if split_name is not None else ''}dataset with {len(self.metadata)} samples."
+        )
+        print(
+            f"    Augmentation: max_points={max_points}, sample_exponent={sample_exponent}, rotation={rotation_augment}, shuffle={shuffle_augment}"
+        )
 
     def __len__(self):
         return len(self.metadata)
@@ -258,9 +264,9 @@ def create_datasets(
         **dataset_kwargs,
     }
 
-    train_ds = PointCloudDataset(train_df, **common_args)
-    val_ds = PointCloudDataset(val_df, **common_args)
-    test_ds = PointCloudDataset(test_df, **common_args)
+    train_ds = PointCloudDataset(train_df, split_name="train", **common_args)
+    val_ds = PointCloudDataset(val_df, split_name="val", **common_args)
+    test_ds = PointCloudDataset(test_df, split_name="test", **common_args)
 
     return train_ds, val_ds, test_ds, species_list, type_list
 
