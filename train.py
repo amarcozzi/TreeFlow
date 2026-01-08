@@ -368,6 +368,10 @@ def train(args):
 
         if isinstance(checkpoint, dict) and "model" in checkpoint:
             model.load_state_dict(checkpoint["model"])
+            if "optimizer" in checkpoint:
+                optimizer.load_state_dict(checkpoint["optimizer"])
+            if "scheduler" in checkpoint:
+                scheduler.load_state_dict(checkpoint["scheduler"])
             if "epoch" in checkpoint:
                 start_epoch = checkpoint["epoch"] + 1
         else:
@@ -398,6 +402,8 @@ def train(args):
         # Save Checkpoint
         checkpoint = {
             "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
             "seed": args.seed,
             "epoch": epoch,
         }
