@@ -353,9 +353,28 @@ def train(args):
     optimizer = optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.num_epochs, eta_min=args.min_lr
-    )
+
+    # Learning rate scheduler
+    if args.lr_scheduler == "constant":
+        scheduler = None
+    elif args.lr_scheduler == "cosine":
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.num_epochs, eta_min=args.min_lr
+        )
+    elif args.lr_scheduler == "warmup_constant":
+        def warmup_lambda(epoch):
+            if epoch < args.warmup_epochs:
+                return epoch / args.warmup_epochs
+            return 1.0
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, warmup_lambda)
+    elif args.lr_scheduler == "plateau":
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=500, min_lr=args.min_lr
+        )
+    else:
+        scheduler = None
+
+    print(f"LR Scheduler: {args.lr_scheduler}" + (f" (warmup: {args.warmup_epochs} epochs)" if args.lr_scheduler == "warmup_constant" else ""))
 
     scaler = torch.amp.GradScaler("cuda") if args.use_amp else None
     flow_path = CondOTProbPath()
@@ -370,7 +389,7 @@ def train(args):
             model.load_state_dict(checkpoint["model"])
             if "optimizer" in checkpoint:
                 optimizer.load_state_dict(checkpoint["optimizer"])
-            if "scheduler" in checkpoint:
+            if "scheduler" in checkpoint and scheduler is not None:
                 scheduler.load_state_dict(checkpoint["scheduler"])
             if "epoch" in checkpoint:
                 start_epoch = checkpoint["epoch"] + 1
@@ -397,16 +416,22 @@ def train(args):
         )
         print(f"Train Loss: {train_loss:.6f}")
 
-        scheduler.step()
+        # Step scheduler
+        if scheduler is not None:
+            if args.lr_scheduler == "plateau":
+                scheduler.step(train_loss)
+            else:
+                scheduler.step()
 
         # Save Checkpoint
         checkpoint = {
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
             "seed": args.seed,
             "epoch": epoch,
         }
+        if scheduler is not None:
+            checkpoint["scheduler"] = scheduler.state_dict()
 
         if train_loss < best_loss:
             best_loss = train_loss
@@ -463,6 +488,19 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--min_lr", type=float, default=1e-6)
+    parser.add_argument(
+        "--lr_scheduler",
+        type=str,
+        default="constant",
+        choices=["constant", "cosine", "warmup_constant", "plateau"],
+        help="Learning rate scheduler: constant, cosine, warmup_constant, or plateau",
+    )
+    parser.add_argument(
+        "--warmup_epochs",
+        type=int,
+        default=100,
+        help="Number of warmup epochs (for warmup_constant scheduler)",
+    )
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--grad_clip_norm", type=float, default=2.0)
     parser.add_argument("--use_amp", action="store_true", default=True)
