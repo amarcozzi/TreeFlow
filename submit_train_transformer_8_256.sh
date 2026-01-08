@@ -22,18 +22,16 @@ python train.py \
     --model_dim 256 \
     --num_heads 8 \
     --num_layers 8 \
-    --dropout 0.1 \
+    --dropout 0.0 \
     --batch_size 16 \
     --visualize_every 10 \
     --save_every 100 \
-    --sample_exponent 0.3 \
     --rotation_augment \
     --shuffle_augment \
     --num_workers 24 \
-    --num_epochs 20000 \
+    --num_epochs 10000 \
     --lr 1e-4 \
     --use_amp \
     --compile \
-    --cfg_dropout_prob 0.1 \
-    --max_points 4096 \
-    --resume_from epoch_17600.pt
+    --cfg_dropout_prob 0.15 \
+    --max_points 4096
