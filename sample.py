@@ -61,6 +61,9 @@ def sample_conditional(
     # Convert cfg_values to tensor for vectorized operations
     cfg_tensor = torch.tensor(cfg_values, device=device, dtype=torch.float32)
 
+    # Check if we can skip conditional pass (all cfg values are 0)
+    all_cfg_zero = (cfg_tensor == 0).all().item()
+
     # ODE Function with per-sample CFG
     def ode_fn(t, x):
         batch_size = x.shape[0]
@@ -72,7 +75,10 @@ def sample_conditional(
             x, t_batch, s_tensor, t_tensor, h_tensor, drop_mask=drop_mask_uncond
         )
 
-        # 2. Conditional Pass
+        # 2. Conditional Pass (skip if all CFG values are 0)
+        if all_cfg_zero:
+            return v_uncond
+
         drop_mask_cond = torch.zeros(batch_size, dtype=torch.bool, device=device)
         v_cond = model(
             x, t_batch, s_tensor, t_tensor, h_tensor, drop_mask=drop_mask_cond
