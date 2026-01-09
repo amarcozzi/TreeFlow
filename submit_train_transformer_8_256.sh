@@ -2,7 +2,7 @@
 #SBATCH --account=umontana_fire_modeling
 #SBATCH --partition=gpu-a100
 #SBATCH --gres=gpu:a100:1
-#SBATCH --job-name="treeflow-v2"
+#SBATCH --job-name="train_treeflow"
 #SBATCH --cpus-per-task=36
 #SBATCH --mem=128G
 #SBATCH --time=2-0
