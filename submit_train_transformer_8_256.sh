@@ -2,11 +2,11 @@
 #SBATCH --account=umontana_fire_modeling
 #SBATCH --partition=gpu-a100
 #SBATCH --gres=gpu:a100:1
-#SBATCH --job-name="treeflow"
+#SBATCH --job-name="treeflow-v2"
 #SBATCH --cpus-per-task=36
 #SBATCH --mem=128G
 #SBATCH --time=2-0
-#SBATCH --output=log_train_transformer_8_256_4096.out
+#SBATCH --output=log_train_transformer_8_256_4096_v2.out
 
 module load cuda
 
@@ -22,7 +22,7 @@ python train.py \
     --model_dim 256 \
     --num_heads 8 \
     --num_layers 8 \
-    --dropout 0.0 \
+    --dropout 0.1 \
     --batch_size 16 \
     --visualize_every 10 \
     --save_every 100 \
@@ -31,6 +31,9 @@ python train.py \
     --num_workers 24 \
     --num_epochs 10000 \
     --lr 1e-4 \
+    --min_lr 1e-6 \
+    --lr_scheduler cosine \
+    --grad_clip_norm 1.0 \
     --use_amp \
     --compile \
     --cfg_dropout_prob 0.15 \
