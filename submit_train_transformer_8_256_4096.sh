@@ -2,7 +2,7 @@
 #SBATCH --account=umontana_fire_modeling
 #SBATCH --partition=gpu-a100
 #SBATCH --gres=gpu:a100:1
-#SBATCH --job-name="train_treeflow"
+#SBATCH --job-name="train_tf_4096"
 #SBATCH --cpus-per-task=36
 #SBATCH --mem=128G
 #SBATCH --time=2-0
@@ -37,4 +37,5 @@ python train.py \
     --use_amp \
     --compile \
     --cfg_dropout_prob 0.15 \
-    --max_points 4096
+    --max_points 4096 \
+    --resume_from "epoch_2000.pt"
