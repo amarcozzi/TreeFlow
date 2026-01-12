@@ -37,4 +37,5 @@ python train.py \
     --use_amp \
     --compile \
     --cfg_dropout_prob 0.15 \
-    --max_points 16384
+    --max_points 16384 \
+    --resume_from "epoch_1100.pt"
