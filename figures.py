@@ -1,5 +1,5 @@
 """
-Figure 1: Example input data to the model
+figures.py - Create figures for paper
 """
 
 import json
