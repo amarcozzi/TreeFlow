@@ -6,6 +6,7 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+from scipy.ndimage import gaussian_filter
 
 from dataset import create_datasets
 
@@ -167,5 +168,274 @@ def create_figure_1(
     print(f"\nFigure 1 subfigures saved to {output_dir}/")
 
 
+def create_figure_2(
+    sample_idx=123,
+    data_path: str = "./FOR-species20K",
+    csv_path: str = "./FOR-species20K/tree_metadata_dev.csv",
+    output_dir: str = "figures",
+    seed: int = 42,
+):
+    """
+    Create subfigures for the TreeFlow flow matching framework illustration.
+
+    Generates:
+    - figure_2_a.pdf: Source Gaussian distribution
+    - figure_2_b.pdf: Target tree point cloud
+    - figure_2_c.pdf: Probability density evolution
+    """
+    np.random.seed(seed)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+
+    # Load dataset
+    print("Loading dataset...")
+    train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
+        data_path=data_path,
+        csv_path=csv_path,
+        preprocessed_version="raw",
+        rotation_augment=False,
+        shuffle_augment=False,
+        max_points=16384,
+    )
+
+    # Select a tree sample
+    sample_idx = np.random.randint(len(val_ds)) if sample_idx is None else sample_idx
+    sample = val_ds[sample_idx]
+    tree_points = sample["points"].numpy()
+    height_raw = sample["height_raw"].item()
+    n_points = len(tree_points)
+
+    # # Convert to meters for visualization
+    # tree_points = (tree_points_norm / 2.0) * height_raw
+    # tree_points[:, 2] -= tree_points[:, 2].min()
+
+    print(
+        f"Selected tree: {sample['file_id']}, {n_points} points, height={height_raw:.1f}m"
+    )
+
+    # Generate source Gaussian noise (same number of points)
+    noise_points = np.random.randn(n_points, 3)
+
+    # ==========================================
+    # Figure 2a: Source Gaussian Distribution
+    # ==========================================
+    print("Creating Figure 2a: Source Gaussian distribution...")
+    fig_a = plt.figure(figsize=(5, 5))
+    ax_a = fig_a.add_subplot(111, projection="3d")
+
+    ax_a.scatter(
+        noise_points[:, 0],
+        noise_points[:, 1],
+        noise_points[:, 2],
+        c="steelblue",
+        s=2,
+        alpha=0.6,
+    )
+
+    # Set equal limits
+    lim = 3.5
+    ax_a.set_xlim(-lim, lim)
+    ax_a.set_ylim(-lim, lim)
+    ax_a.set_zlim(-lim, lim)
+    ax_a.set_xlabel("X")
+    ax_a.set_ylabel("Y")
+    ax_a.set_zlabel("Z")
+    ax_a.set_title(r"$p_0 \sim \mathcal{N}(0, I)$", fontsize=12, pad=10)
+    ax_a.view_init(elev=20, azim=45)
+    ax_a.set_box_aspect([1, 1, 1])
+
+    # White background
+    ax_a.xaxis.pane.fill = False
+    ax_a.yaxis.pane.fill = False
+    ax_a.zaxis.pane.fill = False
+    ax_a.xaxis.pane.set_edgecolor("lightgray")
+    ax_a.yaxis.pane.set_edgecolor("lightgray")
+    ax_a.zaxis.pane.set_edgecolor("lightgray")
+    ax_a.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    fig_a.savefig(
+        output_dir / "figure_2_a.pdf", format="pdf", bbox_inches="tight", dpi=300
+    )
+    plt.close(fig_a)
+    print(f"  Saved: {output_dir}/figure_2_a.pdf")
+
+    # ==========================================
+    # Figure 2b: Target Tree Distribution
+    # ==========================================
+    print("Creating Figure 2b: Target tree distribution...")
+    fig_b = plt.figure(figsize=(5, 5))
+    ax_b = fig_b.add_subplot(111, projection="3d")
+
+    ax_b.scatter(
+        tree_points[:, 0],
+        tree_points[:, 1],
+        tree_points[:, 2],
+        c=tree_points[:, 2],
+        cmap="viridis",
+        s=2,
+        alpha=0.7,
+    )
+
+    # Set equal aspect ratio
+    max_range = (
+        np.array(
+            [
+                tree_points[:, 0].max() - tree_points[:, 0].min(),
+                tree_points[:, 1].max() - tree_points[:, 1].min(),
+                tree_points[:, 2].max() - tree_points[:, 2].min(),
+            ]
+        ).max()
+        / 2.0
+    )
+
+    mid_x = (tree_points[:, 0].max() + tree_points[:, 0].min()) / 2
+    mid_y = (tree_points[:, 1].max() + tree_points[:, 1].min()) / 2
+    mid_z = (tree_points[:, 2].max() + tree_points[:, 2].min()) / 2
+
+    ax_b.set_xlim(mid_x - max_range, mid_x + max_range)
+    ax_b.set_ylim(mid_y - max_range, mid_y + max_range)
+    ax_b.set_zlim(mid_z - max_range, mid_z + max_range)
+
+    ax_b.set_xlabel("X (m)")
+    ax_b.set_ylabel("Y (m)")
+    ax_b.set_zlabel("Z (m)")
+    ax_b.set_title(r"$p_1 \sim p_{\mathrm{data}}$", fontsize=12, pad=10)
+    ax_b.view_init(elev=20, azim=45)
+
+    # White background
+    ax_b.xaxis.pane.fill = False
+    ax_b.yaxis.pane.fill = False
+    ax_b.zaxis.pane.fill = False
+    ax_b.xaxis.pane.set_edgecolor("lightgray")
+    ax_b.yaxis.pane.set_edgecolor("lightgray")
+    ax_b.zaxis.pane.set_edgecolor("lightgray")
+    ax_b.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    fig_b.savefig(
+        output_dir / "figure_2_b.pdf", format="pdf", bbox_inches="tight", dpi=300
+    )
+    plt.close(fig_b)
+    print(f"  Saved: {output_dir}/figure_2_b.pdf")
+
+    # ==========================================
+    # Figure 2c: Probability Density Evolution
+    # ==========================================
+    print("Creating Figure 2c: Probability density evolution...")
+
+    fig_c, ax_c = plt.subplots(figsize=(8, 4))
+
+    # Create density evolution heatmap
+    n_time = 200
+    n_space = 300
+    t_vals = np.linspace(0, 1, n_time)
+    z_vals = np.linspace(-4, 4, n_space)
+
+    density = np.zeros((n_space, n_time))
+
+    # Source: Standard Gaussian p_0 ~ N(0, I)
+    source = np.exp(-0.5 * z_vals**2) / np.sqrt(2 * np.pi)
+
+    # Target: Bimodal distribution representing vertical tree structure
+    # Lower peak (trunk region), upper peak (canopy region)
+    target = (
+        0.2 * np.exp(-0.5 * ((z_vals + 1.0) / 0.4) ** 2) / 0.4
+        + 0.8 * np.exp(-0.5 * ((z_vals - 1.5) / 0.6) ** 2) / 0.6
+    )
+    target = target / target.sum() * source.sum()
+
+    # Create smooth interpolation
+    for i, t in enumerate(t_vals):
+        alpha = t**0.8
+        blended = (1 - alpha) * source + alpha * target
+        if 0.3 < t < 0.7:
+            blended = gaussian_filter(blended, sigma=1.5)
+        density[:, i] = blended
+
+    density = gaussian_filter(density, sigma=[3, 2])
+
+    # Normalize columns
+    for i in range(n_time):
+        if density[:, i].max() > 0:
+            density[:, i] = density[:, i] / density[:, i].max()
+
+    # Plot heatmap
+    im = ax_c.imshow(
+        density,
+        aspect="auto",
+        origin="lower",
+        extent=[0, 1, z_vals.min(), z_vals.max()],
+        cmap="viridis",
+        interpolation="bilinear",
+    )
+
+    # Source distribution curve (left side)
+    source_scaled = source / source.max() * 0.08
+    ax_c.fill_betweenx(
+        z_vals,
+        -source_scaled,
+        0,
+        alpha=0.8,
+        color="#00cfff",
+        edgecolor="white",
+        linewidth=1.5,
+    )
+    ax_c.plot(-source_scaled, z_vals, color="white", linewidth=1.5)
+
+    # Target distribution curve (right side)
+    target_scaled = target / target.max() * 0.08
+    ax_c.fill_betweenx(
+        z_vals,
+        1,
+        1 + target_scaled,
+        alpha=0.8,
+        color="#e8e855",
+        edgecolor="white",
+        linewidth=1.5,
+    )
+    ax_c.plot(1 + target_scaled, z_vals, color="white", linewidth=1.5)
+
+    # Axis limits and labels
+    ax_c.set_xlim(-0.12, 1.12)
+    ax_c.set_ylim(z_vals.min(), z_vals.max())
+
+    # Labels consistent with flow matching notation
+    ax_c.set_xlabel("Time (t)", fontsize=11)
+    ax_c.text(-0.06, z_vals.min() - 0.8, r"$x_0$", fontsize=12, ha="center", va="top")
+    ax_c.text(1.06, z_vals.min() - 0.8, r"$x_1$", fontsize=12, ha="center", va="top")
+
+    # Add velocity field notation
+    ax_c.text(
+        0.5,
+        z_vals.max() + 0.3,
+        r"$v_\theta(x_t, t, c)$",
+        fontsize=11,
+        ha="center",
+        va="bottom",
+        style="italic",
+    )
+
+    # Remove y-axis, clean styling
+    ax_c.spines["top"].set_visible(False)
+    ax_c.spines["right"].set_visible(False)
+    ax_c.spines["left"].set_visible(False)
+    ax_c.tick_params(left=False, labelleft=False)
+
+    # White background
+    fig_c.patch.set_facecolor("white")
+    ax_c.set_facecolor("white")
+
+    plt.tight_layout()
+    fig_c.savefig(
+        output_dir / "figure_2_c.pdf", format="pdf", bbox_inches="tight", dpi=300
+    )
+    plt.close(fig_c)
+    print(f"  Saved: {output_dir}/figure_2_c.pdf")
+
+    print(f"\nAll figures saved to {output_dir}/")
+
+
 if __name__ == "__main__":
     create_figure_1()
+    create_figure_2()
