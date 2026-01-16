@@ -19,7 +19,7 @@ conda activate treeflow
 
 # Experiment to generate from
 EXPERIMENT_NAME="transformer-8-256-16384"
-CHECKPOINT="epoch_2500.pt"  # "epoch_100.pt", etc.
+CHECKPOINT="epoch_2600.pt"  # "epoch_100.pt", etc.
 
 # Data settings (should match training)
 DATA_PATH="FOR-species20K"
@@ -28,8 +28,8 @@ PREPROCESSED_VERSION="raw"
 MAX_POINTS=16384
 
 # Generation settings
-NUM_SAMPLES=2           # Number of samples per tree
-CFG_SCALE="1.0 7.5"          # Single value (e.g., "3.0") or range (e.g., "2.0 5.0")
+NUM_SAMPLES=4           # Number of samples per tree
+CFG_SCALE="1.0 4"          # Single value (e.g., "3.0") or range (e.g., "2.0 5.0")
 SOLVER_METHOD="dopri5"   # dopri5, euler, or midpoint
 
 # Output
