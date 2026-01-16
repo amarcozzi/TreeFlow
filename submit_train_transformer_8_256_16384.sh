@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=36
 #SBATCH --mem=128G
 #SBATCH --time=2-0
-#SBATCH --output=log_train_transformer_8_256_16384.out
+#SBATCH --output=log_train_transformer_8_256_16384_preprocessed.out
 
 module load cuda
 
