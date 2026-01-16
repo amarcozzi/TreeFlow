@@ -22,7 +22,6 @@ from datetime import datetime
 import random
 
 from accelerate import Accelerator
-from accelerate.utils import set_seed
 
 from models import get_model
 from dataset import create_datasets, collate_fn_batched
@@ -308,11 +307,8 @@ def visualize_validation_comparisons(
 
 
 def train(args):
-    # Initialize accelerator (mixed_precision comes from accelerate config)
-    accelerator = Accelerator()
 
-    # Set seed for reproducibility across all processes
-    set_seed(args.seed)
+    accelerator = Accelerator()
 
     # Setup Directories (only on main process)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -406,14 +402,6 @@ def train(args):
         model, optimizer, train_loader, scheduler
     )
 
-    # Compile after prepare (must come after DDP wrapping)
-    if args.compile:
-        try:
-            accelerator.print("Compiling model with torch.compile...")
-            model = torch.compile(model)
-        except Exception as e:
-            accelerator.print(f"Compilation failed (safe to ignore): {e}")
-
     start_epoch = 1
     if args.resume_from:
         checkpoint_dir = output_dir / "checkpoints" / args.resume_from
@@ -465,7 +453,6 @@ def train(args):
             checkpoint = {
                 "model": unwrapped_model.state_dict(),
                 "optimizer": optimizer.state_dict(),
-                "seed": args.seed,
                 "epoch": epoch,
             }
             if scheduler is not None:
@@ -551,7 +538,6 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--grad_clip_norm", type=float, default=2.0)
     parser.add_argument("--use_amp", action="store_true", default=True)
-    parser.add_argument("--compile", action="store_true", default=False)
     parser.add_argument(
         "--resume_from",
         type=str,
@@ -560,7 +546,6 @@ def main():
     )
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--cfg_dropout_prob", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=None)
 
     # Augmentation
     parser.add_argument("--rotation_augment", action="store_true", default=True)
@@ -573,11 +558,6 @@ def main():
     parser.add_argument("--num_viz_samples", type=int, default=4)
 
     args = parser.parse_args()
-
-    if args.seed is None:
-        args.seed = random.randint(0, 100000)
-
-    print(f"Random Seed: {args.seed}")
 
     train(args)
 

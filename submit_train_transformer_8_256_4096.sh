@@ -35,6 +35,5 @@ accelerate launch --num_processes=4 train.py \
     --min_lr 1e-6 \
     --lr_scheduler cosine \
     --grad_clip_norm 1.0 \
-    --compile \
     --cfg_dropout_prob 0.15 \
     --max_points 4096
