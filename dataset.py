@@ -33,6 +33,7 @@ class PointCloudDataset(Dataset):
         rotation_augment: bool = False,
         shuffle_augment: bool = False,
         split_name: str = None,
+        verbose: bool = True,
     ):
         """
         Args:
@@ -44,6 +45,7 @@ class PointCloudDataset(Dataset):
             rotation_augment: Apply random Z-axis rotation
             shuffle_augment: Shuffle point order
             split_name: Name for logging (train/val/test)
+            verbose: Whether to print initialization info
         """
         self.metadata = metadata_df.reset_index(drop=True)
         self.data_path = Path(data_path)
@@ -53,13 +55,14 @@ class PointCloudDataset(Dataset):
         self.rotation_augment = rotation_augment
         self.shuffle_augment = shuffle_augment
 
-        print(
-            f"  Initialized {split_name + ' ' if split_name else ''}dataset "
-            f"with {len(self.metadata)} samples."
-        )
-        print(
-            f"    max_points={max_points}, rotation={rotation_augment}, shuffle={shuffle_augment}"
-        )
+        if verbose:
+            print(
+                f"  Initialized {split_name + ' ' if split_name else ''}dataset "
+                f"with {len(self.metadata)} samples."
+            )
+            print(
+                f"    max_points={max_points}, rotation={rotation_augment}, shuffle={shuffle_augment}"
+            )
 
     def __len__(self):
         return len(self.metadata)
@@ -157,6 +160,7 @@ def create_datasets(
     npy_subdir: str = "preprocessed",
     split_ratios: tuple = (0.8, 0.1, 0.1),
     seed: int = 42,
+    verbose: bool = True,
     **dataset_kwargs,
 ):
     """
@@ -168,6 +172,7 @@ def create_datasets(
         npy_subdir: Subdirectory containing NPY files (default: "preprocessed")
         split_ratios: (train, val, test) ratios
         seed: Random seed for reproducible splits
+        verbose: Whether to print progress info (set False for non-main processes)
         **dataset_kwargs: Passed to PointCloudDataset (max_points, rotation_augment, etc.)
 
     Returns:
@@ -177,7 +182,8 @@ def create_datasets(
     csv_path = Path(csv_path)
 
     # Load metadata
-    print(f"Loading metadata from {csv_path}...")
+    if verbose:
+        print(f"Loading metadata from {csv_path}...")
     df = pd.read_csv(csv_path)
 
     # Build file paths
@@ -191,7 +197,8 @@ def create_datasets(
     # Filter to existing files
     initial_len = len(df)
     df = df[df["file_path"].apply(lambda x: x.exists())]
-    print(f"Found {len(df)}/{initial_len} matching NPY files in {npy_dir}")
+    if verbose:
+        print(f"Found {len(df)}/{initial_len} matching NPY files in {npy_dir}")
 
     # Create mappings
     species_list = sorted(df["species"].unique())
@@ -199,7 +206,8 @@ def create_datasets(
     species_map = {s: i for i, s in enumerate(species_list)}
     type_map = {t: i for i, t in enumerate(type_list)}
 
-    print(f"Species: {len(species_list)}, Types: {len(type_list)}")
+    if verbose:
+        print(f"Species: {len(species_list)}, Types: {len(type_list)}")
 
     # Split data
     train_ratio, val_ratio, test_ratio = split_ratios
@@ -218,13 +226,15 @@ def create_datasets(
         stratify=temp_df["species"],
     )
 
-    print(f"Splits: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
+    if verbose:
+        print(f"Splits: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
 
     # Create datasets
     common_args = {
         "data_path": data_path,
         "species_map": species_map,
         "type_map": type_map,
+        "verbose": verbose,
         **dataset_kwargs,
     }
 

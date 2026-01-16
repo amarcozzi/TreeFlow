@@ -335,6 +335,7 @@ def train(args):
         rotation_augment=args.rotation_augment,
         shuffle_augment=args.shuffle_augment,
         max_points=args.max_points,
+        verbose=accelerator.is_main_process,
     )
 
     if accelerator.is_main_process:
