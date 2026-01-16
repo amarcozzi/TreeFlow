@@ -189,8 +189,7 @@ def generate_samples(args):
     _, val_ds, test_ds, ds_species_list, ds_type_list = create_datasets(
         data_path=args.data_path,
         csv_path=args.csv_path,
-        preprocessed_version=args.preprocessed_version,
-        sample_exponent=None,  # No augmentation for generation
+        npy_subdir=args.npy_subdir,
         rotation_augment=False,
         shuffle_augment=False,
         max_points=args.max_points,
@@ -359,7 +358,7 @@ def generate_samples(args):
         "checkpoint": args.checkpoint,
         "data_path": args.data_path,
         "csv_path": args.csv_path,
-        "preprocessed_version": args.preprocessed_version,
+        "npy_subdir": args.npy_subdir,
         "max_points": args.max_points,
         "num_samples_per_tree": args.num_samples_per_tree,
         "cfg_scale": args.cfg_scale,
@@ -426,10 +425,10 @@ def main():
         help="Path to metadata CSV",
     )
     parser.add_argument(
-        "--preprocessed_version",
+        "--npy_subdir",
         type=str,
-        default="voxel_0.2m",
-        help="Preprocessing version to use (raw, voxel_0.1m, voxel_0.2m)",
+        default="preprocessed",
+        help="Subdirectory containing pre-normalized NPY files",
     )
     parser.add_argument(
         "--max_points",

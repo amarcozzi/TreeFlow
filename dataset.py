@@ -1,5 +1,7 @@
 """
-dataset.py - Point cloud dataset loader with optional augmentation
+dataset.py - Load pre-normalized point clouds with augmentation
+
+Run preprocess_laz_to_npy.py first to create normalized NPY files.
 """
 
 import torch
@@ -12,123 +14,92 @@ from sklearn.model_selection import train_test_split
 
 
 class PointCloudDataset(Dataset):
+    """
+    Dataset for pre-normalized point clouds.
+
+    Expects NPY files already normalized via preprocess_laz_to_npy.py:
+        points_norm = (points - centroid) / z_extent * 2.0
+
+    This produces points in approximately [-1, 1] range.
+    """
+
     def __init__(
         self,
         metadata_df: pd.DataFrame,
         data_path: Path,
-        preprocessed_version: str = "raw",
         species_map: dict = None,
         type_map: dict = None,
-        sample_exponent: float = None,
+        max_points: int = None,
         rotation_augment: bool = False,
         shuffle_augment: bool = False,
-        max_points: int = None,
         split_name: str = None,
     ):
         """
-        Dataset for loading preprocessed point clouds (NPY format) with conditioning info.
-
         Args:
-            metadata_df: Pandas DataFrame containing ['filename', 'species', 'data_type', 'tree_H', 'file_path']
-            data_path: Base path to FOR-species20K directory
-            preprocessed_version: "voxel_0.1m", etc.
-            species_map: Dictionary mapping species string to integer index
-            type_map: Dictionary mapping data_type string to integer index
-            sample_exponent, rotation_augment, etc.: Augmentation parameters
+            metadata_df: DataFrame with columns ['filename', 'species', 'data_type', 'tree_H', 'file_path']
+            data_path: Base path to data directory
+            species_map: Dict mapping species name to index
+            type_map: Dict mapping data_type to index
+            max_points: Maximum points to sample (None = use all)
+            rotation_augment: Apply random Z-axis rotation
+            shuffle_augment: Shuffle point order
+            split_name: Name for logging (train/val/test)
         """
         self.metadata = metadata_df.reset_index(drop=True)
         self.data_path = Path(data_path)
-        self.sample_exponent = sample_exponent
-        self.rotation_augment = rotation_augment
-        self.shuffle_augment = shuffle_augment
-        self.max_points = max_points
-
         self.species_map = species_map
         self.type_map = type_map
+        self.max_points = max_points
+        self.rotation_augment = rotation_augment
+        self.shuffle_augment = shuffle_augment
 
         print(
-            f"  Initialized {split_name + ' ' if split_name is not None else ''}dataset with {len(self.metadata)} samples."
+            f"  Initialized {split_name + ' ' if split_name else ''}dataset "
+            f"with {len(self.metadata)} samples."
         )
         print(
-            f"    Augmentation: max_points={max_points}, sample_exponent={sample_exponent}, rotation={rotation_augment}, shuffle={shuffle_augment}"
+            f"    max_points={max_points}, rotation={rotation_augment}, shuffle={shuffle_augment}"
         )
 
     def __len__(self):
         return len(self.metadata)
 
-    def _sample_points(self, points, min_points=8):
-        """Sample a subset of points using a power law distribution."""
-        n = len(points)
-        if n <= min_points:
-            return points
-
-        u = np.random.uniform(0, 1)
-        sample_ratio = u**self.sample_exponent
-        num_to_sample = max(min_points, int(sample_ratio * n))
-        indices = np.random.choice(n, num_to_sample, replace=False)
-
-        return points[indices]
-
     def _rotate_z(self, points):
         """Apply random rotation around Z-axis."""
         theta = np.random.uniform(0, 2 * np.pi)
-        cos_theta = np.cos(theta)
-        sin_theta = np.sin(theta)
-
-        rotation_matrix = np.array(
-            [[cos_theta, -sin_theta, 0], [sin_theta, cos_theta, 0], [0, 0, 1]],
-            dtype=np.float32,
-        )
-
-        return points @ rotation_matrix.T
+        c, s = np.cos(theta), np.sin(theta)
+        R = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float32)
+        return (points @ R.T).astype(np.float32)
 
     def __getitem__(self, idx):
         row = self.metadata.iloc[idx]
 
-        # Load NPY file
-        points = np.load(row["file_path"])
+        # Load pre-normalized points
+        points = np.load(row["file_path"]).astype(np.float32)
 
-        # Augmentation (Sampling/Rotation)
-        if self.max_points is not None and len(points) > self.max_points:
+        # Subsample if needed
+        if self.max_points and len(points) > self.max_points:
             indices = np.random.choice(len(points), self.max_points, replace=False)
             points = points[indices]
 
-        if self.sample_exponent is not None:
-            points = self._sample_points(points)
-
+        # Augmentation
         if self.rotation_augment:
             points = self._rotate_z(points)
-
         if self.shuffle_augment:
             np.random.shuffle(points)
 
-        # Normalization & Conditioning
-        # Strategy: Center at Mass -> Scale by Height -> Scale by 2.0 (for variance matching)
+        # Height conditioning (log of raw height from metadata)
         height = float(row["tree_H"])
 
-        # Center of Mass
-        centroid = points.mean(axis=0)
-        points_centered = points - centroid
-
-        # Normalize by Height (Aspect Ratio Preserved)
-        # Add epsilon to prevent div by zero
-        points_normalized = points_centered / (height + 1e-6)
-
-        # Scale to match Neural Net variance (approx [-1, 1] range)
-        points_final = points_normalized * 2.0
-
-        # Log-Height for conditioning
-        height_norm = np.log(height)
-
         return {
-            "points": torch.from_numpy(points_final).float(),
+            "points": torch.from_numpy(points),
             "file_id": row["file_id"],
-            "num_points": len(points_final),
+            "num_points": len(points),
             "species_idx": torch.tensor(
                 self.species_map[row["species"]], dtype=torch.long
             ),
             "type_idx": torch.tensor(self.type_map[row["data_type"]], dtype=torch.long),
-            "height_norm": torch.tensor(height_norm, dtype=torch.float32),
+            "height_norm": torch.tensor(np.log(height), dtype=torch.float32),
             "height_raw": torch.tensor(height, dtype=torch.float32),
         }
 
@@ -140,16 +111,13 @@ def collate_fn(batch):
 
 def collate_fn_batched(batch):
     """
-    Custom collate function that samples all point clouds to the minimum size in the batch.
-    Includes conditioning information.
+    Collate function that samples all point clouds to the minimum size in the batch.
     """
     min_points = min(sample["num_points"] for sample in batch)
 
     sampled_points = []
     file_ids = []
     original_num_points = []
-
-    # Conditioning lists
     species_idxs = []
     type_idxs = []
     height_norms = []
@@ -166,8 +134,6 @@ def collate_fn_batched(batch):
         sampled_points.append(points)
         file_ids.append(sample["file_id"])
         original_num_points.append(num_points)
-
-        # Collect conditioning
         species_idxs.append(sample["species_idx"])
         type_idxs.append(sample["type_idx"])
         height_norms.append(sample["height_norm"])
@@ -188,62 +154,62 @@ def collate_fn_batched(batch):
 def create_datasets(
     data_path: str,
     csv_path: str,
-    preprocessed_version: str = "voxel_0.1m",
-    split_ratios: tuple = (0.8, 0.1, 0.1),  # Train, Val, Test
+    npy_subdir: str = "preprocessed",
+    split_ratios: tuple = (0.8, 0.1, 0.1),
     seed: int = 42,
     **dataset_kwargs,
 ):
     """
-    Factory function to create Train, Val, and Test datasets from the dev metadata CSV.
-    We do not use the 'test' folder as it lacks metadata.
+    Create Train, Val, and Test datasets from metadata CSV.
+
+    Args:
+        data_path: Path to FOR-species20K directory
+        csv_path: Path to tree_metadata_dev.csv
+        npy_subdir: Subdirectory containing NPY files (default: "preprocessed")
+        split_ratios: (train, val, test) ratios
+        seed: Random seed for reproducible splits
+        **dataset_kwargs: Passed to PointCloudDataset (max_points, rotation_augment, etc.)
+
+    Returns:
+        train_ds, val_ds, test_ds, species_list, type_list
     """
     data_path = Path(data_path)
     csv_path = Path(csv_path)
 
-    # 1. Load Metadata
+    # Load metadata
     print(f"Loading metadata from {csv_path}...")
     df = pd.read_csv(csv_path)
 
-    # 2. Filter for existence
-    # The CSV has filenames like "/train/00070.las". We need "00070.npy" in the dev folder.
-    npy_base_dir = data_path / "npy" / preprocessed_version / "dev"
+    # Build file paths
+    npy_dir = data_path / npy_subdir / "dev"
+    if not npy_dir.exists():
+        raise FileNotFoundError(f"NPY directory not found: {npy_dir}")
 
-    if not npy_base_dir.exists():
-        raise FileNotFoundError(f"Directory not found: {npy_base_dir}")
-
-    # Extract ID from filename and check existence
-    # Assuming standard format /train/XXXXX.las
     df["file_id"] = df["filename"].apply(lambda x: Path(x).stem)
-    df["file_path"] = df["file_id"].apply(lambda x: npy_base_dir / f"{x}.npy")
+    df["file_path"] = df["file_id"].apply(lambda x: npy_dir / f"{x}.npy")
 
-    # Filter rows where file exists
+    # Filter to existing files
     initial_len = len(df)
     df = df[df["file_path"].apply(lambda x: x.exists())]
-    print(f"Found {len(df)}/{initial_len} matching NPY files in {npy_base_dir}")
+    print(f"Found {len(df)}/{initial_len} matching NPY files in {npy_dir}")
 
-    # 3. Create Global Mappings
+    # Create mappings
     species_list = sorted(df["species"].unique())
     type_list = sorted(df["data_type"].unique())
-
     species_map = {s: i for i, s in enumerate(species_list)}
     type_map = {t: i for i, t in enumerate(type_list)}
 
-    print(f"Species found: {len(species_list)}")
-    print(f"Data types found: {len(type_list)}")
+    print(f"Species: {len(species_list)}, Types: {len(type_list)}")
 
-    # 4. Split Data
+    # Split data
     train_ratio, val_ratio, test_ratio = split_ratios
-    # Normalize ratios just in case
     total = sum(split_ratios)
     train_ratio /= total
     val_ratio /= total
 
-    # Split Train vs (Val+Test)
     train_df, temp_df = train_test_split(
         df, test_size=(1 - train_ratio), random_state=seed, stratify=df["species"]
     )
-
-    # Split Val vs Test
     relative_test_ratio = test_ratio / (test_ratio + val_ratio)
     val_df, test_df = train_test_split(
         temp_df,
@@ -254,11 +220,9 @@ def create_datasets(
 
     print(f"Splits: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
 
-    # 5. Create Datasets
-    # Pass mappings to all datasets to ensure consistency
+    # Create datasets
     common_args = {
         "data_path": data_path,
-        "preprocessed_version": preprocessed_version,
         "species_map": species_map,
         "type_map": type_map,
         **dataset_kwargs,
@@ -271,31 +235,18 @@ def create_datasets(
     return train_ds, val_ds, test_ds, species_list, type_list
 
 
-def visualize_augmentation(dataset, idx, num_samples=6):
-    """
-    Visualize the effect of augmentation by showing multiple samples of the same point cloud.
-    """
+def visualize_samples(dataset, idx, num_samples=6):
+    """Visualize multiple augmented versions of the same sample."""
     sample = dataset[idx]
     file_id = sample["file_id"]
-
-    s_name = species_list[sample["species_idx"]]
-    t_name = type_list[sample["type_idx"]]
+    height = sample["height_raw"].item()
 
     fig = plt.figure(figsize=(15, 10))
-    fig.suptitle(
-        f"Augmentation - File: {file_id}\nSpecies ID: {s_name} | Type: {t_name} | Height: {sample['height_raw']:.2f}m",
-        fontsize=16,
-    )
+    fig.suptitle(f"File: {file_id} | Height: {height:.2f}m", fontsize=16)
 
     for i in range(num_samples):
-        # Re-fetch to trigger random augmentation
         s = dataset[idx]
         points = s["points"].numpy()
-
-        # Scale points to meters
-        # points *= 2.0
-        points = (points / 2.0) * s["height_raw"].numpy()
-        points[:, 2] -= points[:, 2].min()
 
         ax = fig.add_subplot(2, 3, i + 1, projection="3d")
         ax.scatter(
@@ -308,11 +259,9 @@ def visualize_augmentation(dataset, idx, num_samples=6):
             alpha=0.6,
         )
         ax.set_title(f"Sample {i + 1} ({len(points)} pts)")
-
-        # Set limits based on normalization (-1 to 1 approx)
-        # ax.set_xlim(-1.5, 1.5)
-        # ax.set_ylim(-1.5, 1.5)
-        # ax.set_zlim(-1.5, 1.5)
+        ax.set_xlim(-1.5, 1.5)
+        ax.set_ylim(-1.5, 1.5)
+        ax.set_zlim(-1.5, 1.5)
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.set_zlabel("Z")
@@ -322,7 +271,7 @@ def visualize_augmentation(dataset, idx, num_samples=6):
 
 
 if __name__ == "__main__":
-    # Example usage for debugging
+    # Example usage
     data_path = "./FOR-species20K"
     csv_path = "./FOR-species20K/tree_metadata_dev.csv"
 
@@ -330,14 +279,13 @@ if __name__ == "__main__":
         train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
             data_path=data_path,
             csv_path=csv_path,
-            preprocessed_version="voxel_0.2m",
-            sample_exponent=0.3,
+            max_points=16834,
             rotation_augment=True,
         )
 
         print("\nVisualizing random training sample...")
         idx = np.random.randint(len(train_ds))
-        visualize_augmentation(train_ds, idx)
+        visualize_samples(train_ds, idx)
 
     except Exception as e:
-        print(f"Skipping visualization (setup required): {e}")
+        print(f"Skipping visualization: {e}")

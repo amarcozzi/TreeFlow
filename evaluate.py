@@ -737,47 +737,23 @@ def load_generated_samples(samples_dir: Path) -> tuple[pd.DataFrame, dict]:
     return metadata_df, point_clouds
 
 
-def normalize_point_cloud(points: np.ndarray, height: float) -> np.ndarray:
-    """
-    Normalize point cloud using the same scheme as preprocessing.
-
-    Normalization steps:
-    1. Center at mean (Center of Mass)
-    2. Scale by height (preserves aspect ratio)
-    3. Scale by 2.0 (matches variance of Gaussian noise)
-
-    Args:
-        points: (N, 3) point cloud in meters
-        height: Tree height in meters
-
-    Returns:
-        Normalized point cloud (N, 3)
-    """
-    centroid = points.mean(axis=0)
-    points_centered = points - centroid
-    points_normalized = points_centered / height
-    points_final = points_normalized * 2.0
-    return points_final.astype(np.float32)
-
-
 def load_real_samples(
     data_path: Path,
     csv_path: Path,
     source_tree_ids: list[str],
-    preprocessed_version: str = "raw",
+    npy_subdir: str = "preprocessed",
 ) -> tuple[pd.DataFrame, dict]:
     """
     Load real tree point clouds for the specified source tree IDs.
 
     Point clouds are kept in normalized form (as stored in .npy files).
-
-    Normalization: points_norm = (points_centered / height) * 2.0
+    Expects pre-normalized NPY files from preprocess_laz_to_npy.py.
 
     Args:
         data_path: Path to FOR-species20K directory
         csv_path: Path to tree_metadata_dev.csv
         source_tree_ids: List of tree IDs to load (from generated samples metadata)
-        preprocessed_version: Which preprocessing version to use (raw, voxel_0.1m, etc.)
+        npy_subdir: Subdirectory containing NPY files (default: 'preprocessed')
 
     Returns:
         metadata_df: DataFrame with real tree metadata (filtered to requested IDs)
@@ -801,7 +777,7 @@ def load_real_samples(
     )
 
     # Build file paths
-    npy_dir = data_path / "npy" / preprocessed_version / "dev"
+    npy_dir = data_path / npy_subdir / "dev"
     metadata_df["file_path"] = metadata_df["file_id"].apply(
         lambda x: npy_dir / f"{x}.npy"
     )
@@ -841,9 +817,7 @@ def build_evaluation_pairs(
     Build list of (real, generated) pairs for evaluation.
 
     Each generated sample is paired with its source real tree.
-    Generated point clouds are normalized to match real point clouds.
-
-    Normalization: points_norm = (points_centered / height) * 2.0
+    Both real and generated point clouds are already in normalized coordinates.
 
     Returns:
         List of dicts with keys:
@@ -871,16 +845,13 @@ def build_evaluation_pairs(
             skipped += 1
             continue
 
-        # Get generated points (in meters) and normalize
-        gen_points_meters = gen_point_clouds[sample_id]
-        gen_points_norm = normalize_point_cloud(gen_points_meters, height_m)
-
+        # Both point clouds are already normalized
         pairs.append(
             {
                 "source_tree_id": source_tree_id,
                 "sample_id": sample_id,
-                "real_points": real_point_clouds[source_tree_id],  # Already normalized
-                "gen_points": gen_points_norm,  # Now normalized
+                "real_points": real_point_clouds[source_tree_id],
+                "gen_points": gen_point_clouds[sample_id],
                 "species": row["species"],
                 "height_m": height_m,
                 "scan_type": row["scan_type"],
@@ -987,10 +958,10 @@ def main():
         help="Path to real tree metadata CSV",
     )
     parser.add_argument(
-        "--preprocessed_version",
+        "--npy_subdir",
         type=str,
-        default="raw",
-        help="Preprocessing version for real trees (raw, voxel_0.1m, voxel_0.2m)",
+        default="preprocessed",
+        help="Subdirectory containing pre-normalized NPY files",
     )
 
     # Evaluation parameters
@@ -1068,7 +1039,7 @@ def main():
         data_path=data_path,
         csv_path=csv_path,
         source_tree_ids=source_tree_ids,
-        preprocessed_version=args.preprocessed_version,
+        npy_subdir=args.npy_subdir,
     )
 
     # Build evaluation pairs
