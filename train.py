@@ -307,8 +307,8 @@ def visualize_validation_comparisons(
 
 
 def train(args):
-
-    accelerator = Accelerator()
+    mixed_precision = "fp16" if args.use_amp else "no"
+    accelerator = Accelerator(mixed_precision=mixed_precision)
 
     # Setup Directories (only on main process)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -349,6 +349,9 @@ def train(args):
         num_workers=args.num_workers,
         collate_fn=collate_fn_batched,
         pin_memory=True,
+        drop_last=True,
+        persistent_workers=(args.num_workers > 0),
+        prefetch_factor=2 if args.num_workers > 0 else None,
     )
 
     # 3. Model
@@ -464,10 +467,10 @@ def train(args):
 
             if train_loss < best_loss:
                 best_loss = train_loss
-                torch.save(checkpoint, dirs["ckpt"] / "best_model.pt")
+                accelerator.save(checkpoint, dirs["ckpt"] / "best_model.pt")
 
             if epoch % args.save_every == 0:
-                torch.save(checkpoint, dirs["ckpt"] / f"epoch_{epoch}.pt")
+                accelerator.save(checkpoint, dirs["ckpt"] / f"epoch_{epoch}.pt")
 
         # Visualization (Validation Comparisons) - only on main process
         # Uses unwrapped model to avoid triggering distributed operations
