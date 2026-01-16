@@ -19,7 +19,7 @@ accelerate launch --num_processes=4 train.py \
     --experiment_name "transformer-8-256-16384-accelerate" \
     --data_path FOR-species20K \
     --csv_path FOR-species20K/tree_metadata_dev.csv \
-    --npy_subdir preprocessed \
+    --npy_subdir preprocessed_16384 \
     --model_dim 256 \
     --num_heads 8 \
     --num_layers 8 \
