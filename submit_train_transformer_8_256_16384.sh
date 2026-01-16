@@ -2,7 +2,7 @@
 #SBATCH --account=umontana_fire_modeling
 #SBATCH --partition=gpu-a100
 #SBATCH --gres=gpu:a100:1
-#SBATCH --job-name="train_tf_16384"
+#SBATCH --job-name="train_tf_pre_16384"
 #SBATCH --cpus-per-task=36
 #SBATCH --mem=128G
 #SBATCH --time=2-0
@@ -15,7 +15,7 @@ conda activate treeflow
 
 python train.py \
     --output_dir experiments \
-    --experiment_name "transformer-8-256-16384" \
+    --experiment_name "transformer-8-256-16384-preprocessed" \
     --data_path FOR-species20K \
     --csv_path FOR-species20K/tree_metadata_dev.csv \
     --npy_subdir preprocessed \
