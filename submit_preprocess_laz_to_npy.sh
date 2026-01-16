@@ -12,6 +12,6 @@ python preprocess_laz_to_npy.py \
     --data_path ./FOR-species20K \
     --output_path ./FOR-species20K/preprocessed \
     --splits train test \
-    --min_points 8192 \
+    --min_points 4096 \
     --num_workers 40 \
     --verify

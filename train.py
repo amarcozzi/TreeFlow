@@ -21,6 +21,9 @@ import json
 from datetime import datetime
 import random
 
+from accelerate import Accelerator
+from accelerate.utils import set_seed
+
 from models import get_model
 from dataset import create_datasets, collate_fn_batched
 from flow_matching.path import CondOTProbPath
@@ -48,11 +51,11 @@ def compute_loss(
     h_norm,
     flow_path,
     device,
-    use_amp=False,
     p_uncond=0.1,
 ):
     """
     Compute loss with Classifier-Free Guidance (CFG) dropout.
+    Mixed precision is handled automatically by accelerate.
     """
     batch_size = x_1.shape[0]
 
@@ -65,23 +68,21 @@ def compute_loss(
     # 2. Flow Matching Setup
     x_0 = torch.randn_like(x_1)
 
-    # Use mixed precision if enabled
-    with torch.amp.autocast("cuda", enabled=use_amp):
-        path_sample = flow_path.sample(t=t, x_0=x_0, x_1=x_1)
-        x_t = path_sample.x_t
-        u_t = path_sample.dx_t
+    path_sample = flow_path.sample(t=t, x_0=x_0, x_1=x_1)
+    x_t = path_sample.x_t
+    u_t = path_sample.dx_t
 
-        # 3. Forward Pass with Mask
-        pred_u_t = model(
-            x=x_t,
-            t=t,
-            species_idx=species,
-            type_idx=dtype,
-            height_norm=h_norm,
-            drop_mask=drop_mask,
-        )
+    # 3. Forward Pass with Mask
+    pred_u_t = model(
+        x=x_t,
+        t=t,
+        species_idx=species,
+        type_idx=dtype,
+        height_norm=h_norm,
+        drop_mask=drop_mask,
+    )
 
-        loss = nn.functional.mse_loss(pred_u_t, u_t)
+    loss = nn.functional.mse_loss(pred_u_t, u_t)
 
     return loss
 
@@ -91,26 +92,31 @@ def train_epoch(
     train_loader,
     optimizer,
     flow_path,
-    device,
+    accelerator,
     cfg_dropout_prob=0.1,
-    scaler=None,
     grad_clip_norm=1.0,
 ):
     model.train()
     total_loss = 0.0
     num_samples = 0
-    use_amp = scaler is not None
+    device = accelerator.device
 
-    pbar = tqdm(total=len(train_loader), desc="Training", dynamic_ncols=True)
+    # Only show progress bar on main process
+    pbar = tqdm(
+        total=len(train_loader),
+        desc="Training",
+        dynamic_ncols=True,
+        disable=not accelerator.is_main_process,
+    )
 
     for batch in train_loader:
         optimizer.zero_grad()
 
-        # Move data to device
-        points = batch["points"].to(device)  # (B, N, 3)
-        species = batch["species_idx"].to(device)  # (B,)
-        dtype = batch["type_idx"].to(device)  # (B,)
-        h_norm = batch["height_norm"].to(device)  # (B,)
+        # Data is already on correct device via accelerator
+        points = batch["points"]  # (B, N, 3)
+        species = batch["species_idx"]  # (B,)
+        dtype = batch["type_idx"]  # (B,)
+        h_norm = batch["height_norm"]  # (B,)
 
         # Sample random timesteps
         t = torch.rand(points.shape[0], device=device)
@@ -124,33 +130,39 @@ def train_epoch(
             h_norm,
             flow_path,
             device,
-            use_amp=use_amp,
             p_uncond=cfg_dropout_prob,
         )
 
         if torch.isnan(loss) or torch.isinf(loss):
-            print("Warning: NaN/Inf loss detected, skipping batch")
+            accelerator.print("Warning: NaN/Inf loss detected, skipping batch")
             continue
 
-        if scaler is not None:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
-            optimizer.step()
+        accelerator.backward(loss)
+        if accelerator.sync_gradients:
+            accelerator.clip_grad_norm_(model.parameters(), grad_clip_norm)
+        optimizer.step()
 
-        total_loss += loss.item() * points.shape[0]
-        num_samples += points.shape[0]
+        batch_size = points.shape[0]
+        total_loss += loss.item() * batch_size
+        num_samples += batch_size
 
         pbar.update(1)
         pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
     pbar.close()
-    return total_loss / num_samples if num_samples > 0 else 0.0
+
+    # Gather loss across all processes for accurate reporting
+    total_loss_tensor = torch.tensor([total_loss], device=device)
+    num_samples_tensor = torch.tensor([num_samples], device=device)
+    total_loss_tensor = accelerator.gather(total_loss_tensor).sum()
+    num_samples_tensor = accelerator.gather(num_samples_tensor).sum()
+
+    avg_loss = (
+        total_loss_tensor.item() / num_samples_tensor.item()
+        if num_samples_tensor.item() > 0
+        else 0.0
+    )
+    return avg_loss
 
 
 @torch.no_grad()
@@ -296,7 +308,13 @@ def visualize_validation_comparisons(
 
 
 def train(args):
-    # Setup Directories
+    # Initialize accelerator (mixed_precision comes from accelerate config)
+    accelerator = Accelerator()
+
+    # Set seed for reproducibility across all processes
+    set_seed(args.seed)
+
+    # Setup Directories (only on main process)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_name = args.experiment_name if args.experiment_name else f"dit_{timestamp}"
     output_dir = Path(args.output_dir) / exp_name
@@ -306,11 +324,14 @@ def train(args):
         "viz": output_dir / "visualizations",
         "logs": output_dir / "logs",
     }
-    for d in dirs.values():
-        d.mkdir(parents=True, exist_ok=True)
+    if accelerator.is_main_process:
+        for d in dirs.values():
+            d.mkdir(parents=True, exist_ok=True)
+    accelerator.wait_for_everyone()
 
     # 1. Create Datasets (CSV Metadata Split)
-    print(f"\nPreparing datasets from {args.csv_path}...")
+    if accelerator.is_main_process:
+        print(f"\nPreparing datasets from {args.csv_path}...")
     train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
         data_path=args.data_path,
         csv_path=args.csv_path,
@@ -320,7 +341,8 @@ def train(args):
         max_points=args.max_points,
     )
 
-    save_config(args, output_dir, species_list, type_list)
+    if accelerator.is_main_process:
+        save_config(args, output_dir, species_list, type_list)
 
     # 2. Dataloaders
     train_loader = DataLoader(
@@ -333,21 +355,14 @@ def train(args):
     )
 
     # 3. Model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    device = accelerator.device
+    accelerator.print(f"Using device: {device}")
 
     args.species_list = species_list
     args.type_list = type_list
     model = get_model(args, device)
 
-    print(f"Model Parameters: {model.count_parameters()/1e6:.2f}M")
-
-    if args.compile:
-        try:
-            print("Compiling model with torch.compile...")
-            model = torch.compile(model)
-        except Exception as e:
-            print(f"Compilation failed (safe to ignore): {e}")
+    accelerator.print(f"Model Parameters: {model.count_parameters()/1e6:.2f}M")
 
     optimizer = optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
@@ -375,7 +390,7 @@ def train(args):
     else:
         scheduler = None
 
-    print(
+    accelerator.print(
         f"LR Scheduler: {args.lr_scheduler}"
         + (
             f" (warmup: {args.warmup_epochs} epochs)"
@@ -384,17 +399,31 @@ def train(args):
         )
     )
 
-    scaler = torch.amp.GradScaler("cuda") if args.use_amp else None
     flow_path = CondOTProbPath()
+
+    # Prepare model, optimizer, dataloader, and scheduler with accelerator
+    model, optimizer, train_loader, scheduler = accelerator.prepare(
+        model, optimizer, train_loader, scheduler
+    )
+
+    # Compile after prepare (must come after DDP wrapping)
+    if args.compile:
+        try:
+            accelerator.print("Compiling model with torch.compile...")
+            model = torch.compile(model)
+        except Exception as e:
+            accelerator.print(f"Compilation failed (safe to ignore): {e}")
 
     start_epoch = 1
     if args.resume_from:
         checkpoint_dir = output_dir / "checkpoints" / args.resume_from
-        print(f"Loading checkpoint from {checkpoint_dir}")
+        accelerator.print(f"Loading checkpoint from {checkpoint_dir}")
         checkpoint = torch.load(checkpoint_dir, map_location=device)
 
+        # Get the unwrapped model for loading state dict
+        unwrapped_model = accelerator.unwrap_model(model)
         if isinstance(checkpoint, dict) and "model" in checkpoint:
-            model.load_state_dict(checkpoint["model"])
+            unwrapped_model.load_state_dict(checkpoint["model"])
             if "optimizer" in checkpoint:
                 optimizer.load_state_dict(checkpoint["optimizer"])
             if "scheduler" in checkpoint and scheduler is not None:
@@ -402,27 +431,26 @@ def train(args):
             if "epoch" in checkpoint:
                 start_epoch = checkpoint["epoch"] + 1
         else:
-            model.load_state_dict(checkpoint)
+            unwrapped_model.load_state_dict(checkpoint)
 
-        print(f"Resuming training from epoch {start_epoch}")
+        accelerator.print(f"Resuming training from epoch {start_epoch}")
 
     # 4. Training Loop
     best_loss = float("inf")
 
     for epoch in range(start_epoch, args.num_epochs + 1):
-        print(f"\nEpoch {epoch}/{args.num_epochs}")
+        accelerator.print(f"\nEpoch {epoch}/{args.num_epochs}")
 
         train_loss = train_epoch(
             model,
             train_loader,
             optimizer,
             flow_path,
-            device,
+            accelerator,
             cfg_dropout_prob=args.cfg_dropout_prob,
-            scaler=scaler,
             grad_clip_norm=args.grad_clip_norm,
         )
-        print(f"Train Loss: {train_loss:.6f}")
+        accelerator.print(f"Train Loss: {train_loss:.6f}")
 
         # Step scheduler
         if scheduler is not None:
@@ -431,28 +459,31 @@ def train(args):
             else:
                 scheduler.step()
 
-        # Save Checkpoint
-        checkpoint = {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "seed": args.seed,
-            "epoch": epoch,
-        }
-        if scheduler is not None:
-            checkpoint["scheduler"] = scheduler.state_dict()
+        # Save Checkpoint (only on main process)
+        if accelerator.is_main_process:
+            unwrapped_model = accelerator.unwrap_model(model)
+            checkpoint = {
+                "model": unwrapped_model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "seed": args.seed,
+                "epoch": epoch,
+            }
+            if scheduler is not None:
+                checkpoint["scheduler"] = scheduler.state_dict()
 
-        if train_loss < best_loss:
-            best_loss = train_loss
-            torch.save(checkpoint, dirs["ckpt"] / "best_model.pt")
+            if train_loss < best_loss:
+                best_loss = train_loss
+                torch.save(checkpoint, dirs["ckpt"] / "best_model.pt")
 
-        if epoch % args.save_every == 0:
-            torch.save(checkpoint, dirs["ckpt"] / f"epoch_{epoch}.pt")
+            if epoch % args.save_every == 0:
+                torch.save(checkpoint, dirs["ckpt"] / f"epoch_{epoch}.pt")
 
-        # Visualization (Validation Comparisons)
-        if epoch % args.visualize_every == 0:
+        # Visualization (Validation Comparisons) - only on main process
+        if epoch % args.visualize_every == 0 and accelerator.is_main_process:
             try:
+                unwrapped_model = accelerator.unwrap_model(model)
                 visualize_validation_comparisons(
-                    model=model,
+                    model=unwrapped_model,
                     val_ds=val_ds,
                     species_list=species_list,
                     type_list=type_list,
@@ -466,6 +497,9 @@ def train(args):
                 import traceback
 
                 traceback.print_exc()
+
+        # Sync all processes before next epoch
+        accelerator.wait_for_everyone()
 
 
 def main():
