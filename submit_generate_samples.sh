@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=umontana_fire_modeling
-#SBATCH --partition=gpu-a100
-#SBATCH --gres=gpu:a100:1
+#SBATCH --partition=gpu-l40s
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --job-name="treeflow-gen"
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
@@ -18,18 +18,18 @@ conda activate treeflow
 # ============================================
 
 # Experiment to generate from
-EXPERIMENT_NAME="transformer-8-256-4096"
-CHECKPOINT="epoch_15000.pt"  # "epoch_100.pt", etc.
+EXPERIMENT_NAME="transformer-8-256-16384"
+CHECKPOINT="epoch_2500.pt"  # "epoch_100.pt", etc.
 
 # Data settings (should match training)
 DATA_PATH="FOR-species20K"
 CSV_PATH="FOR-species20K/tree_metadata_dev.csv"
 PREPROCESSED_VERSION="raw"
-MAX_POINTS=4096
+MAX_POINTS=16384
 
 # Generation settings
 NUM_SAMPLES=2           # Number of samples per tree
-CFG_SCALE="2.0 5.0"          # Single value (e.g., "3.0") or range (e.g., "2.0 5.0")
+CFG_SCALE="1.0 7.5"          # Single value (e.g., "3.0") or range (e.g., "2.0 5.0")
 SOLVER_METHOD="dopri5"   # dopri5, euler, or midpoint
 
 # Output
