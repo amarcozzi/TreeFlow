@@ -6,6 +6,9 @@ Iterates through the test (and optionally validation) set and generates
 N samples per source tree with configurable CFG values.
 """
 
+import matplotlib
+matplotlib.use("Agg")
+
 import torch
 import numpy as np
 import pandas as pd
@@ -16,6 +19,7 @@ from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
 from types import SimpleNamespace
+import matplotlib.pyplot as plt
 
 from models import get_model
 from dataset import create_datasets
@@ -98,6 +102,60 @@ def save_point_cloud(points: np.ndarray, filepath: Path, fmt: str):
         las.y = points[:, 1]
         las.z = points[:, 2]
         las.write(str(filepath.with_suffix(".laz")))
+
+
+def save_comparison_image(
+    real_points: np.ndarray,
+    gen_points: np.ndarray,
+    filepath: Path,
+    species_name: str,
+    type_name: str,
+    height_m: float,
+    cfg_scale: float,
+):
+    """
+    Save a side-by-side comparison image of real vs generated point clouds.
+    Both point clouds should be in normalized coordinates.
+    """
+    fig = plt.figure(figsize=(12, 6))
+
+    # Normalized coordinates are roughly in [-1, 1] range
+    limit = 1.2
+
+    # --- Plot Real ---
+    ax1 = fig.add_subplot(1, 2, 1, projection="3d")
+    ax1.scatter(
+        real_points[:, 0],
+        real_points[:, 1],
+        real_points[:, 2],
+        s=1,
+        c=real_points[:, 2],
+        cmap="viridis",
+    )
+    ax1.set_title(
+        f"REAL | {species_name}\nH={height_m:.2f}m | N={len(real_points)} | {type_name}"
+    )
+    ax1.set_xlim(-limit, limit)
+    ax1.set_ylim(-limit, limit)
+    ax1.set_zlim(-limit, limit)
+
+    # --- Plot Generated ---
+    ax2 = fig.add_subplot(1, 2, 2, projection="3d")
+    ax2.scatter(
+        gen_points[:, 0],
+        gen_points[:, 1],
+        gen_points[:, 2],
+        s=1,
+        c=gen_points[:, 2],
+        cmap="viridis",
+    )
+    ax2.set_title(f"GENERATED | CFG={cfg_scale:.2f}")
+    ax2.set_xlim(-limit, limit)
+    ax2.set_ylim(-limit, limit)
+    ax2.set_zlim(-limit, limit)
+
+    plt.savefig(filepath, dpi=150)
+    plt.close()
 
 
 def generate_samples(args):
@@ -186,6 +244,8 @@ def generate_samples(args):
     output_dir = Path(args.output_dir) / f"{args.experiment_name}_{timestamp}"
     points_dir = output_dir / args.output_format
     points_dir.mkdir(parents=True, exist_ok=True)
+    images_dir = output_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
 
     # Prepare metadata collection
     metadata_rows = []
@@ -209,6 +269,7 @@ def generate_samples(args):
             type_idx = sample["type_idx"].item()
             height_raw = sample["height_raw"].item()
             num_points = sample["num_points"]
+            real_points = sample["points"].numpy()  # Already in normalized coordinates
 
             species_name = species_list[species_idx]
             type_name = type_list[type_idx]
@@ -244,6 +305,17 @@ def generate_samples(args):
                 # Save point cloud
                 save_point_cloud(
                     sample_points, points_dir / sample_id, args.output_format
+                )
+
+                # Save comparison image (real vs generated in normalized coordinates)
+                save_comparison_image(
+                    real_points=real_points,
+                    gen_points=sample_points,
+                    filepath=images_dir / f"{sample_id}.png",
+                    species_name=species_name,
+                    type_name=type_name,
+                    height_m=height_raw,
+                    cfg_scale=cfg_val,
                 )
 
                 # Record metadata
@@ -311,6 +383,7 @@ def generate_samples(args):
     print(f"  Total samples: {sample_counter}")
     print(f"  Output directory: {output_dir}")
     print(f"  Point clouds: {points_dir}")
+    print(f"  Comparison images: {images_dir}")
     print(f"  Metadata CSV: {csv_path}")
 
 
