@@ -18,7 +18,7 @@ python train.py \
     --experiment_name "transformer-8-256-16384" \
     --data_path FOR-species20K \
     --csv_path FOR-species20K/tree_metadata_dev.csv \
-    --preprocessed_version raw \
+    --npy_subdir preprocessed \
     --model_dim 256 \
     --num_heads 8 \
     --num_layers 8 \
@@ -29,7 +29,7 @@ python train.py \
     --rotation_augment \
     --shuffle_augment \
     --num_workers 24 \
-    --num_epochs 10000 \
+    --num_epochs 5000 \
     --lr 1e-4 \
     --min_lr 1e-6 \
     --lr_scheduler cosine \
@@ -37,5 +37,4 @@ python train.py \
     --use_amp \
     --compile \
     --cfg_dropout_prob 0.15 \
-    --max_points 16384 \
-    --resume_from "epoch_2200.pt"
+    --max_points 16384
