@@ -7,8 +7,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy.ndimage import gaussian_filter
+from matplotlib.ticker import MaxNLocator
+
 
 from dataset import create_datasets
+
+DOWNSAMPLE_POINTS = 4096
 
 
 def create_figure_1(
@@ -41,7 +45,7 @@ def create_figure_1(
         preprocessed_version="raw",
         rotation_augment=True,
         shuffle_augment=True,
-        max_points=4096,
+        max_points=DOWNSAMPLE_POINTS,
     )
 
     # Select 4 diverse samples from training set
@@ -195,7 +199,7 @@ def create_figure_2(
         preprocessed_version="raw",
         rotation_augment=False,
         shuffle_augment=False,
-        max_points=16384,
+        max_points=DOWNSAMPLE_POINTS,
     )
 
     # Select a tree sample
@@ -227,7 +231,8 @@ def create_figure_2(
         noise_points[:, 0],
         noise_points[:, 1],
         noise_points[:, 2],
-        c="steelblue",
+        c=noise_points[:, 2],
+        cmap="viridis",
         s=2,
         alpha=0.6,
     )
@@ -237,12 +242,14 @@ def create_figure_2(
     ax_a.set_xlim(-lim, lim)
     ax_a.set_ylim(-lim, lim)
     ax_a.set_zlim(-lim, lim)
-    ax_a.set_xlabel("X")
-    ax_a.set_ylabel("Y")
-    ax_a.set_zlabel("Z")
     ax_a.set_title(r"$p_0 \sim \mathcal{N}(0, I)$", fontsize=12, pad=10)
     ax_a.view_init(elev=20, azim=45)
     ax_a.set_box_aspect([1, 1, 1])
+
+    # # Remove axis labels and tick labels
+    # ax_a.set_xticklabels([])
+    # ax_a.set_yticklabels([])
+    # ax_a.set_zticklabels([])
 
     # White background
     ax_a.xaxis.pane.fill = False
@@ -255,10 +262,10 @@ def create_figure_2(
 
     plt.tight_layout()
     fig_a.savefig(
-        output_dir / "figure_2_a.pdf", format="pdf", bbox_inches="tight", dpi=300
+        output_dir / "figure_2_a.png", format="png", bbox_inches="tight", dpi=800
     )
     plt.close(fig_a)
-    print(f"  Saved: {output_dir}/figure_2_a.pdf")
+    print(f"  Saved: {output_dir}/figure_2_a.png")
 
     # ==========================================
     # Figure 2b: Target Tree Distribution
@@ -297,11 +304,17 @@ def create_figure_2(
     ax_b.set_ylim(mid_y - max_range, mid_y + max_range)
     ax_b.set_zlim(mid_z - max_range, mid_z + max_range)
 
-    ax_b.set_xlabel("X (m)")
-    ax_b.set_ylabel("Y (m)")
-    ax_b.set_zlabel("Z (m)")
     ax_b.set_title(r"$p_1 \sim p_{\mathrm{data}}$", fontsize=12, pad=10)
     ax_b.view_init(elev=20, azim=45)
+
+    # # Remove axis labels and tick labels
+    # ax_b.set_xticklabels([])
+    # ax_b.set_yticklabels([])
+    # ax_b.set_zticklabels([])
+
+    ax_b.xaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax_b.yaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax_b.zaxis.set_major_locator(MaxNLocator(nbins=4))
 
     # White background
     ax_b.xaxis.pane.fill = False
@@ -313,11 +326,9 @@ def create_figure_2(
     ax_b.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    fig_b.savefig(
-        output_dir / "figure_2_b.pdf", format="pdf", bbox_inches="tight", dpi=300
-    )
+    fig_b.savefig(output_dir / "figure_2_b.png", bbox_inches="tight", dpi=800)
     plt.close(fig_b)
-    print(f"  Saved: {output_dir}/figure_2_b.pdf")
+    print(f"  Saved: {output_dir}/figure_2_b.png")
 
     # ==========================================
     # Figure 2c: Probability Density Evolution
@@ -366,7 +377,7 @@ def create_figure_2(
         aspect="auto",
         origin="lower",
         extent=[0, 1, z_vals.min(), z_vals.max()],
-        cmap="viridis",
+        cmap="jet",
         interpolation="bilinear",
     )
 
@@ -428,10 +439,10 @@ def create_figure_2(
 
     plt.tight_layout()
     fig_c.savefig(
-        output_dir / "figure_2_c.pdf", format="pdf", bbox_inches="tight", dpi=300
+        output_dir / "figure_2_c.png", format="png", bbox_inches="tight", dpi=800
     )
     plt.close(fig_c)
-    print(f"  Saved: {output_dir}/figure_2_c.pdf")
+    print(f"  Saved: {output_dir}/figure_2_c.png")
 
     print(f"\nAll figures saved to {output_dir}/")
 
