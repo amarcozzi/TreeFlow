@@ -447,6 +447,9 @@ def train(args):
             else:
                 scheduler.step()
 
+        # Sync all processes before checkpoint/visualization (main-process-only operations)
+        accelerator.wait_for_everyone()
+
         # Save Checkpoint (only on main process)
         if accelerator.is_main_process:
             unwrapped_model = accelerator.unwrap_model(model)
@@ -466,6 +469,7 @@ def train(args):
                 torch.save(checkpoint, dirs["ckpt"] / f"epoch_{epoch}.pt")
 
         # Visualization (Validation Comparisons) - only on main process
+        # Uses unwrapped model to avoid triggering distributed operations
         if epoch % args.visualize_every == 0 and accelerator.is_main_process:
             try:
                 unwrapped_model = accelerator.unwrap_model(model)
@@ -485,7 +489,7 @@ def train(args):
 
                 traceback.print_exc()
 
-        # Sync all processes before next epoch
+        # Sync all processes after main-process-only operations before next epoch
         accelerator.wait_for_everyone()
 
 
