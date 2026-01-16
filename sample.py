@@ -39,7 +39,7 @@ def sample_conditional(
         solver_method: ODE solver method ('euler', 'midpoint', 'dopri5')
 
     Returns:
-        np.ndarray: Point clouds of shape (num_samples, num_points, 3) in meters
+        np.ndarray: Point clouds of shape (num_samples, num_points, 3) in normalized coordinates
                     If single cfg_value was provided, returns (num_points, 3)
     """
     model.eval()
@@ -100,11 +100,8 @@ def sample_conditional(
 
     x_final = x_final.cpu().numpy()
 
-    # Reconstruct to meters: x_norm = (x_centered / height) * 2.0 => x = (x_norm / 2.0) * height
-    x_meters = (x_final / 2.0) * target_height
-
     # Return single sample without batch dimension if single cfg was provided
     if single_sample:
-        return x_meters[0]
+        return x_final[0]
 
-    return x_meters
+    return x_final
