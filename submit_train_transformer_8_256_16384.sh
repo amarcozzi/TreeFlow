@@ -38,4 +38,4 @@ python train.py \
     --compile \
     --cfg_dropout_prob 0.15 \
     --max_points 16384 \
-    --resume_from "epoch_2200.pt"
+    --resume_from "epoch_3200.pt"
