@@ -345,6 +345,10 @@ def create_figure_2(
     y_range = np.linspace(-0.5, 4.0, grid_size)
     X, Y = np.meshgrid(x_range, y_range)
 
+    # Define source and target points for paths (used throughout)
+    x0 = np.array([1.5, 1.8])    # Source point (noise sample)
+    x1 = np.array([7.5, 2.0])    # Target point (tree sample)
+
     # Source distribution: Simple Gaussian on the left side
     source_center = np.array([1.5, 1.8])
     source_sigma = 0.55
@@ -393,6 +397,92 @@ def create_figure_2(
         alpha=0.12,
     )
 
+    # ==========================================
+    # Velocity field: Shows complex learned transport
+    # Dense field with smooth structured variation
+    # ==========================================
+    # Denser grid for more complexity
+    n_arrows_x = 30
+    n_arrows_y = 15
+    arrow_x = np.linspace(0.2, 8.8, n_arrows_x)
+    arrow_y = np.linspace(0.15, 3.35, n_arrows_y)
+    Arrow_X, Arrow_Y = np.meshgrid(arrow_x, arrow_y)
+
+    # Create velocity components with smooth, structured flow
+    U = np.zeros_like(Arrow_X)
+    V = np.zeros_like(Arrow_Y)
+
+    for i in range(Arrow_X.shape[0]):
+        for j in range(Arrow_X.shape[1]):
+            px, py = Arrow_X[i, j], Arrow_Y[i, j]
+
+            # Distance from source and target centers
+            dist_to_source = np.sqrt((px - x0[0])**2 + (py - x0[1])**2)
+            dist_to_target = np.sqrt((px - x1[0])**2 + (py - x1[1])**2)
+
+            # Skip arrows inside distribution cores
+            if dist_to_source < 0.85 or dist_to_target < 0.95:
+                U[i, j] = 0
+                V[i, j] = 0
+                continue
+
+            # Smooth blending based on position along transport
+            t = (px - x0[0]) / (x1[0] - x0[0])
+            t = np.clip(t, 0, 1)
+
+            # Source influence: radial outward flow
+            radial_from_source = np.array([px - x0[0], py - x0[1]])
+            radial_from_source = radial_from_source / (np.linalg.norm(radial_from_source) + 1e-6)
+
+            # Target influence: weighted attraction to all modes
+            target_pull = np.array([0.0, 0.0])
+            total_weight = 0
+            for k, (tc, tw) in enumerate(zip(target_centers, target_weights)):
+                dist_to_mode = np.sqrt((px - tc[0])**2 + (py - tc[1])**2)
+                weight = tw / (dist_to_mode + 0.5)
+                toward_mode = np.array([tc[0] - px, tc[1] - py])
+                toward_mode = toward_mode / (np.linalg.norm(toward_mode) + 1e-6)
+                target_pull += weight * toward_mode
+                total_weight += weight
+            target_pull = target_pull / (total_weight + 1e-6)
+
+            # Smooth interpolation with smoothstep
+            blend = 3 * t**2 - 2 * t**3
+            local_dir = (1 - blend) * radial_from_source + blend * target_pull
+            local_dir = local_dir / (np.linalg.norm(local_dir) + 1e-6)
+
+            # Add smooth structured variation (gentle waves)
+            # This adds complexity without chaos
+            wave_angle = 0.25 * np.sin(0.8 * px + 0.3 * py) * np.cos(0.5 * py)
+            cos_w, sin_w = np.cos(wave_angle), np.sin(wave_angle)
+            local_dir = np.array([
+                local_dir[0] * cos_w - local_dir[1] * sin_w,
+                local_dir[0] * sin_w + local_dir[1] * cos_w
+            ])
+
+            # Magnitude: fade at edges and near distribution centers
+            edge_fade_x = min(px / 0.8, (9.0 - px) / 0.8, 1.0)
+            edge_fade_y = min(py / 0.5, (3.5 - py) / 0.5, 1.0)
+            source_fade = min(1.0, (dist_to_source - 0.85) / 0.7)
+            target_fade = min(1.0, (dist_to_target - 0.95) / 0.8)
+            magnitude = 0.15 * edge_fade_x * edge_fade_y * source_fade * target_fade
+
+            U[i, j] = local_dir[0] * magnitude
+            V[i, j] = local_dir[1] * magnitude
+
+    # Plot velocity field
+    ax_c.quiver(
+        Arrow_X, Arrow_Y, U, V,
+        color="#78909C",  # Blue-gray
+        alpha=0.5,
+        scale=4,
+        width=0.0025,
+        headwidth=3.5,
+        headlength=4,
+        headaxislength=3.5,
+        zorder=1,
+    )
+
     # Plot source distribution contours (blue)
     source_levels = np.linspace(0.12, 0.92, 7) * source_density.max()
     cs_source = ax_c.contour(
@@ -412,10 +502,6 @@ def create_figure_2(
         linewidths=1.6,
         alpha=0.9,
     )
-
-    # Define source and target points for paths
-    x0 = np.array([1.5, 1.8])    # Source point (noise sample)
-    x1 = np.array([7.5, 2.0])    # Target point (tree sample)
 
     # ==========================================
     # Training path: Linear interpolation x_t = (1-t)*x_0 + t*x_1
