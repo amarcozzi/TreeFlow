@@ -240,23 +240,30 @@ def create_figure_2(
     ax_a.set_xlim(-lim, lim)
     ax_a.set_ylim(-lim, lim)
     ax_a.set_zlim(-lim, lim)
-    ax_a.set_title(r"$p_0 \sim \mathcal{N}(0, I)$", fontsize=12, pad=10)
+    # No title - will be labeled in figure 2c
     ax_a.view_init(elev=20, azim=45)
     ax_a.set_box_aspect([1, 1, 1])
 
-    # # Remove axis labels and tick labels
-    # ax_a.set_xticklabels([])
-    # ax_a.set_yticklabels([])
-    # ax_a.set_zticklabels([])
+    # Keep minimal axis elements - light box frame
+    ax_a.set_xticklabels([])
+    ax_a.set_yticklabels([])
+    ax_a.set_zticklabels([])
+    ax_a.tick_params(axis='both', which='both', length=0)
 
-    # White background
+    # Light gray panes and edges for subtle 3D box
     ax_a.xaxis.pane.fill = False
     ax_a.yaxis.pane.fill = False
     ax_a.zaxis.pane.fill = False
-    ax_a.xaxis.pane.set_edgecolor("lightgray")
-    ax_a.yaxis.pane.set_edgecolor("lightgray")
-    ax_a.zaxis.pane.set_edgecolor("lightgray")
-    ax_a.grid(True, alpha=0.3)
+    ax_a.xaxis.pane.set_edgecolor('#CCCCCC')
+    ax_a.yaxis.pane.set_edgecolor('#CCCCCC')
+    ax_a.zaxis.pane.set_edgecolor('#CCCCCC')
+    ax_a.xaxis.line.set_color('#AAAAAA')
+    ax_a.yaxis.line.set_color('#AAAAAA')
+    ax_a.zaxis.line.set_color('#AAAAAA')
+    ax_a.grid(False)
+
+    # White background
+    fig_a.patch.set_facecolor('white')
 
     plt.tight_layout()
     fig_a.savefig(output_dir / "figure_2_a.pdf", bbox_inches="tight", dpi=800)
@@ -300,26 +307,29 @@ def create_figure_2(
     ax_b.set_ylim(mid_y - max_range, mid_y + max_range)
     ax_b.set_zlim(mid_z - max_range, mid_z + max_range)
 
-    ax_b.set_title(r"$p_1 \sim p_{\mathrm{data}}$", fontsize=12, pad=10)
+    # No title - will be labeled in figure 2c
     ax_b.view_init(elev=20, azim=45)
 
-    # # Remove axis labels and tick labels
-    # ax_b.set_xticklabels([])
-    # ax_b.set_yticklabels([])
-    # ax_b.set_zticklabels([])
+    # Keep minimal axis elements - light box frame
+    ax_b.set_xticklabels([])
+    ax_b.set_yticklabels([])
+    ax_b.set_zticklabels([])
+    ax_b.tick_params(axis='both', which='both', length=0)
 
-    ax_b.xaxis.set_major_locator(MaxNLocator(nbins=4))
-    ax_b.yaxis.set_major_locator(MaxNLocator(nbins=4))
-    ax_b.zaxis.set_major_locator(MaxNLocator(nbins=4))
-
-    # White background
+    # Light gray panes and edges for subtle 3D box
     ax_b.xaxis.pane.fill = False
     ax_b.yaxis.pane.fill = False
     ax_b.zaxis.pane.fill = False
-    ax_b.xaxis.pane.set_edgecolor("lightgray")
-    ax_b.yaxis.pane.set_edgecolor("lightgray")
-    ax_b.zaxis.pane.set_edgecolor("lightgray")
-    ax_b.grid(True, alpha=0.3)
+    ax_b.xaxis.pane.set_edgecolor('#CCCCCC')
+    ax_b.yaxis.pane.set_edgecolor('#CCCCCC')
+    ax_b.zaxis.pane.set_edgecolor('#CCCCCC')
+    ax_b.xaxis.line.set_color('#AAAAAA')
+    ax_b.yaxis.line.set_color('#AAAAAA')
+    ax_b.zaxis.line.set_color('#AAAAAA')
+    ax_b.grid(False)
+
+    # White background
+    fig_b.patch.set_facecolor('white')
 
     plt.tight_layout()
     fig_b.savefig(output_dir / "figure_2_b.pdf", bbox_inches="tight", dpi=800)
@@ -327,107 +337,281 @@ def create_figure_2(
     print(f"  Saved: {output_dir}/figure_2_b.pdf")
 
     # ==========================================
-    # Figure 2c: Probability Density Evolution
+    # Figure 2c: 2D Probability Space with Flow Matching Paths
+    # (Similar to Yazdani et al. Figure 1a)
     # ==========================================
-    print("Creating Figure 2c: Probability density evolution...")
+    print("Creating Figure 2c: 2D probability space with flow matching paths...")
 
-    fig_c, ax_c = plt.subplots(figsize=(8, 4))
+    from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+    import matplotlib.image as mpimg
 
-    # Create density evolution heatmap
-    n_time = 200
-    n_space = 300
-    t_vals = np.linspace(0, 1, n_time)
-    z_vals = np.linspace(-4, 4, n_space)
+    # Set seed for reproducible stochastic path
+    np.random.seed(42)
 
-    density = np.zeros((n_space, n_time))
+    fig_c, ax_c = plt.subplots(figsize=(9, 9))
 
-    # Source: Standard Gaussian p_0 ~ N(0, I)
-    source = np.exp(-0.5 * z_vals**2) / np.sqrt(2 * np.pi)
+    # Define grid for probability densities
+    grid_size = 500
+    x_range = np.linspace(-0.5, 6.0, grid_size)
+    y_range = np.linspace(-0.5, 6.0, grid_size)
+    X, Y = np.meshgrid(x_range, y_range)
 
-    # Target: Bimodal distribution representing vertical tree structure
-    # Lower peak (trunk region), upper peak (canopy region)
-    target = (
-        0.2 * np.exp(-0.5 * ((z_vals + 1.0) / 0.4) ** 2) / 0.4
-        + 0.8 * np.exp(-0.5 * ((z_vals - 1.5) / 0.6) ** 2) / 0.6
-    )
-    target = target / target.sum() * source.sum()
-
-    # Create smooth interpolation
-    for i, t in enumerate(t_vals):
-        alpha = t**0.8
-        blended = (1 - alpha) * source + alpha * target
-        if 0.3 < t < 0.7:
-            blended = gaussian_filter(blended, sigma=1.5)
-        density[:, i] = blended
-
-    density = gaussian_filter(density, sigma=[3, 2])
-
-    # Normalize columns
-    for i in range(n_time):
-        if density[:, i].max() > 0:
-            density[:, i] = density[:, i] / density[:, i].max()
-
-    # Plot heatmap
-    im = ax_c.imshow(
-        density,
-        aspect="auto",
-        origin="lower",
-        extent=[0, 1, z_vals.min(), z_vals.max()],
-        cmap="jet",
-        interpolation="bilinear",
+    # Source distribution: Simple Gaussian - positioned to leave room for inset
+    source_center = np.array([1.8, 1.8])
+    source_sigma = 0.55
+    source_density = np.exp(
+        -((X - source_center[0]) ** 2 + (Y - source_center[1]) ** 2)
+        / (2 * source_sigma**2)
     )
 
-    # Source distribution curve (left side)
-    source_scaled = source / source.max() * 0.08
-    ax_c.fill_betweenx(
-        z_vals,
-        -source_scaled,
-        0,
-        alpha=0.8,
-        color="#00cfff",
-        edgecolor="white",
-        linewidth=1.5,
+    # Target distribution: Complex multi-modal distribution
+    # Many modes with varying shapes to show complexity of learned distribution
+    target_centers = [
+        (4.0, 4.2),   # Main mode
+        (4.7, 4.8),   # Secondary mode
+        (3.4, 4.8),   # Third mode
+        (4.6, 3.6),   # Fourth mode
+        (3.6, 3.6),   # Fifth mode (smaller)
+        (5.0, 4.2),   # Sixth mode (smaller)
+    ]
+    target_sigmas = [
+        (0.40, 0.44),  # Slightly elliptical
+        (0.32, 0.36),
+        (0.34, 0.30),
+        (0.26, 0.30),
+        (0.22, 0.24),
+        (0.24, 0.20),
+    ]
+    target_weights = [0.30, 0.22, 0.18, 0.15, 0.08, 0.07]
+
+    target_density = np.zeros_like(X)
+    for center, sigmas, weight in zip(target_centers, target_sigmas, target_weights):
+        # Elliptical Gaussians for more complex shapes
+        target_density += weight * np.exp(
+            -((X - center[0]) ** 2 / (2 * sigmas[0]**2) +
+              (Y - center[1]) ** 2 / (2 * sigmas[1]**2))
+        )
+
+    # Create subtle background gradient
+    combined_density = 0.25 * source_density + 0.75 * target_density
+    combined_density = gaussian_filter(combined_density, sigma=4)
+
+    # Plot filled contours for subtle background
+    ax_c.contourf(
+        X, Y, combined_density,
+        levels=20,
+        cmap="Reds",
+        alpha=0.12,
     )
-    ax_c.plot(-source_scaled, z_vals, color="white", linewidth=1.5)
 
-    # Target distribution curve (right side)
-    target_scaled = target / target.max() * 0.08
-    ax_c.fill_betweenx(
-        z_vals,
-        1,
-        1 + target_scaled,
-        alpha=0.8,
-        color="#e8e855",
-        edgecolor="white",
-        linewidth=1.5,
+    # Plot source distribution contours (blue)
+    source_levels = np.linspace(0.12, 0.92, 7) * source_density.max()
+    cs_source = ax_c.contour(
+        X, Y, source_density,
+        levels=source_levels,
+        colors="#1565C0",
+        linewidths=1.6,
+        alpha=0.9,
     )
-    ax_c.plot(1 + target_scaled, z_vals, color="white", linewidth=1.5)
 
-    # Axis limits and labels
-    ax_c.set_xlim(-0.12, 1.12)
-    ax_c.set_ylim(z_vals.min(), z_vals.max())
+    # Plot target distribution contours (red/dark red)
+    target_levels = np.linspace(0.08, 0.92, 8) * target_density.max()
+    cs_target = ax_c.contour(
+        X, Y, target_density,
+        levels=target_levels,
+        colors="#C62828",
+        linewidths=1.6,
+        alpha=0.9,
+    )
 
-    # Labels consistent with flow matching notation
-    ax_c.set_xlabel("Time (t)", fontsize=11)
-    ax_c.text(-0.06, z_vals.min() - 0.8, r"$x_0$", fontsize=12, ha="center", va="top")
-    ax_c.text(1.06, z_vals.min() - 0.8, r"$x_1$", fontsize=12, ha="center", va="top")
+    # Define source and target points for paths
+    x0 = np.array([1.5, 1.5])    # Source point (noise sample)
+    x1 = np.array([3.8, 4.0])    # Target point (tree sample)
 
-    # Add velocity field notation
+    # ==========================================
+    # Add inset images - positioned in corners, behind the contours
+    # ==========================================
+    # Inset for source (noise) - in lower-left corner
+    try:
+        img_noise = mpimg.imread(output_dir / "figure_2_a.png")
+        imagebox_noise = OffsetImage(img_noise, zoom=0.09)
+        ab_noise = AnnotationBbox(
+            imagebox_noise,
+            (-0.2, -0.2),  # Lower-left corner
+            frameon=False,
+            zorder=0,  # Behind contours
+        )
+        ax_c.add_artist(ab_noise)
+    except Exception as e:
+        print(f"  Warning: Could not load figure_2_a.png for inset: {e}")
+
+    # Inset for target (tree) - in upper-right corner
+    try:
+        img_tree = mpimg.imread(output_dir / "figure_2_b.png")
+        imagebox_tree = OffsetImage(img_tree, zoom=0.09)
+        ab_tree = AnnotationBbox(
+            imagebox_tree,
+            (5.5, 5.5),  # Upper-right corner
+            frameon=False,
+            zorder=0,  # Behind contours
+        )
+        ax_c.add_artist(ab_tree)
+    except Exception as e:
+        print(f"  Warning: Could not load figure_2_b.png for inset: {e}")
+
+    # ==========================================
+    # Training path: Linear interpolation x_t = (1-t)*x_0 + t*x_1
+    # ==========================================
+    t_train = np.linspace(0, 1, 100)
+    train_path = np.array([(1 - t) * x0 + t * x1 for t in t_train])
+
+    ax_c.plot(
+        train_path[:, 0], train_path[:, 1],
+        color="#00ACC1",
+        linewidth=3.5,
+        linestyle="-",
+        label=r"Training: $x_t = (1-t)x_0 + tx_1$",
+        zorder=5,
+    )
+
+    # Add arrow showing direction on training path
+    arrow_idx = int(len(train_path) * 0.55)
+    ax_c.annotate(
+        "",
+        xy=(train_path[arrow_idx + 3, 0], train_path[arrow_idx + 3, 1]),
+        xytext=(train_path[arrow_idx, 0], train_path[arrow_idx, 1]),
+        arrowprops=dict(arrowstyle="-|>", color="#00ACC1", lw=3, mutation_scale=20),
+        zorder=6,
+    )
+
+    # ==========================================
+    # Inference path: Moderately inefficient ODE stepping
+    # Shows that inference deviates somewhat from the optimal straight line
+    # ==========================================
+    n_steps = 8
+    t_infer = np.linspace(0, 1, n_steps + 1)
+
+    # Create a path with moderate deviation from straight line
+    infer_path = [x0.copy()]
+    current_pos = x0.copy()
+
+    np.random.seed(42)
+    for i in range(1, len(t_infer)):
+        t_curr = t_infer[i]
+        dt = t_infer[i] - t_infer[i-1]
+
+        # Base velocity direction
+        base_velocity = x1 - x0
+
+        # Perpendicular direction for deviation
+        perp = np.array([-base_velocity[1], base_velocity[0]])
+        perp = perp / np.linalg.norm(perp)
+
+        # Moderate structured deviation - curved path
+        # Deviation peaks in the middle of the path
+        deviation_magnitude = 0.2 * np.sin(np.pi * t_curr)
+
+        # Small random component
+        random_component = 0.05 * np.random.randn(2)
+
+        # Update position
+        current_pos = current_pos + base_velocity * dt + perp * deviation_magnitude * dt * 5 + random_component
+        infer_path.append(current_pos.copy())
+
+    infer_path = np.array(infer_path)
+    # Ensure endpoints are correct
+    infer_path[0] = x0
+    infer_path[-1] = x1
+
+    # Plot path segments connecting the steps
+    ax_c.plot(
+        infer_path[:, 0], infer_path[:, 1],
+        color="#FF8F00",
+        linewidth=2.5,
+        linestyle="--",
+        label="Inference: ODE integration",
+        zorder=5,
+    )
+
+    # Plot step markers
+    ax_c.scatter(
+        infer_path[1:-1, 0], infer_path[1:-1, 1],
+        color="#FF8F00",
+        s=60,
+        zorder=7,
+        edgecolors="white",
+        linewidths=1.5,
+        marker="o",
+    )
+
+    # ==========================================
+    # Mark source and target points
+    # ==========================================
+    # Source point (x_0)
+    ax_c.scatter(
+        [x0[0]], [x0[1]],
+        color="#1565C0",
+        s=220,
+        marker="o",
+        zorder=10,
+        edgecolors="white",
+        linewidths=2.5,
+    )
+
+    # Target point (x_1)
+    ax_c.scatter(
+        [x1[0]], [x1[1]],
+        color="#C62828",
+        s=220,
+        marker="o",
+        zorder=10,
+        edgecolors="white",
+        linewidths=2.5,
+    )
+
+    # ==========================================
+    # Labels and annotations
+    # ==========================================
+    # Label for source distribution
     ax_c.text(
-        0.5,
-        z_vals.max() + 0.3,
-        r"$v_\theta(x_t, t, c)$",
+        1.5, 2.4,
+        r"$X_0$ (Source)" + "\n" + r"$\mathcal{N}(0, I)$",
         fontsize=11,
+        color="#1565C0",
+        fontweight="bold",
         ha="center",
         va="bottom",
-        style="italic",
     )
 
-    # Remove y-axis, clean styling
-    ax_c.spines["top"].set_visible(False)
-    ax_c.spines["right"].set_visible(False)
-    ax_c.spines["left"].set_visible(False)
-    ax_c.tick_params(left=False, labelleft=False)
+    # Label for target distribution
+    ax_c.text(
+        4.0, 2.8,
+        r"$X_1$ (Target)" + "\n" + r"$p_{\mathrm{data}}$",
+        fontsize=11,
+        color="#C62828",
+        fontweight="bold",
+        ha="center",
+        va="top",
+    )
+
+    # Axis labels
+    ax_c.set_xlabel("X-axis", fontsize=12)
+    ax_c.set_ylabel("Y-axis", fontsize=12)
+
+    # Set axis limits with padding for corner insets
+    ax_c.set_xlim(-1.5, 6.5)
+    ax_c.set_ylim(-1.5, 6.5)
+
+    # Add legend in bottom right
+    legend = ax_c.legend(
+        loc="lower right",
+        fontsize=10,
+        framealpha=0.95,
+        edgecolor="gray",
+    )
+
+    # Clean styling
+    ax_c.set_aspect("equal")
 
     # White background
     fig_c.patch.set_facecolor("white")
