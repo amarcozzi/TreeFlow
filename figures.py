@@ -529,43 +529,82 @@ def create_figure_2(
     )
 
     # ==========================================
-    # Inference path: Moderately inefficient ODE stepping
-    # Shows that inference deviates somewhat from the optimal straight line
+    # Inference path: ODE integration following the velocity field
+    # Shows how inference actually follows the learned flow
     # ==========================================
-    n_steps = 8
-    t_infer = np.linspace(0, 1, n_steps + 1)
 
-    # Create a path with moderate deviation from straight line
+    def compute_velocity(px, py):
+        """Compute velocity at a point, following the flow field logic."""
+        # Smooth blending based on position along transport
+        t = (px - x0[0]) / (x1[0] - x0[0])
+        t = np.clip(t, 0, 1)
+
+        # Source influence: radial outward flow (or toward target if at source)
+        radial_from_source = np.array([px - x0[0], py - x0[1]])
+        norm_source = np.linalg.norm(radial_from_source)
+        if norm_source > 0.1:
+            radial_from_source = radial_from_source / norm_source
+        else:
+            # At or very near source: use direction toward target
+            toward_target = np.array([x1[0] - px, x1[1] - py])
+            radial_from_source = toward_target / np.linalg.norm(toward_target)
+
+        # Target influence: weighted attraction to all modes
+        target_pull = np.array([0.0, 0.0])
+        total_weight = 0
+        for k, (tc, tw) in enumerate(zip(target_centers, target_weights)):
+            dist_to_mode = np.sqrt((px - tc[0])**2 + (py - tc[1])**2)
+            weight = tw / (dist_to_mode + 0.5)
+            toward_mode = np.array([tc[0] - px, tc[1] - py])
+            norm_mode = np.linalg.norm(toward_mode)
+            if norm_mode > 1e-6:
+                toward_mode = toward_mode / norm_mode
+            target_pull += weight * toward_mode
+            total_weight += weight
+        if total_weight > 1e-6:
+            target_pull = target_pull / total_weight
+
+        # Smooth interpolation with smoothstep
+        blend = 3 * t**2 - 2 * t**3
+        local_dir = (1 - blend) * radial_from_source + blend * target_pull
+        norm_dir = np.linalg.norm(local_dir)
+        if norm_dir > 1e-6:
+            local_dir = local_dir / norm_dir
+
+        # Add smooth structured variation (gentle waves) - same as quiver field
+        wave_angle = 0.25 * np.sin(0.8 * px + 0.3 * py) * np.cos(0.5 * py)
+        cos_w, sin_w = np.cos(wave_angle), np.sin(wave_angle)
+        local_dir = np.array([
+            local_dir[0] * cos_w - local_dir[1] * sin_w,
+            local_dir[0] * sin_w + local_dir[1] * cos_w
+        ])
+
+        return local_dir
+
+    # Integrate ODE using Euler method with the velocity field
+    n_steps = 7  # One fewer step, we'll add the final point manually
     infer_path = [x0.copy()]
     current_pos = x0.copy()
 
-    np.random.seed(42)
-    for i in range(1, len(t_infer)):
-        t_curr = t_infer[i]
-        dt = t_infer[i] - t_infer[i-1]
+    # Step size to follow the flow
+    total_distance = np.linalg.norm(x1 - x0)
+    dt = total_distance / 8 * 1.0
 
-        # Base velocity direction
-        base_velocity = x1 - x0
+    for i in range(n_steps):
+        # Get velocity at current position
+        vel = compute_velocity(current_pos[0], current_pos[1])
 
-        # Perpendicular direction for deviation
-        perp = np.array([-base_velocity[1], base_velocity[0]])
-        perp = perp / np.linalg.norm(perp)
-
-        # Moderate structured deviation - curved path
-        # Deviation peaks in the middle of the path
-        deviation_magnitude = 0.2 * np.sin(np.pi * t_curr)
-
-        # Small random component
-        random_component = 0.05 * np.random.randn(2)
-
-        # Update position
-        current_pos = current_pos + base_velocity * dt + perp * deviation_magnitude * dt * 5 + random_component
+        # Euler step
+        current_pos = current_pos + vel * dt
         infer_path.append(current_pos.copy())
 
+    # Add final point close to target (but not exactly on it)
+    final_point = x1 + np.array([-0.12, 0.08])  # Slightly offset from target
+    infer_path.append(final_point)
+
     infer_path = np.array(infer_path)
-    # Ensure endpoints are correct
+    # Ensure start point is exact
     infer_path[0] = x0
-    infer_path[-1] = x1
 
     # Plot path segments connecting the steps
     ax_c.plot(
@@ -577,7 +616,7 @@ def create_figure_2(
         zorder=5,
     )
 
-    # Plot step markers
+    # Plot intermediate step markers (exclude start and end)
     ax_c.scatter(
         infer_path[1:-1, 0], infer_path[1:-1, 1],
         color="#FF8F00",
@@ -585,6 +624,17 @@ def create_figure_2(
         zorder=7,
         edgecolors="white",
         linewidths=1.5,
+        marker="o",
+    )
+
+    # Plot endpoint marker (larger, to show final ODE result)
+    ax_c.scatter(
+        [infer_path[-1, 0]], [infer_path[-1, 1]],
+        color="#FF8F00",
+        s=180,
+        zorder=9,
+        edgecolors="white",
+        linewidths=2.5,
         marker="o",
     )
 
@@ -649,13 +699,28 @@ def create_figure_2(
     # Equal aspect ratio so circles look like circles
     ax_c.set_aspect("equal")
 
-    # Add legend in center
+    # Add legend with proxy artist for velocity field
+    from matplotlib.lines import Line2D
+    velocity_proxy = Line2D(
+        [0], [0],
+        color="#78909C",
+        marker=r'$\rightarrow$',
+        markersize=15,
+        linestyle='None',
+        alpha=0.7,
+        label=r"Learned velocity field $v_\theta$",
+    )
+    handles, labels = ax_c.get_legend_handles_labels()
+    handles.append(velocity_proxy)
+    labels.append(velocity_proxy.get_label())
+
     legend = ax_c.legend(
+        handles, labels,
         loc="lower center",
         fontsize=11,
         framealpha=0.95,
         edgecolor="gray",
-        ncol=2,
+        ncol=3,
     )
 
     # White background
