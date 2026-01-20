@@ -400,6 +400,11 @@ def train(args):
                 optimizer.load_state_dict(checkpoint["optimizer"])
             if "scheduler" in checkpoint and scheduler is not None:
                 scheduler.load_state_dict(checkpoint["scheduler"])
+            if "scaler" in checkpoint and scaler is not None:
+                scaler.load_state_dict(checkpoint["scaler"])
+            else:
+                if scaler is not None:
+                    print("Warning: No scaler state in checkpoint, using fresh GradScaler")
             if "epoch" in checkpoint:
                 start_epoch = checkpoint["epoch"] + 1
         else:
@@ -441,6 +446,8 @@ def train(args):
         }
         if scheduler is not None:
             checkpoint["scheduler"] = scheduler.state_dict()
+        if scaler is not None:
+            checkpoint["scaler"] = scaler.state_dict()
 
         if train_loss < best_loss:
             best_loss = train_loss
