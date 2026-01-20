@@ -221,9 +221,9 @@ def create_figure_2(
     noise_points = np.random.randn(n_points, 3)
 
     # ==========================================
-    # Figure 2a: Source Gaussian Distribution
+    # Figure 2b: Source Gaussian Distribution (3D point cloud)
     # ==========================================
-    print("Creating Figure 2a: Source Gaussian distribution...")
+    print("Creating Figure 2b: Source Gaussian distribution (3D)...")
     fig_a = plt.figure(figsize=(5, 5))
     ax_a = fig_a.add_subplot(111, projection="3d")
 
@@ -242,41 +242,33 @@ def create_figure_2(
     ax_a.set_xlim(-lim, lim)
     ax_a.set_ylim(-lim, lim)
     ax_a.set_zlim(-lim, lim)
-    # No title - will be labeled in figure 2c
+    ax_a.set_title(r"$p_0 \sim \mathcal{N}(0, I)$", fontsize=14, pad=10)
     ax_a.view_init(elev=20, azim=45)
     ax_a.set_box_aspect([1, 1, 1])
 
-    # Keep minimal axis elements - light box frame
-    ax_a.set_xticklabels([])
-    ax_a.set_yticklabels([])
-    ax_a.set_zticklabels([])
-    ax_a.tick_params(axis='both', which='both', length=0)
-
-    # Light gray panes and edges for subtle 3D box
+    # Clean axis styling
     ax_a.xaxis.pane.fill = False
     ax_a.yaxis.pane.fill = False
     ax_a.zaxis.pane.fill = False
-    ax_a.xaxis.pane.set_edgecolor('#CCCCCC')
-    ax_a.yaxis.pane.set_edgecolor('#CCCCCC')
-    ax_a.zaxis.pane.set_edgecolor('#CCCCCC')
-    ax_a.xaxis.line.set_color('#AAAAAA')
-    ax_a.yaxis.line.set_color('#AAAAAA')
-    ax_a.zaxis.line.set_color('#AAAAAA')
-    ax_a.grid(False)
+    ax_a.xaxis.pane.set_edgecolor('lightgray')
+    ax_a.yaxis.pane.set_edgecolor('lightgray')
+    ax_a.zaxis.pane.set_edgecolor('lightgray')
+    ax_a.grid(True, alpha=0.3)
 
     # White background
     fig_a.patch.set_facecolor('white')
 
+    plt.tight_layout()
     fig_a.savefig(
-        output_dir / "figure_2_a.png", format="png", bbox_inches="tight", dpi=800
+        output_dir / "figure_2_b.png", format="png", bbox_inches="tight", dpi=300
     )
     plt.close(fig_a)
-    print(f"  Saved: {output_dir}/figure_2_a.png")
+    print(f"  Saved: {output_dir}/figure_2_b.png")
 
     # ==========================================
-    # Figure 2b: Target Tree Distribution
+    # Figure 2c: Target Tree Distribution (3D point cloud)
     # ==========================================
-    print("Creating Figure 2b: Target tree distribution...")
+    print("Creating Figure 2c: Target tree distribution (3D)...")
     fig_b = plt.figure(figsize=(5, 5))
     ax_b = fig_b.add_subplot(111, projection="3d")
 
@@ -310,73 +302,68 @@ def create_figure_2(
     ax_b.set_ylim(mid_y - max_range, mid_y + max_range)
     ax_b.set_zlim(mid_z - max_range, mid_z + max_range)
 
-    # No title - will be labeled in figure 2c
+    ax_b.set_title(r"$p_1 \sim p_{\mathrm{data}}$", fontsize=14, pad=10)
     ax_b.view_init(elev=20, azim=45)
 
-    # Keep minimal axis elements - light box frame
-    ax_b.set_xticklabels([])
-    ax_b.set_yticklabels([])
-    ax_b.set_zticklabels([])
-    ax_b.tick_params(axis='both', which='both', length=0)
-
-    # Light gray panes and edges for subtle 3D box
+    # Clean axis styling
     ax_b.xaxis.pane.fill = False
     ax_b.yaxis.pane.fill = False
     ax_b.zaxis.pane.fill = False
-    ax_b.xaxis.pane.set_edgecolor('#CCCCCC')
-    ax_b.yaxis.pane.set_edgecolor('#CCCCCC')
-    ax_b.zaxis.pane.set_edgecolor('#CCCCCC')
-    ax_b.xaxis.line.set_color('#AAAAAA')
-    ax_b.yaxis.line.set_color('#AAAAAA')
-    ax_b.zaxis.line.set_color('#AAAAAA')
-    ax_b.grid(False)
+    ax_b.xaxis.pane.set_edgecolor('lightgray')
+    ax_b.yaxis.pane.set_edgecolor('lightgray')
+    ax_b.zaxis.pane.set_edgecolor('lightgray')
+    ax_b.grid(True, alpha=0.3)
+
+    ax_b.xaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax_b.yaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax_b.zaxis.set_major_locator(MaxNLocator(nbins=4))
 
     # White background
     fig_b.patch.set_facecolor('white')
 
+    plt.tight_layout()
     fig_b.savefig(
-        output_dir / "figure_2_b.png", bbox_inches="tight", dpi=800
+        output_dir / "figure_2_c.png", bbox_inches="tight", dpi=300
     )
     plt.close(fig_b)
-    print(f"  Saved: {output_dir}/figure_2_b.png")
+    print(f"  Saved: {output_dir}/figure_2_c.png")
 
     # ==========================================
-    # Figure 2c: 2D Probability Space with Flow Matching Paths
-    # (Similar to Yazdani et al. Figure 1a)
+    # Figure 2a (was 2c): 2D Probability Space with Flow Matching Paths
+    # Horizontal layout to span full text width
     # ==========================================
-    print("Creating Figure 2c: 2D probability space with flow matching paths...")
-
-    from matplotlib.offsetbox import OffsetImage, AnnotationBbox
-    import matplotlib.image as mpimg
+    print("Creating Figure 2a: 2D probability space (horizontal)...")
 
     # Set seed for reproducible stochastic path
     np.random.seed(42)
 
-    fig_c, ax_c = plt.subplots(figsize=(9, 9))
+    # Horizontal aspect ratio for full-width subfigure
+    # With xlim 10 units and ylim 4.5 units, figsize should match this ratio
+    fig_c, ax_c = plt.subplots(figsize=(14, 6.5))
 
-    # Define grid for probability densities
+    # Define grid for probability densities - horizontal layout
     grid_size = 500
-    x_range = np.linspace(-0.5, 6.0, grid_size)
-    y_range = np.linspace(-0.5, 6.0, grid_size)
+    x_range = np.linspace(-0.5, 9.5, grid_size)
+    y_range = np.linspace(-0.5, 4.0, grid_size)
     X, Y = np.meshgrid(x_range, y_range)
 
-    # Source distribution: Simple Gaussian - positioned to leave room for inset
-    source_center = np.array([1.8, 1.8])
+    # Source distribution: Simple Gaussian on the left side
+    source_center = np.array([1.5, 1.8])
     source_sigma = 0.55
     source_density = np.exp(
         -((X - source_center[0]) ** 2 + (Y - source_center[1]) ** 2)
         / (2 * source_sigma**2)
     )
 
-    # Target distribution: Complex multi-modal distribution
+    # Target distribution: Complex multi-modal distribution on the right side
     # Many modes with varying shapes to show complexity of learned distribution
     target_centers = [
-        (4.0, 4.2),   # Main mode
-        (4.7, 4.8),   # Secondary mode
-        (3.4, 4.8),   # Third mode
-        (4.6, 3.6),   # Fourth mode
-        (3.6, 3.6),   # Fifth mode (smaller)
-        (5.0, 4.2),   # Sixth mode (smaller)
+        (7.5, 2.0),   # Main mode
+        (8.2, 2.6),   # Secondary mode
+        (6.9, 2.7),   # Third mode
+        (8.1, 1.4),   # Fourth mode
+        (7.0, 1.3),   # Fifth mode (smaller)
+        (8.5, 2.0),   # Sixth mode (smaller)
     ]
     target_sigmas = [
         (0.40, 0.44),  # Slightly elliptical
@@ -429,39 +416,8 @@ def create_figure_2(
     )
 
     # Define source and target points for paths
-    x0 = np.array([1.5, 1.5])    # Source point (noise sample)
-    x1 = np.array([3.8, 4.0])    # Target point (tree sample)
-
-    # ==========================================
-    # Add inset images - positioned in corners, behind the contours
-    # ==========================================
-    # Inset for source (noise) - in lower-left corner
-    try:
-        img_noise = mpimg.imread(output_dir / "figure_2_a.png")
-        imagebox_noise = OffsetImage(img_noise, zoom=0.09)
-        ab_noise = AnnotationBbox(
-            imagebox_noise,
-            (-0.2, -0.2),  # Lower-left corner
-            frameon=False,
-            zorder=0,  # Behind contours
-        )
-        ax_c.add_artist(ab_noise)
-    except Exception as e:
-        print(f"  Warning: Could not load figure_2_a.png for inset: {e}")
-
-    # Inset for target (tree) - in upper-right corner
-    try:
-        img_tree = mpimg.imread(output_dir / "figure_2_b.png")
-        imagebox_tree = OffsetImage(img_tree, zoom=0.09)
-        ab_tree = AnnotationBbox(
-            imagebox_tree,
-            (5.5, 5.5),  # Upper-right corner
-            frameon=False,
-            zorder=0,  # Behind contours
-        )
-        ax_c.add_artist(ab_tree)
-    except Exception as e:
-        print(f"  Warning: Could not load figure_2_b.png for inset: {e}")
+    x0 = np.array([1.5, 1.8])    # Source point (noise sample)
+    x1 = np.array([7.5, 2.0])    # Target point (tree sample)
 
     # ==========================================
     # Training path: Linear interpolation x_t = (1-t)*x_0 + t*x_1
@@ -578,9 +534,9 @@ def create_figure_2(
     # ==========================================
     # Label for source distribution
     ax_c.text(
-        1.5, 2.4,
+        1.5, 3.2,
         r"$X_0$ (Source)" + "\n" + r"$\mathcal{N}(0, I)$",
-        fontsize=11,
+        fontsize=12,
         color="#1565C0",
         fontweight="bold",
         ha="center",
@@ -589,43 +545,45 @@ def create_figure_2(
 
     # Label for target distribution
     ax_c.text(
-        4.0, 2.8,
+        7.5, 3.2,
         r"$X_1$ (Target)" + "\n" + r"$p_{\mathrm{data}}$",
-        fontsize=11,
+        fontsize=12,
         color="#C62828",
         fontweight="bold",
         ha="center",
-        va="top",
+        va="bottom",
     )
 
     # Axis labels
     ax_c.set_xlabel("X-axis", fontsize=12)
     ax_c.set_ylabel("Y-axis", fontsize=12)
 
-    # Set axis limits with padding for corner insets
-    ax_c.set_xlim(-1.5, 6.5)
-    ax_c.set_ylim(-1.5, 6.5)
+    # Set axis limits for horizontal layout
+    ax_c.set_xlim(-0.5, 9.5)
+    ax_c.set_ylim(-0.5, 4.0)
 
-    # Add legend in bottom right
+    # Equal aspect ratio so circles look like circles
+    ax_c.set_aspect("equal")
+
+    # Add legend in center
     legend = ax_c.legend(
-        loc="lower right",
-        fontsize=10,
+        loc="lower center",
+        fontsize=11,
         framealpha=0.95,
         edgecolor="gray",
+        ncol=2,
     )
-
-    # Clean styling
-    ax_c.set_aspect("equal")
 
     # White background
     fig_c.patch.set_facecolor("white")
     ax_c.set_facecolor("white")
 
+    plt.tight_layout()
     fig_c.savefig(
-        output_dir / "figure_2_c.png", format="png", bbox_inches="tight", dpi=800
+        output_dir / "figure_2_a.png", format="png", bbox_inches="tight", dpi=300
     )
     plt.close(fig_c)
-    print(f"  Saved: {output_dir}/figure_2_c.png")
+    print(f"  Saved: {output_dir}/figure_2_a.png")
 
     print(f"\nAll figures saved to {output_dir}/")
 
