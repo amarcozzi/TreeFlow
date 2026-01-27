@@ -2,10 +2,10 @@
 #SBATCH --account=umontana_fire_modeling
 #SBATCH --partition=gpu-l40s
 #SBATCH --gres=gpu:l40s:1
-#SBATCH --job-name="treeflow-gen"
+#SBATCH --job-name="tf-gen-1"
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --time=0-12:00:00
+#SBATCH --time=2-00:00:00
 #SBATCH --output=log_generate_samples_0.out
 
 module load cuda
@@ -28,6 +28,7 @@ python generate_samples.py \
     --output_dir ${OUTPUT_DIR} \
     --start_idx 0 \
     --end_idx 200 \
+    --resume
 
 # To resume an interrupted run, use: --resume ${OUTPUT_DIR}
 
