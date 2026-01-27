@@ -25,10 +25,9 @@ python generate_samples.py \
     --num_samples_per_tree 16 \
     --cfg_scale "1.0 4" \
     --solver_method dopri5 \
-    --output_dir ${OUTPUT_DIR} \
+    --resume ${OUTPUT_DIR} \
     --start_idx 0 \
     --end_idx 200 \
-    --resume
 
 # To resume an interrupted run, use: --resume ${OUTPUT_DIR}
 
