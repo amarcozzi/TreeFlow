@@ -4,6 +4,9 @@ treeflow/generate_samples.py
 Generate synthetic tree point clouds from a trained Flow Matching model.
 Iterates through the test (and optionally validation) set and generates
 N samples per source tree with configurable CFG values.
+
+Supports resumable generation - samples are saved as zarr arrays with
+metadata in attributes. If interrupted, can resume from where it left off.
 """
 
 import matplotlib
@@ -11,7 +14,6 @@ matplotlib.use("Agg")
 
 import torch
 import numpy as np
-import pandas as pd
 import argparse
 import json
 import time
@@ -20,6 +22,7 @@ from datetime import datetime
 from tqdm import tqdm
 from types import SimpleNamespace
 import matplotlib.pyplot as plt
+import zarr
 
 from models import get_model
 from dataset import create_datasets
@@ -90,18 +93,42 @@ def parse_cfg_scale(
         )
 
 
-def save_point_cloud(points: np.ndarray, filepath: Path, fmt: str):
-    """Save point cloud in specified format."""
-    if fmt == "npy":
-        np.save(filepath.with_suffix(".npy"), points.astype(np.float32))
-    elif fmt == "laz":
-        import laspy
+def save_sample_zarr(points: np.ndarray, filepath: Path, metadata: dict):
+    """Save point cloud as zarr array with metadata in attributes."""
+    z = zarr.open(
+        str(filepath.with_suffix(".zarr")),
+        mode="w",
+        shape=points.shape,
+        dtype=np.float32,
+    )
+    z[:] = points.astype(np.float32)
+    for key, value in metadata.items():
+        z.attrs[key] = value
 
-        las = laspy.create(point_format=0)
-        las.x = points[:, 0]
-        las.y = points[:, 1]
-        las.z = points[:, 2]
-        las.write(str(filepath.with_suffix(".laz")))
+
+def scan_existing_samples(zarr_dir: Path) -> dict:
+    """
+    Scan zarr directory and return mapping of tree_id to completed sample indices.
+
+    Returns:
+        dict: {tree_id: [sample_indices]} where sample_indices are 1-indexed
+    """
+    existing = {}
+    if not zarr_dir.exists():
+        return existing
+
+    for zarr_path in zarr_dir.glob("*.zarr"):
+        # Parse filename: {tree_id}_{sample_idx}.zarr
+        name = zarr_path.stem
+        parts = name.rsplit("_", 1)
+        if len(parts) == 2:
+            tree_id, idx_str = parts[0], parts[1]
+            try:
+                idx = int(idx_str)
+                existing.setdefault(tree_id, []).append(idx)
+            except ValueError:
+                continue  # Skip malformed filenames
+    return existing
 
 
 def save_comparison_image(
@@ -163,6 +190,46 @@ def generate_samples(args):
     # Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    # Handle resume mode
+    if args.resume:
+        output_dir = Path(args.resume)
+        if not output_dir.exists():
+            raise FileNotFoundError(f"Resume directory not found: {output_dir}")
+
+        # Load generation config from previous run
+        gen_config_path = output_dir / "generation_config.json"
+        if not gen_config_path.exists():
+            raise FileNotFoundError(f"Generation config not found: {gen_config_path}")
+
+        with open(gen_config_path) as f:
+            gen_config = json.load(f)
+
+        # Use settings from previous run
+        args.experiment_name = gen_config["experiment_name"]
+        args.checkpoint = gen_config["checkpoint"]
+        args.data_path = gen_config["data_path"]
+        args.csv_path = gen_config["csv_path"]
+        args.preprocessed_version = gen_config["preprocessed_version"]
+        args.max_points = gen_config["max_points"]
+        args.num_samples_per_tree = gen_config["num_samples_per_tree"]
+        args.cfg_scale = gen_config["cfg_scale"]
+        args.num_ode_steps = gen_config["num_ode_steps"]
+        args.solver_method = gen_config["solver_method"]
+        args.use_validation = gen_config["use_validation"]
+        # Use seed from previous run for consistent CFG sampling
+        args.seed = gen_config["seed"]
+
+        print(f"Resuming generation from {output_dir}")
+
+        # Scan for existing samples
+        zarr_dir = output_dir / "zarr"
+        existing_samples = scan_existing_samples(zarr_dir)
+        total_existing = sum(len(v) for v in existing_samples.values())
+        print(f"  Found {total_existing} existing samples from {len(existing_samples)} trees")
+    else:
+        output_dir = Path(args.output_dir)
+        existing_samples = {}
 
     # Set random seed
     if args.seed is not None:
@@ -239,17 +306,36 @@ def generate_samples(args):
     model = load_checkpoint(checkpoint_path, model, device)
     model.eval()
 
-    # Create output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(args.output_dir) / f"{args.experiment_name}_{timestamp}"
-    points_dir = output_dir / args.output_format
-    points_dir.mkdir(parents=True, exist_ok=True)
+    # Create output directories
+    zarr_dir = output_dir / "zarr"
+    zarr_dir.mkdir(parents=True, exist_ok=True)
     images_dir = output_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    # Prepare metadata collection
-    metadata_rows = []
     sample_counter = 0
+    skipped_counter = 0
+
+    # Save generation config (do this early so resume can work if interrupted)
+    if not args.resume:
+        gen_config = {
+            "experiment_name": args.experiment_name,
+            "checkpoint": args.checkpoint,
+            "data_path": args.data_path,
+            "csv_path": args.csv_path,
+            "preprocessed_version": args.preprocessed_version,
+            "max_points": args.max_points,
+            "num_samples_per_tree": args.num_samples_per_tree,
+            "cfg_scale": args.cfg_scale,
+            "num_ode_steps": args.num_ode_steps,
+            "solver_method": args.solver_method,
+            "use_validation": args.use_validation,
+            "seed": args.seed,
+            "source_config": config,
+        }
+        config_path = output_dir / "generation_config.json"
+        with open(config_path, "w") as f:
+            json.dump(gen_config, f, indent=2)
+        print(f"Saved generation config to {config_path}")
 
     # Generation loop
     print(f"\nGenerating {args.num_samples_per_tree} samples per tree...")
@@ -274,8 +360,27 @@ def generate_samples(args):
             species_name = species_list[species_idx]
             type_name = type_list[type_idx]
 
-            # Generate CFG values for this tree's samples
-            cfg_values = parse_cfg_scale(args.cfg_scale, args.num_samples_per_tree, rng)
+            # Check for existing samples (resume mode)
+            completed_indices = set(existing_samples.get(source_tree_id, []))
+            all_indices = set(range(1, args.num_samples_per_tree + 1))
+            needed_indices = sorted(all_indices - completed_indices)
+
+            if not needed_indices:
+                # All samples for this tree already exist
+                skipped_counter += args.num_samples_per_tree
+                pbar.set_postfix(
+                    {"generated": sample_counter, "skipped": skipped_counter}
+                )
+                continue
+
+            # Generate CFG values for this tree's samples (all of them for consistency)
+            # We generate all CFG values to maintain reproducibility with seed
+            all_cfg_values = parse_cfg_scale(
+                args.cfg_scale, args.num_samples_per_tree, rng
+            )
+
+            # Only generate samples for needed indices
+            cfg_values_needed = [all_cfg_values[i - 1] for i in needed_indices]
 
             # Generate samples (batched for this tree)
             start_time = time.time()
@@ -286,26 +391,46 @@ def generate_samples(args):
                 target_height=height_raw,
                 species_idx=species_idx,
                 type_idx=type_idx,
-                cfg_values=cfg_values,
+                cfg_values=cfg_values_needed,
                 num_steps=args.num_ode_steps,
                 solver_method=args.solver_method,
             )
             generation_time = time.time() - start_time
-            time_per_sample = generation_time / args.num_samples_per_tree
+            time_per_sample = generation_time / len(needed_indices)
 
-            # Save each sample and record metadata
-            for i, (sample_points, cfg_val) in enumerate(
-                zip(generated_samples, cfg_values)
+            # Save each sample with metadata in zarr attributes
+            for sample_points, sample_idx, cfg_val in zip(
+                generated_samples, needed_indices, cfg_values_needed
             ):
                 sample_counter += 1
                 # Name samples based on source tree: {tree_id}_{sample_index}
-                sample_id = f"{source_tree_id}_{i + 1}"
-                sample_filename = f"{sample_id}.{args.output_format}"
+                sample_id = f"{source_tree_id}_{sample_idx}"
 
-                # Save point cloud
-                save_point_cloud(
-                    sample_points, points_dir / sample_id, args.output_format
-                )
+                # Prepare metadata for zarr attributes
+                metadata = {
+                    "sample_id": sample_id,
+                    "sample_file": f"{sample_id}.zarr",
+                    "source_tree_id": source_tree_id,
+                    "source_split": split_name,
+                    "species": species_name,
+                    "species_idx": int(species_idx),
+                    "scan_type": type_name,
+                    "type_idx": int(type_idx),
+                    "height_m": float(height_raw),
+                    "num_points": int(num_points),
+                    "cfg_scale": float(cfg_val),
+                    "num_ode_steps": (
+                        args.num_ode_steps if args.solver_method != "dopri5" else -1
+                    ),
+                    "solver_method": args.solver_method,
+                    "checkpoint": args.checkpoint,
+                    "seed": args.seed,
+                    "generation_time_s": float(time_per_sample),
+                    "generation_timestamp": datetime.now().isoformat(),
+                }
+
+                # Save point cloud as zarr with metadata
+                save_sample_zarr(sample_points, zarr_dir / sample_id, metadata)
 
                 # Save comparison image (real vs generated in normalized coordinates)
                 save_comparison_image(
@@ -318,73 +443,22 @@ def generate_samples(args):
                     cfg_scale=cfg_val,
                 )
 
-                # Record metadata
-                metadata_rows.append(
-                    {
-                        "sample_id": sample_id,
-                        "sample_file": sample_filename,
-                        "source_tree_id": source_tree_id,
-                        "source_split": split_name,
-                        "species": species_name,
-                        "species_idx": species_idx,
-                        "scan_type": type_name,
-                        "type_idx": type_idx,
-                        "height_m": height_raw,
-                        "num_points": num_points,
-                        "cfg_scale": cfg_val,
-                        "num_ode_steps": (
-                            args.num_ode_steps if args.solver_method != "dopri5" else -1
-                        ),
-                        "solver_method": args.solver_method,
-                        "checkpoint": args.checkpoint,
-                        "seed": args.seed,
-                        "generation_time_s": time_per_sample,
-                        "generation_timestamp": datetime.now().isoformat(),
-                    }
-                )
-
+            # Update skipped counter for any pre-existing samples from this tree
+            skipped_counter += len(completed_indices)
             pbar.set_postfix(
-                {"samples": sample_counter, "time": f"{generation_time:.2f}s"}
+                {"generated": sample_counter, "skipped": skipped_counter}
             )
-
-    # Save metadata CSV
-    metadata_df = pd.DataFrame(metadata_rows)
-    csv_path = output_dir / "samples_metadata.csv"
-    metadata_df.to_csv(csv_path, index=False)
-    print(f"\nSaved metadata to {csv_path}")
-
-    # Save generation config
-    gen_config = {
-        "experiment_name": args.experiment_name,
-        "checkpoint": args.checkpoint,
-        "data_path": args.data_path,
-        "csv_path": args.csv_path,
-        "preprocessed_version": args.preprocessed_version,
-        "max_points": args.max_points,
-        "num_samples_per_tree": args.num_samples_per_tree,
-        "cfg_scale": args.cfg_scale,
-        "num_ode_steps": args.num_ode_steps,
-        "solver_method": args.solver_method,
-        "output_format": args.output_format,
-        "use_validation": args.use_validation,
-        "seed": args.seed,
-        "total_samples_generated": sample_counter,
-        "generation_timestamp": timestamp,
-        "source_config": config,
-    }
-    config_path = output_dir / "generation_config.json"
-    with open(config_path, "w") as f:
-        json.dump(gen_config, f, indent=2)
-    print(f"Saved generation config to {config_path}")
 
     # Summary
     print(f"\n{'='*50}")
-    print(f"Generation complete!")
-    print(f"  Total samples: {sample_counter}")
+    print("Generation complete!")
+    print(f"  New samples generated: {sample_counter}")
+    print(f"  Samples skipped (already existed): {skipped_counter}")
     print(f"  Output directory: {output_dir}")
-    print(f"  Point clouds: {points_dir}")
+    print(f"  Point clouds (zarr): {zarr_dir}")
     print(f"  Comparison images: {images_dir}")
-    print(f"  Metadata CSV: {csv_path}")
+    print(f"\nRun postprocess_samples.py to collect metadata into CSV:"
+          f"\n  python postprocess_samples.py {output_dir}")
 
 
 def main():
@@ -396,8 +470,9 @@ def main():
     parser.add_argument(
         "--experiment_name",
         type=str,
-        required=True,
-        help="Name of trained experiment (e.g., 'transformer-8-256-4096')",
+        default=None,
+        help="Name of trained experiment (e.g., 'transformer-8-256-4096'). "
+        "Required unless --resume is provided.",
     )
     parser.add_argument(
         "--checkpoint",
@@ -471,13 +546,6 @@ def main():
         help="Output directory for generated samples",
     )
     parser.add_argument(
-        "--output_format",
-        type=str,
-        default="npy",
-        choices=["npy", "laz"],
-        help="Output format for point clouds",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -491,7 +559,20 @@ def main():
         help="Include validation set in addition to test set",
     )
 
+    # Resume
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to existing output directory to resume generation",
+    )
+
     args = parser.parse_args()
+
+    # Validate arguments
+    if not args.resume and not args.experiment_name:
+        parser.error("--experiment_name is required when not resuming")
+
     generate_samples(args)
 
 
