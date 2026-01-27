@@ -219,6 +219,11 @@ def generate_samples(args):
         args.use_validation = gen_config["use_validation"]
         # Use seed from previous run for consistent CFG sampling
         args.seed = gen_config["seed"]
+        # Restore index range if not overridden on command line
+        if args.start_idx is None:
+            args.start_idx = gen_config.get("start_idx")
+        if args.end_idx is None:
+            args.end_idx = gen_config.get("end_idx")
 
         print(f"Resuming generation from {output_dir}")
 
@@ -330,6 +335,8 @@ def generate_samples(args):
             "solver_method": args.solver_method,
             "use_validation": args.use_validation,
             "seed": args.seed,
+            "start_idx": args.start_idx,
+            "end_idx": args.end_idx,
             "source_config": config,
         }
         config_path = output_dir / "generation_config.json"
@@ -337,15 +344,36 @@ def generate_samples(args):
             json.dump(gen_config, f, indent=2)
         print(f"Saved generation config to {config_path}")
 
+    # Compute total trees and index range
+    total_trees = sum(len(ds) for _, ds in datasets_to_process)
+    start_idx = args.start_idx if args.start_idx is not None else 0
+    end_idx = args.end_idx if args.end_idx is not None else total_trees
+
     # Generation loop
     print(f"\nGenerating {args.num_samples_per_tree} samples per tree...")
     print(f"CFG scale: {args.cfg_scale}")
     print(f"Solver: {args.solver_method}, Steps: {args.num_ode_steps}")
+    print(f"Processing trees [{start_idx}, {end_idx}) of {total_trees} total")
+
+    global_idx = 0  # Track position across all splits
 
     for split_name, dataset in datasets_to_process:
-        print(f"\nProcessing {split_name} split ({len(dataset)} trees)...")
+        split_size = len(dataset)
 
-        pbar = tqdm(range(len(dataset)), desc=split_name)
+        # Skip entire split if outside range
+        if global_idx + split_size <= start_idx:
+            global_idx += split_size
+            continue
+        if global_idx >= end_idx:
+            break
+
+        # Calculate which indices in this split to process
+        split_start = max(0, start_idx - global_idx)
+        split_end = min(split_size, end_idx - global_idx)
+
+        print(f"\nProcessing {split_name} split (indices {split_start}-{split_end} of {split_size})...")
+
+        pbar = tqdm(range(split_start, split_end), desc=split_name)
         for idx in pbar:
             sample = dataset[idx]
 
@@ -449,6 +477,8 @@ def generate_samples(args):
                 {"generated": sample_counter, "skipped": skipped_counter}
             )
 
+        global_idx += split_size
+
     # Summary
     print(f"\n{'='*50}")
     print("Generation complete!")
@@ -519,6 +549,18 @@ def main():
         type=int,
         default=1,
         help="Number of samples to generate per source tree",
+    )
+    parser.add_argument(
+        "--start_idx",
+        type=int,
+        default=None,
+        help="Start index for trees to process (inclusive). For multi-GPU parallelism.",
+    )
+    parser.add_argument(
+        "--end_idx",
+        type=int,
+        default=None,
+        help="End index for trees to process (exclusive). For multi-GPU parallelism.",
     )
     parser.add_argument(
         "--cfg_scale",

@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=0-12:00:00
-#SBATCH --output=log_generate_samples_%j.out
+#SBATCH --output=log_generate_samples_0.out
 
 module load cuda
 
@@ -22,11 +22,13 @@ python generate_samples.py \
     --csv_path FOR-species20K/tree_metadata_dev.csv \
     --preprocessed_version raw \
     --max_points 16384 \
-    --num_samples_per_tree 4 \
+    --num_samples_per_tree 16 \
     --cfg_scale "1.0 4" \
     --solver_method dopri5 \
-    --output_dir ${OUTPUT_DIR}
+    --output_dir ${OUTPUT_DIR} \
+    --start_idx 0 \
+    --end_idx 200 \
 
 # To resume an interrupted run, use: --resume ${OUTPUT_DIR}
 
-python postprocess_samples.py ${OUTPUT_DIR}
+# python postprocess_samples.py ${OUTPUT_DIR}
