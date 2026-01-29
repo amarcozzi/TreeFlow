@@ -6,7 +6,7 @@
 #SBATCH --output=log_preprocess_zarr.out
 
 source /project/umontana_fire_modeling/anthony.marcozzi/miniforge3/etc/profile.d/conda.sh
-conda activate canopy-flow
+conda activate treeflow
 
 # Preprocess LAZ files to Zarr format
 # This will create:
