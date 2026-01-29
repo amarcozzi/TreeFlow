@@ -8,19 +8,14 @@
 source /project/umontana_fire_modeling/anthony.marcozzi/miniforge3/etc/profile.d/conda.sh
 conda activate canopy-flow
 
-# Preprocess with multiple voxel resolutions
+# Preprocess LAZ files to Zarr format
 # This will create:
-#   FOR-species20K/npy/raw/
-#   FOR-species20K/npy/voxel_0.05m/
-#   FOR-species20K/npy/voxel_0.1m/
-#   FOR-species20K/npy/voxel_0.2m/
+#   FOR-species20K/zarr/dev/
+#   FOR-species20K/zarr/test/
 
-python preprocess_laz_to_npy.py \
+python preprocess_laz.py \
     --data_path ./FOR-species20K \
-    --output_path ./FOR-species20K/npy \
-    --include_raw \
-    --voxel_sizes 0.05 0.1 0.2 \
-    --normalize \
+    --output_path ./FOR-species20K/zarr \
     --splits train test \
     --num_workers 40 \
     --verify

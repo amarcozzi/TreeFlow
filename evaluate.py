@@ -755,7 +755,7 @@ def load_real_samples(
         data_path: Path to FOR-species20K directory
         csv_path: Path to tree_metadata_dev.csv
         source_tree_ids: List of tree IDs to load (from generated samples metadata)
-        preprocessed_version: Which preprocessing version to use (raw, voxel_0.1m, etc.)
+        preprocessed_version: Preprocessing version subdirectory (default: use root zarr dir)
 
     Returns:
         metadata_df: DataFrame with real tree metadata (filtered to requested IDs)
@@ -779,7 +779,10 @@ def load_real_samples(
     )
 
     # Build file paths
-    zarr_dir = data_path / "zarr" / preprocessed_version / "dev"
+    if preprocessed_version:
+        zarr_dir = data_path / "zarr" / preprocessed_version / "dev"
+    else:
+        zarr_dir = data_path / "zarr" / "dev"
     metadata_df["file_path"] = metadata_df["file_id"].apply(
         lambda x: zarr_dir / f"{x}.zarr"
     )
@@ -967,8 +970,8 @@ def main():
     parser.add_argument(
         "--preprocessed_version",
         type=str,
-        default="raw",
-        help="Preprocessing version for real trees (raw, voxel_0.1m, voxel_0.2m)",
+        default=None,
+        help="Preprocessing version subdirectory (default: use root zarr dir)",
     )
 
     # Evaluation parameters

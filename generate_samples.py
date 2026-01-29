@@ -533,8 +533,8 @@ def main():
     parser.add_argument(
         "--preprocessed_version",
         type=str,
-        default="voxel_0.2m",
-        help="Preprocessing version to use (raw, voxel_0.1m, voxel_0.2m)",
+        default=None,
+        help="Preprocessing version subdirectory (default: use root zarr dir)",
     )
     parser.add_argument(
         "--max_points",

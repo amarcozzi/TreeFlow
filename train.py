@@ -484,7 +484,7 @@ def main():
     parser.add_argument(
         "--csv_path", type=str, default="FOR-species20K/tree_metadata_dev.csv"
     )
-    parser.add_argument("--preprocessed_version", type=str, default="voxel_0.2m")
+    parser.add_argument("--preprocessed_version", type=str, default=None)
 
     # Model
     parser.add_argument(

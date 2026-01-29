@@ -32,7 +32,7 @@ class PointCloudDataset(Dataset):
         Args:
             metadata_df: Pandas DataFrame containing ['filename', 'species', 'data_type', 'tree_H', 'file_path']
             data_path: Base path to FOR-species20K directory
-            preprocessed_version: "voxel_0.1m", etc.
+            preprocessed_version: Preprocessing version subdirectory (default: use root zarr dir)
             species_map: Dictionary mapping species string to integer index
             type_map: Dictionary mapping data_type string to integer index
             sample_exponent, rotation_augment, etc.: Augmentation parameters
@@ -175,7 +175,7 @@ def collate_fn_batched(batch):
 def create_datasets(
     data_path: str,
     csv_path: str,
-    preprocessed_version: str = "voxel_0.1m",
+    preprocessed_version: str = None,
     split_ratios: tuple = (0.8, 0.1, 0.1),  # Train, Val, Test
     seed: int = 42,
     **dataset_kwargs,
@@ -193,7 +193,10 @@ def create_datasets(
 
     # 2. Filter for existence
     # The CSV has filenames like "/train/00070.las". We need "00070.zarr" in the dev folder.
-    zarr_base_dir = data_path / "zarr" / preprocessed_version / "dev"
+    if preprocessed_version:
+        zarr_base_dir = data_path / "zarr" / preprocessed_version / "dev"
+    else:
+        zarr_base_dir = data_path / "zarr" / "dev"
 
     if not zarr_base_dir.exists():
         raise FileNotFoundError(f"Directory not found: {zarr_base_dir}")
@@ -317,7 +320,6 @@ if __name__ == "__main__":
         train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
             data_path=data_path,
             csv_path=csv_path,
-            preprocessed_version="voxel_0.2m",
             sample_exponent=0.3,
             rotation_augment=True,
         )
