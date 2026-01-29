@@ -1,9 +1,10 @@
 """
-preprocess_laz_to_npy.py - Convert LAZ files to NPY format with optional voxelization and normalization
+preprocess_laz_to_zarr.py - Convert LAZ files to Zarr format with optional voxelization and normalization
 """
 
 import laspy
 import numpy as np
+import zarr
 from pathlib import Path
 from tqdm import tqdm
 import argparse
@@ -12,7 +13,7 @@ from functools import partial
 import json
 
 MIN_POINTS = {
-    None: 0,
+    None: 1000,
     0.05: 0,
     0.1: 0,
     0.2: 0,
@@ -70,11 +71,11 @@ def voxelize_points(points, voxel_size):
 
 def process_single_file(laz_path, output_dir, voxel_size=None, normalize=True):
     """
-    Process a single LAZ file and save as NPY.
+    Process a single LAZ file and save as Zarr.
 
     Args:
         laz_path: Path to input LAZ file
-        output_dir: Directory to save NPY file
+        output_dir: Directory to save Zarr file
         voxel_size: Optional voxel size for downsampling (None = no voxelization)
         normalize: Whether to normalize to unit cube
 
@@ -83,11 +84,11 @@ def process_single_file(laz_path, output_dir, voxel_size=None, normalize=True):
     """
     try:
         file_id = laz_path.stem
-        output_path = output_dir / f"{file_id}.npy"
+        output_path = output_dir / f"{file_id}.zarr"
 
         # Skip if already processed
         if output_path.exists():
-            points = np.load(output_path)
+            points = zarr.load(output_path)
             return file_id, None, len(points), True, None
 
         # Read LAZ file
@@ -138,8 +139,8 @@ def process_single_file(laz_path, output_dir, voxel_size=None, normalize=True):
         if len(points) < min_points:
             return file_id, num_points_original, len(points), False, stats
 
-        # Save as NPY (uncompressed for speed)
-        np.save(output_path, points)
+        # Save as Zarr
+        zarr.save(output_path, points)
 
         return file_id, num_points_original, len(points), True, stats
 
@@ -161,7 +162,7 @@ def preprocess_dataset(
 
     Args:
         data_path: Path to FOR-species20K directory
-        output_base_path: Base path for output (will create subdirs for each voxel size)
+        output_base_path: Base path for Zarr output (will create subdirs for each voxel size)
         voxel_sizes: List of voxel sizes to process (None, 0.05, 0.1, 0.2, etc.)
                     None = raw (no voxelization)
         splits: List of splits to process ('train', 'test')
@@ -221,7 +222,7 @@ def preprocess_dataset(
                 print(f"Warning: No LAZ files found in {laz_dir}")
                 continue
 
-            print(f"Found {len(laz_files)} LAZ files")
+            print(f"Found {len(laz_files)} LAZ files to convert to Zarr")
             print(f"Output directory: {output_dir}")
 
             # Process files in parallel
@@ -337,7 +338,7 @@ def preprocess_dataset(
         # Save metadata for this voxel size
         metadata_path = output_base_path / voxel_dir_name / "preprocessing_info.txt"
         with open(metadata_path, "w") as f:
-            f.write(f"LAZ to NPY Preprocessing Summary\n")
+            f.write(f"LAZ to Zarr Preprocessing Summary\n")
             f.write(
                 f"Voxel size: {voxel_size if voxel_size is not None else 'None (raw)'}\n"
             )
@@ -375,7 +376,7 @@ def preprocess_dataset(
     print("Preprocessing complete!")
     print(f"{'='*80}")
     print(f"Global summary saved to: {summary_path}")
-    print(f"NPY files saved to: {output_base_path}")
+    print(f"Zarr files saved to: {output_base_path}")
     print(f"\nDirectory structure:")
     for voxel_size in voxel_sizes:
         if voxel_size is None:
@@ -396,7 +397,7 @@ def verify_preprocessing(data_path, output_path, voxel_dir="raw", num_samples=5)
 
     Args:
         data_path: Path to original LAZ files
-        output_path: Path to NPY files
+        output_path: Path to Zarr files
         voxel_dir: Which voxel directory to verify
         num_samples: Number of samples to verify
     """
@@ -408,37 +409,37 @@ def verify_preprocessing(data_path, output_path, voxel_dir="raw", num_samples=5)
     output_path = Path(output_path)
 
     # Check dev split
-    npy_dir = output_path / voxel_dir / "dev"
+    zarr_dir = output_path / voxel_dir / "dev"
 
-    if not npy_dir.exists():
-        print(f"✗ Directory not found: {npy_dir}")
+    if not zarr_dir.exists():
+        print(f"✗ Directory not found: {zarr_dir}")
         return False
 
-    npy_files = list(npy_dir.glob("*.npy"))[:num_samples]
+    zarr_files = list(zarr_dir.glob("*.zarr"))[:num_samples]
 
     all_valid = True
-    for npy_path in npy_files:
-        # Load NPY
-        npy_points = np.load(npy_path)
+    for zarr_path in zarr_files:
+        # Load Zarr
+        zarr_points = zarr.load(zarr_path)
 
         # Check basic validity
-        if len(npy_points) == 0 or npy_points.shape[1] != 3:
-            print(f"✗ {npy_path.stem}: Invalid shape {npy_points.shape}")
+        if len(zarr_points) == 0 or zarr_points.shape[1] != 3:
+            print(f"✗ {zarr_path.stem}: Invalid shape {zarr_points.shape}")
             all_valid = False
             continue
 
         # Check if normalized
-        point_range = np.abs(npy_points).max()
+        point_range = np.abs(zarr_points).max()
         is_normalized = point_range <= 1.1  # Allow small numerical error
 
         # Compute statistics
-        centroid = npy_points.mean(axis=0)
-        bounds = [(npy_points[:, i].min(), npy_points[:, i].max()) for i in range(3)]
+        centroid = zarr_points.mean(axis=0)
+        bounds = [(zarr_points[:, i].min(), zarr_points[:, i].max()) for i in range(3)]
 
         status = "✓" if is_normalized else "⚠"
         norm_str = "normalized" if is_normalized else "NOT normalized"
 
-        print(f"{status} {npy_path.stem}: {len(npy_points)} points, {norm_str}")
+        print(f"{status} {zarr_path.stem}: {len(zarr_points)} points, {norm_str}")
         print(f"   Centroid: [{centroid[0]:.4f}, {centroid[1]:.4f}, {centroid[2]:.4f}]")
         print(
             f"   Bounds: X:[{bounds[0][0]:.3f}, {bounds[0][1]:.3f}], "
@@ -459,7 +460,7 @@ def verify_preprocessing(data_path, output_path, voxel_dir="raw", num_samples=5)
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Preprocess LAZ files to NPY format with optional voxelization and normalization"
+        description="Preprocess LAZ files to Zarr format with optional voxelization and normalization"
     )
     parser.add_argument(
         "--data_path",
@@ -470,8 +471,8 @@ def main():
     parser.add_argument(
         "--output_path",
         type=str,
-        default="./FOR-species20K/npy",
-        help="Base path for NPY files (subdirs will be created for each voxel size)",
+        default="./FOR-species20K/zarr",
+        help="Base path for Zarr files (subdirs will be created for each voxel size)",
     )
     parser.add_argument(
         "--voxel_sizes",

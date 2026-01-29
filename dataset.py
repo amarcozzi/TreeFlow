@@ -6,6 +6,7 @@ import torch
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import zarr
 from pathlib import Path
 from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
@@ -26,7 +27,7 @@ class PointCloudDataset(Dataset):
         split_name: str = None,
     ):
         """
-        Dataset for loading preprocessed point clouds (NPY format) with conditioning info.
+        Dataset for loading preprocessed point clouds (Zarr format) with conditioning info.
 
         Args:
             metadata_df: Pandas DataFrame containing ['filename', 'species', 'data_type', 'tree_H', 'file_path']
@@ -85,8 +86,8 @@ class PointCloudDataset(Dataset):
     def __getitem__(self, idx):
         row = self.metadata.iloc[idx]
 
-        # Load NPY file
-        points = np.load(row["file_path"])
+        # Load Zarr file
+        points = zarr.load(row["file_path"])
 
         # Augmentation (Sampling/Rotation)
         if self.max_points is not None and len(points) > self.max_points:
@@ -191,21 +192,21 @@ def create_datasets(
     df = pd.read_csv(csv_path)
 
     # 2. Filter for existence
-    # The CSV has filenames like "/train/00070.las". We need "00070.npy" in the dev folder.
-    npy_base_dir = data_path / "npy" / preprocessed_version / "dev"
+    # The CSV has filenames like "/train/00070.las". We need "00070.zarr" in the dev folder.
+    zarr_base_dir = data_path / "zarr" / preprocessed_version / "dev"
 
-    if not npy_base_dir.exists():
-        raise FileNotFoundError(f"Directory not found: {npy_base_dir}")
+    if not zarr_base_dir.exists():
+        raise FileNotFoundError(f"Directory not found: {zarr_base_dir}")
 
     # Extract ID from filename and check existence
     # Assuming standard format /train/XXXXX.las
     df["file_id"] = df["filename"].apply(lambda x: Path(x).stem)
-    df["file_path"] = df["file_id"].apply(lambda x: npy_base_dir / f"{x}.npy")
+    df["file_path"] = df["file_id"].apply(lambda x: zarr_base_dir / f"{x}.zarr")
 
     # Filter rows where file exists
     initial_len = len(df)
     df = df[df["file_path"].apply(lambda x: x.exists())]
-    print(f"Found {len(df)}/{initial_len} matching NPY files in {npy_base_dir}")
+    print(f"Found {len(df)}/{initial_len} matching Zarr files in {zarr_base_dir}")
 
     # 3. Create Global Mappings
     species_list = sorted(df["species"].unique())
