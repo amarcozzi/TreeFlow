@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 import zarr
 from pathlib import Path
 from torch.utils.data import Dataset
-from sklearn.model_selection import train_test_split
 
 
 class PointCloudDataset(Dataset):
@@ -176,13 +175,14 @@ def create_datasets(
     data_path: str,
     csv_path: str,
     preprocessed_version: str = None,
-    split_ratios: tuple = (0.8, 0.1, 0.1),  # Train, Val, Test
-    seed: int = 42,
     **dataset_kwargs,
 ):
     """
     Factory function to create Train, Val, and Test datasets from the dev metadata CSV.
-    We do not use the 'test' folder as it lacks metadata.
+
+    The CSV must contain a 'split' column with values 'train', 'val', or 'test'.
+    This column is assigned during preprocessing by preprocess_laz.py to ensure
+    consistent splits across all dataset loads.
     """
     data_path = Path(data_path)
     csv_path = Path(csv_path)
@@ -190,6 +190,13 @@ def create_datasets(
     # 1. Load Metadata
     print(f"Loading metadata from {csv_path}...")
     df = pd.read_csv(csv_path)
+
+    # Verify split column exists
+    if "split" not in df.columns:
+        raise ValueError(
+            f"CSV missing 'split' column. Run preprocess_laz.py to assign splits, "
+            f"or manually add a 'split' column with values 'train', 'val', or 'test'."
+        )
 
     # 2. Filter for existence
     # The CSV has filenames like "/train/00070.las". We need "00070.zarr" in the dev folder.
@@ -221,26 +228,10 @@ def create_datasets(
     print(f"Species found: {len(species_list)}")
     print(f"Data types found: {len(type_list)}")
 
-    # 4. Split Data
-    train_ratio, val_ratio, test_ratio = split_ratios
-    # Normalize ratios just in case
-    total = sum(split_ratios)
-    train_ratio /= total
-    val_ratio /= total
-
-    # Split Train vs (Val+Test)
-    train_df, temp_df = train_test_split(
-        df, test_size=(1 - train_ratio), random_state=seed, stratify=df["species"]
-    )
-
-    # Split Val vs Test
-    relative_test_ratio = test_ratio / (test_ratio + val_ratio)
-    val_df, test_df = train_test_split(
-        temp_df,
-        test_size=relative_test_ratio,
-        random_state=seed,
-        stratify=temp_df["species"],
-    )
+    # 4. Split Data using pre-assigned split column
+    train_df = df[df["split"] == "train"]
+    val_df = df[df["split"] == "val"]
+    test_df = df[df["split"] == "test"]
 
     print(f"Splits: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
 

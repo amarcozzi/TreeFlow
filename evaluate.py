@@ -747,6 +747,7 @@ def load_real_samples(
     """
     Load real tree point clouds for the specified source tree IDs.
 
+    Only loads samples from the test split to ensure evaluation is on held-out data.
     Point clouds are kept in normalized form (as stored in .zarr files).
 
     Normalization: points_norm = (points_centered / height) * 2.0
@@ -758,7 +759,7 @@ def load_real_samples(
         preprocessed_version: Preprocessing version subdirectory (default: use root zarr dir)
 
     Returns:
-        metadata_df: DataFrame with real tree metadata (filtered to requested IDs)
+        metadata_df: DataFrame with real tree metadata (filtered to test split and requested IDs)
         point_clouds: Dict mapping file_id -> np.ndarray of shape (N, 3) normalized
     """
     data_path = Path(data_path)
@@ -767,15 +768,33 @@ def load_real_samples(
     # Load full metadata
     full_df = pd.read_csv(csv_path)
 
+    # Verify split column exists
+    if "split" not in full_df.columns:
+        raise ValueError(
+            f"CSV missing 'split' column. Run preprocess_laz.py to assign splits."
+        )
+
     # Extract file_id from filename (e.g., "/train/00070.las" -> "00070")
     full_df["file_id"] = full_df["filename"].apply(lambda x: Path(x).stem)
 
-    # Filter to requested IDs
+    # Filter to test split only
+    test_df = full_df[full_df["split"] == "test"].copy()
+    print(f"Filtered to test split: {len(test_df)}/{len(full_df)} samples")
+
+    # Filter to requested IDs (within test split)
     source_tree_ids_set = set(source_tree_ids)
-    metadata_df = full_df[full_df["file_id"].isin(source_tree_ids_set)].copy()
+    metadata_df = test_df[test_df["file_id"].isin(source_tree_ids_set)].copy()
+
+    # Warn if some requested IDs are not in test split
+    test_file_ids = set(test_df["file_id"])
+    not_in_test = source_tree_ids_set - test_file_ids
+    if not_in_test:
+        print(
+            f"  Warning: {len(not_in_test)} requested trees are not in test split (skipped)"
+        )
 
     print(
-        f"Found {len(metadata_df)}/{len(source_tree_ids_set)} requested real trees in metadata"
+        f"Found {len(metadata_df)}/{len(source_tree_ids_set)} requested real trees in test split"
     )
 
     # Build file paths

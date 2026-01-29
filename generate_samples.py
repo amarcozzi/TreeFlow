@@ -256,7 +256,7 @@ def generate_samples(args):
     print(f"  Species: {len(species_list)}, Types: {len(type_list)}")
 
     # Create datasets with same settings as training
-    # We need to use the same split seed (42) to ensure identical train/val/test splits
+    # Splits are pre-assigned in the CSV by preprocess_laz.py
     print(f"\nPreparing datasets from {args.csv_path}...")
     _, val_ds, test_ds, ds_species_list, ds_type_list = create_datasets(
         data_path=args.data_path,

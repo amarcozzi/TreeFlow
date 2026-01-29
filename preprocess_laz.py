@@ -4,6 +4,7 @@ preprocess_laz.py
 
 import laspy
 import numpy as np
+import pandas as pd
 import zarr
 from pathlib import Path
 from tqdm import tqdm
@@ -11,6 +12,78 @@ import argparse
 import multiprocessing as mp
 from functools import partial
 import json
+from sklearn.model_selection import train_test_split
+
+
+def assign_splits(
+    csv_path: Path,
+    output_csv_path: Path = None,
+    split_ratios: tuple = (0.8, 0.1, 0.1),
+    seed: int = 42,
+):
+    """
+    Assign train/val/test splits to metadata and save as new CSV.
+
+    This ensures consistent splits across all dataset loads, rather than
+    computing splits at runtime which can vary if the dataset changes.
+
+    Args:
+        csv_path: Path to input metadata CSV
+        output_csv_path: Path to save CSV with splits (defaults to overwriting input)
+        split_ratios: Tuple of (train, val, test) ratios
+        seed: Random seed for reproducibility
+
+    Returns:
+        DataFrame with 'split' column added
+    """
+    csv_path = Path(csv_path)
+    if output_csv_path is None:
+        output_csv_path = csv_path
+    else:
+        output_csv_path = Path(output_csv_path)
+
+    print(f"\nAssigning train/val/test splits to {csv_path}...")
+
+    df = pd.read_csv(csv_path)
+
+    # Normalize ratios
+    train_ratio, val_ratio, test_ratio = split_ratios
+    total = sum(split_ratios)
+    train_ratio /= total
+    val_ratio /= total
+    test_ratio /= total
+
+    # Split train vs (val+test)
+    train_idx, temp_idx = train_test_split(
+        df.index,
+        test_size=(1 - train_ratio),
+        random_state=seed,
+        stratify=df["species"],
+    )
+
+    # Split val vs test
+    temp_df = df.loc[temp_idx]
+    relative_test_ratio = test_ratio / (test_ratio + val_ratio)
+    val_idx, test_idx = train_test_split(
+        temp_idx,
+        test_size=relative_test_ratio,
+        random_state=seed,
+        stratify=temp_df["species"],
+    )
+
+    # Assign splits
+    df["split"] = None
+    df.loc[train_idx, "split"] = "train"
+    df.loc[val_idx, "split"] = "val"
+    df.loc[test_idx, "split"] = "test"
+
+    # Save
+    df.to_csv(output_csv_path, index=False)
+
+    print(f"  Split assignments: train={len(train_idx)}, val={len(val_idx)}, test={len(test_idx)}")
+    print(f"  Saved to: {output_csv_path}")
+
+    return df
 
 
 def normalize_point_cloud(points, height):
@@ -415,6 +488,30 @@ def main():
         default=True,
         help="Verify preprocessing by comparing samples",
     )
+    parser.add_argument(
+        "--csv_path",
+        type=str,
+        default=None,
+        help="Path to metadata CSV for split assignment (default: {data_path}/tree_metadata_dev.csv)",
+    )
+    parser.add_argument(
+        "--split_ratios",
+        type=float,
+        nargs=3,
+        default=[0.8, 0.1, 0.1],
+        help="Train/val/test split ratios (default: 0.8 0.1 0.1)",
+    )
+    parser.add_argument(
+        "--split_seed",
+        type=int,
+        default=42,
+        help="Random seed for split assignment (default: 42)",
+    )
+    parser.add_argument(
+        "--skip_splits",
+        action="store_true",
+        help="Skip split assignment (only convert LAZ to Zarr)",
+    )
 
     args = parser.parse_args()
 
@@ -433,6 +530,15 @@ def main():
             data_path=args.data_path,
             output_path=args.output_path,
             num_samples=5,
+        )
+
+    # Assign train/val/test splits to metadata CSV
+    if not args.skip_splits:
+        csv_path = args.csv_path or Path(args.data_path) / "tree_metadata_dev.csv"
+        assign_splits(
+            csv_path=csv_path,
+            split_ratios=tuple(args.split_ratios),
+            seed=args.split_seed,
         )
 
 
