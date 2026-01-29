@@ -18,7 +18,6 @@ python train.py \
     --experiment_name "transformer-8-256-16384-zarr" \
     --data_path FOR-species20K \
     --csv_path FOR-species20K/tree_metadata_dev.csv \
-    --preprocessed_version raw \
     --model_dim 256 \
     --num_heads 8 \
     --num_layers 8 \

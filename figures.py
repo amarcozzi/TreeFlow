@@ -42,7 +42,6 @@ def create_figure_1(
     train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
         data_path=data_path,
         csv_path=csv_path,
-        preprocessed_version="raw",
         rotation_augment=True,
         shuffle_augment=True,
         max_points=DOWNSAMPLE_POINTS,
@@ -196,7 +195,6 @@ def create_figure_2(
     train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
         data_path=data_path,
         csv_path=csv_path,
-        preprocessed_version="raw",
         rotation_augment=False,
         shuffle_augment=False,
         max_points=DOWNSAMPLE_POINTS,

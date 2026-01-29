@@ -16,7 +16,6 @@ class PointCloudDataset(Dataset):
         self,
         metadata_df: pd.DataFrame,
         data_path: Path,
-        preprocessed_version: str = "raw",
         species_map: dict = None,
         type_map: dict = None,
         sample_exponent: float = None,
@@ -31,7 +30,6 @@ class PointCloudDataset(Dataset):
         Args:
             metadata_df: Pandas DataFrame containing ['filename', 'species', 'data_type', 'tree_H', 'file_path']
             data_path: Base path to FOR-species20K directory
-            preprocessed_version: Preprocessing version subdirectory (default: use root zarr dir)
             species_map: Dictionary mapping species string to integer index
             type_map: Dictionary mapping data_type string to integer index
             sample_exponent, rotation_augment, etc.: Augmentation parameters
@@ -174,7 +172,6 @@ def collate_fn_batched(batch):
 def create_datasets(
     data_path: str,
     csv_path: str,
-    preprocessed_version: str = None,
     **dataset_kwargs,
 ):
     """
@@ -200,10 +197,7 @@ def create_datasets(
 
     # 2. Filter for existence
     # The CSV has filenames like "/train/00070.las". We need "00070.zarr" in the dev folder.
-    if preprocessed_version:
-        zarr_base_dir = data_path / "zarr" / preprocessed_version / "dev"
-    else:
-        zarr_base_dir = data_path / "zarr" / "dev"
+    zarr_base_dir = data_path / "zarr" / "dev"
 
     if not zarr_base_dir.exists():
         raise FileNotFoundError(f"Directory not found: {zarr_base_dir}")
@@ -239,7 +233,6 @@ def create_datasets(
     # Pass mappings to all datasets to ensure consistency
     common_args = {
         "data_path": data_path,
-        "preprocessed_version": preprocessed_version,
         "species_map": species_map,
         "type_map": type_map,
         **dataset_kwargs,

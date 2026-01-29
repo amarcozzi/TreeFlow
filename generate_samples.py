@@ -210,7 +210,6 @@ def generate_samples(args):
         args.checkpoint = gen_config["checkpoint"]
         args.data_path = gen_config["data_path"]
         args.csv_path = gen_config["csv_path"]
-        args.preprocessed_version = gen_config["preprocessed_version"]
         args.max_points = gen_config["max_points"]
         args.num_samples_per_tree = gen_config["num_samples_per_tree"]
         args.cfg_scale = gen_config["cfg_scale"]
@@ -261,7 +260,6 @@ def generate_samples(args):
     _, val_ds, test_ds, ds_species_list, ds_type_list = create_datasets(
         data_path=args.data_path,
         csv_path=args.csv_path,
-        preprocessed_version=args.preprocessed_version,
         sample_exponent=None,  # No augmentation for generation
         rotation_augment=False,
         shuffle_augment=False,
@@ -327,7 +325,6 @@ def generate_samples(args):
             "checkpoint": args.checkpoint,
             "data_path": args.data_path,
             "csv_path": args.csv_path,
-            "preprocessed_version": args.preprocessed_version,
             "max_points": args.max_points,
             "num_samples_per_tree": args.num_samples_per_tree,
             "cfg_scale": args.cfg_scale,
@@ -529,12 +526,6 @@ def main():
         type=str,
         default="FOR-species20K/tree_metadata_dev.csv",
         help="Path to metadata CSV",
-    )
-    parser.add_argument(
-        "--preprocessed_version",
-        type=str,
-        default=None,
-        help="Preprocessing version subdirectory (default: use root zarr dir)",
     )
     parser.add_argument(
         "--max_points",

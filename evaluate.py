@@ -742,7 +742,6 @@ def load_real_samples(
     data_path: Path,
     csv_path: Path,
     source_tree_ids: list[str],
-    preprocessed_version: str = "raw",
 ) -> tuple[pd.DataFrame, dict]:
     """
     Load real tree point clouds for the specified source tree IDs.
@@ -756,7 +755,6 @@ def load_real_samples(
         data_path: Path to FOR-species20K directory
         csv_path: Path to tree_metadata_dev.csv
         source_tree_ids: List of tree IDs to load (from generated samples metadata)
-        preprocessed_version: Preprocessing version subdirectory (default: use root zarr dir)
 
     Returns:
         metadata_df: DataFrame with real tree metadata (filtered to test split and requested IDs)
@@ -798,10 +796,7 @@ def load_real_samples(
     )
 
     # Build file paths
-    if preprocessed_version:
-        zarr_dir = data_path / "zarr" / preprocessed_version / "dev"
-    else:
-        zarr_dir = data_path / "zarr" / "dev"
+    zarr_dir = data_path / "zarr" / "dev"
     metadata_df["file_path"] = metadata_df["file_id"].apply(
         lambda x: zarr_dir / f"{x}.zarr"
     )
@@ -986,12 +981,6 @@ def main():
         default="FOR-species20K/tree_metadata_dev.csv",
         help="Path to real tree metadata CSV",
     )
-    parser.add_argument(
-        "--preprocessed_version",
-        type=str,
-        default=None,
-        help="Preprocessing version subdirectory (default: use root zarr dir)",
-    )
 
     # Evaluation parameters
     parser.add_argument(
@@ -1068,7 +1057,6 @@ def main():
         data_path=data_path,
         csv_path=csv_path,
         source_tree_ids=source_tree_ids,
-        preprocessed_version=args.preprocessed_version,
     )
 
     # Build evaluation pairs

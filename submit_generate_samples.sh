@@ -20,7 +20,6 @@ python generate_samples.py \
     --checkpoint epoch_3000.pt \
     --data_path FOR-species20K \
     --csv_path FOR-species20K/tree_metadata_dev.csv \
-    --preprocessed_version raw \
     --max_points 16384 \
     --num_samples_per_tree 16 \
     --cfg_scale "1.0 4" \

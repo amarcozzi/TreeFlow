@@ -314,7 +314,6 @@ def train(args):
     train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
         data_path=args.data_path,
         csv_path=args.csv_path,
-        preprocessed_version=args.preprocessed_version,
         sample_exponent=args.sample_exponent,
         rotation_augment=args.rotation_augment,
         shuffle_augment=args.shuffle_augment,
@@ -484,7 +483,6 @@ def main():
     parser.add_argument(
         "--csv_path", type=str, default="FOR-species20K/tree_metadata_dev.csv"
     )
-    parser.add_argument("--preprocessed_version", type=str, default=None)
 
     # Model
     parser.add_argument(
