@@ -102,28 +102,14 @@ class PointCloudDataset(Dataset):
         if self.shuffle_augment:
             np.random.shuffle(points)
 
-        # Normalization & Conditioning
-        # Strategy: Center at Mass -> Scale by Height -> Scale by 2.0 (for variance matching)
+        # Conditioning info
         height = float(row["tree_H"])
-
-        # Center of Mass
-        centroid = points.mean(axis=0)
-        points_centered = points - centroid
-
-        # Normalize by Height (Aspect Ratio Preserved)
-        # Add epsilon to prevent div by zero
-        points_normalized = points_centered / (height + 1e-6)
-
-        # Scale to match Neural Net variance (approx [-1, 1] range)
-        points_final = points_normalized * 2.0
-
-        # Log-Height for conditioning
         height_norm = np.log(height)
 
         return {
-            "points": torch.from_numpy(points_final).float(),
+            "points": torch.from_numpy(points).float(),
             "file_id": row["file_id"],
-            "num_points": len(points_final),
+            "num_points": len(points),
             "species_idx": torch.tensor(
                 self.species_map[row["species"]], dtype=torch.long
             ),
