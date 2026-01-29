@@ -94,7 +94,7 @@ def process_single_file(laz_path, output_dir, min_points=0):
             return file_id, num_points_original, len(points), False, stats
 
         # Save as Zarr
-        zarr.save_array(output_path, points)
+        zarr.save(output_path, points)
 
         return file_id, num_points_original, len(points), True, stats
 
