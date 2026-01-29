@@ -15,7 +15,7 @@ conda activate treeflow
 
 python train.py \
     --output_dir experiments \
-    --experiment_name "transformer-8-256-4096" \
+    --experiment_name "transformer-8-256-4096-zarr" \
     --data_path FOR-species20K \
     --csv_path FOR-species20K/tree_metadata_dev.csv \
     --preprocessed_version raw \
