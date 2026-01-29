@@ -17,23 +17,27 @@ def normalize_point_cloud(points, height):
     """
     Normalize point cloud by height while preserving aspect ratio.
 
-    1. Center of Mass -> 0,0,0 (Optimal for Flow Matching transport)
+    1. Geometric Center -> 0,0,0 (Symmetric bounds for Flow Matching)
     2. Scale by Height (Preserves aspect ratio)
-    3. Scale by 2.0 (Matches Variance of Gaussian Noise)
+    3. Scale by 2.0 (Z spans [-1, 1], matching Gaussian noise variance)
     """
-    # 1. Center at mean (Center of Mass)
-    centroid = points.mean(axis=0)
-    points_centered = points - centroid
+    # 1. Center at geometric center (midpoint of bounding box)
+    # This ensures symmetric bounds, unlike center of mass which is biased
+    # toward regions with more points (e.g., lower canopy in trees)
+    bbox_min = points.min(axis=0)
+    bbox_max = points.max(axis=0)
+    bbox_center = (bbox_min + bbox_max) / 2.0
+    points_centered = points - bbox_center
 
     # 2. Normalize by height
-    # Z-axis now spans approx [-0.5, 0.5] * aspect_ratio logic
+    # Z-axis now spans [-0.5, 0.5]
     points_normalized = points_centered / height
 
     # 3. Apply Variance Scaling
-    # Expands Z-axis to approx [-1.0, 1.0] to match Gaussian noise input
+    # Z-axis now spans [-1.0, 1.0] to match Gaussian noise input
     points_final = points_normalized * 2.0
 
-    return points_final.astype(np.float32), centroid
+    return points_final.astype(np.float32), bbox_center
 
 
 def process_single_file(laz_path, output_dir, min_points=0):
@@ -186,7 +190,7 @@ def preprocess_dataset(
         total_points_final = sum(final_points_counts)
 
         # Collect normalization stats from a few samples
-        sample_stats = [s for _, _, _, _, s in successful_results[:5] if s is not None]
+        sample_stats = [s for _, _, _, _, s in successful_results[:10] if s is not None]
 
         # Calculate point distribution stats
         point_dist_stats = {}
@@ -237,7 +241,7 @@ def preprocess_dataset(
 
         # Print sample normalization info
         if sample_stats:
-            print(f"\n  Sample normalization stats (first 5 files):")
+            print(f"\n  Sample normalization stats (first 10 files):")
             for i, s in enumerate(sample_stats):
                 if "normalization" in s:
                     norm = s["normalization"]
@@ -335,19 +339,25 @@ def verify_preprocessing(data_path, output_path, num_samples=5):
             all_valid = False
             continue
 
-        # Check if normalized
-        point_range = np.abs(zarr_points).max()
-        is_normalized = point_range <= 1.1  # Allow small numerical error
-
         # Compute statistics
-        centroid = zarr_points.mean(axis=0)
+        bbox_center = (zarr_points.min(axis=0) + zarr_points.max(axis=0)) / 2.0
         bounds = [(zarr_points[:, i].min(), zarr_points[:, i].max()) for i in range(3)]
+
+        # Check if normalized correctly:
+        # 1. Z should span approximately [-1, 1] (allow small numerical error)
+        # 2. Geometric center should be at origin
+        z_min, z_max = bounds[2]
+        z_range_valid = abs(z_min + 1.0) < 0.1 and abs(z_max - 1.0) < 0.1
+        center_valid = np.abs(bbox_center).max() < 0.1
+        is_normalized = z_range_valid and center_valid
 
         status = "✓" if is_normalized else "⚠"
         norm_str = "normalized" if is_normalized else "NOT normalized"
 
         print(f"{status} {zarr_path.stem}: {len(zarr_points)} points, {norm_str}")
-        print(f"   Centroid: [{centroid[0]:.4f}, {centroid[1]:.4f}, {centroid[2]:.4f}]")
+        print(
+            f"   Bbox Center: [{bbox_center[0]:.4f}, {bbox_center[1]:.4f}, {bbox_center[2]:.4f}]"
+        )
         print(
             f"   Bounds: X:[{bounds[0][0]:.3f}, {bounds[0][1]:.3f}], "
             f"Y:[{bounds[1][0]:.3f}, {bounds[1][1]:.3f}], "
@@ -402,6 +412,7 @@ def main():
     parser.add_argument(
         "--verify",
         action="store_true",
+        default=True,
         help="Verify preprocessing by comparing samples",
     )
 

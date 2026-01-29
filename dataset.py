@@ -261,7 +261,7 @@ def create_datasets(
     return train_ds, val_ds, test_ds, species_list, type_list
 
 
-def visualize_augmentation(dataset, idx, num_samples=6):
+def visualize_augmentation(dataset, idx, num_samples=6, denormalize=True):
     """
     Visualize the effect of augmentation by showing multiple samples of the same point cloud.
     """
@@ -284,8 +284,9 @@ def visualize_augmentation(dataset, idx, num_samples=6):
 
         # Scale points to meters
         # points *= 2.0
-        points = (points / 2.0) * s["height_raw"].numpy()
-        points[:, 2] -= points[:, 2].min()
+        if denormalize:
+            points = (points / 2.0) * s["height_raw"].numpy()
+            points[:, 2] -= points[:, 2].min()
 
         ax = fig.add_subplot(2, 3, i + 1, projection="3d")
         ax.scatter(
@@ -326,7 +327,7 @@ if __name__ == "__main__":
 
         print("\nVisualizing random training sample...")
         idx = np.random.randint(len(train_ds))
-        visualize_augmentation(train_ds, idx)
+        visualize_augmentation(train_ds, idx, denormalize=False)
 
     except Exception as e:
         print(f"Skipping visualization (setup required): {e}")
