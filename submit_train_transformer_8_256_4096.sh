@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=umontana_fire_modeling
-#SBATCH --partition=gpu-a100
-#SBATCH --gres=gpu:a100:1
+#SBATCH --partition=gpu-l40s
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --job-name="train_tf_4096"
 #SBATCH --cpus-per-task=18
 #SBATCH --mem=128G
