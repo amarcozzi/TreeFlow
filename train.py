@@ -318,6 +318,7 @@ def train(args):
         rotation_augment=args.rotation_augment,
         shuffle_augment=args.shuffle_augment,
         max_points=args.max_points,
+        cache_in_memory=not args.no_cache,
     )
 
     save_config(args, output_dir, species_list, type_list)
@@ -330,6 +331,8 @@ def train(args):
         num_workers=args.num_workers,
         collate_fn=collate_fn_batched,
         pin_memory=True,
+        persistent_workers=args.num_workers > 0,  # Keep workers alive between epochs
+        prefetch_factor=4 if args.num_workers > 0 else None,  # Prefetch batches
     )
 
     # 3. Model
@@ -499,7 +502,7 @@ def main():
 
     # Training
     parser.add_argument("--num_epochs", type=int, default=1000)
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--min_lr", type=float, default=1e-6)
     parser.add_argument(
@@ -525,7 +528,7 @@ def main():
         default=None,
         help="Path to checkpoint to resume from",
     )
-    parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--num_workers", type=int, default=16)
     parser.add_argument("--cfg_dropout_prob", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=None)
 
@@ -534,6 +537,12 @@ def main():
     parser.add_argument("--rotation_augment", action="store_true", default=True)
     parser.add_argument("--shuffle_augment", action="store_true", default=True)
     parser.add_argument("--max_points", type=int, default=None)
+    parser.add_argument(
+        "--no_cache",
+        action="store_true",
+        default=False,
+        help="Disable in-memory caching of point clouds (use if RAM is limited)",
+    )
 
     # Misc
     parser.add_argument("--save_every", type=int, default=50)

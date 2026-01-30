@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import zarr
 from pathlib import Path
 from torch.utils.data import Dataset
+from tqdm import tqdm
 
 
 class PointCloudDataset(Dataset):
@@ -23,6 +24,7 @@ class PointCloudDataset(Dataset):
         shuffle_augment: bool = False,
         max_points: int = None,
         split_name: str = None,
+        cache_in_memory: bool = True,
     ):
         """
         Dataset for loading preprocessed point clouds (Zarr format) with conditioning info.
@@ -33,6 +35,7 @@ class PointCloudDataset(Dataset):
             species_map: Dictionary mapping species string to integer index
             type_map: Dictionary mapping data_type string to integer index
             sample_exponent, rotation_augment, etc.: Augmentation parameters
+            cache_in_memory: If True, load all point clouds into RAM at initialization
         """
         self.metadata = metadata_df.reset_index(drop=True)
         self.data_path = Path(data_path)
@@ -40,9 +43,15 @@ class PointCloudDataset(Dataset):
         self.rotation_augment = rotation_augment
         self.shuffle_augment = shuffle_augment
         self.max_points = max_points
+        self.cache_in_memory = cache_in_memory
 
         self.species_map = species_map
         self.type_map = type_map
+
+        # Pre-load all data into memory to avoid I/O bottleneck during training
+        self.point_cache = None
+        if cache_in_memory:
+            self._load_cache(split_name)
 
         print(
             f"  Initialized {split_name + ' ' if split_name is not None else ''}dataset with {len(self.metadata)} samples."
@@ -50,6 +59,17 @@ class PointCloudDataset(Dataset):
         print(
             f"    Augmentation: max_points={max_points}, sample_exponent={sample_exponent}, rotation={rotation_augment}, shuffle={shuffle_augment}"
         )
+        if cache_in_memory:
+            print(f"    Data cached in memory.")
+
+    def _load_cache(self, split_name: str = None):
+        """Load all point clouds into memory."""
+        self.point_cache = []
+        desc = f"Caching {split_name}" if split_name else "Caching data"
+        for idx in tqdm(range(len(self.metadata)), desc=desc, leave=False):
+            row = self.metadata.iloc[idx]
+            points = zarr.load(row["file_path"])
+            self.point_cache.append(points)
 
     def __len__(self):
         return len(self.metadata)
@@ -83,8 +103,11 @@ class PointCloudDataset(Dataset):
     def __getitem__(self, idx):
         row = self.metadata.iloc[idx]
 
-        # Load Zarr file
-        points = zarr.load(row["file_path"])
+        # Load from cache or disk
+        if self.point_cache is not None:
+            points = self.point_cache[idx].copy()  # Copy to avoid modifying cache
+        else:
+            points = zarr.load(row["file_path"])
 
         # Augmentation (Sampling/Rotation)
         if self.max_points is not None and len(points) > self.max_points:

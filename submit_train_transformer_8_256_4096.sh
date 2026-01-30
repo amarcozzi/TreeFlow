@@ -3,7 +3,7 @@
 #SBATCH --partition=gpu-a100
 #SBATCH --gres=gpu:a100:1
 #SBATCH --job-name="train_tf_4096"
-#SBATCH --cpus-per-task=36
+#SBATCH --cpus-per-task=18
 #SBATCH --mem=128G
 #SBATCH --time=2-0
 #SBATCH --output=log_train_transformer_8_256_4096.out
@@ -22,15 +22,15 @@ python train.py \
     --num_heads 8 \
     --num_layers 8 \
     --dropout 0.1 \
-    --batch_size 16 \
+    --batch_size 64 \
     --visualize_every 10 \
     --save_every 100 \
     --rotation_augment \
     --shuffle_augment \
-    --num_workers 24 \
+    --num_workers 16 \
     --num_epochs 10000 \
     --lr 1e-4 \
-    --min_lr 1e-6 \
+    --min_lr 1e-5 \
     --lr_scheduler cosine \
     --grad_clip_norm 1.0 \
     --use_amp \

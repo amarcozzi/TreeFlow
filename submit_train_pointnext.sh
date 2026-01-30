@@ -3,7 +3,7 @@
 #SBATCH --partition=gpu-a100
 #SBATCH --gres=gpu:a100:1
 #SBATCH --job-name="pn_64"
-#SBATCH --cpus-per-task=36
+#SBATCH --cpus-per-task=18
 #SBATCH --mem=128G
 #SBATCH --time=2-0
 #SBATCH --output=log_train_pointnext_64.out
@@ -21,12 +21,12 @@ python train.py \
     --csv_path FOR-species20K/tree_metadata_dev.csv \
     --model_dim 64 \
     --dropout 0.1 \
-    --batch_size 16 \
+    --batch_size 64 \
     --visualize_every 5 \
     --sample_exponent 0.3 \
     --rotation_augment \
     --shuffle_augment \
-    --num_workers 24 \
+    --num_workers 16 \
     --num_epochs 1000 \
     --lr 1e-4 \
     --use_amp \
