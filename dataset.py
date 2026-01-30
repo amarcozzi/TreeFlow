@@ -10,6 +10,7 @@ import zarr
 from pathlib import Path
 from torch.utils.data import Dataset
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class PointCloudDataset(Dataset):
@@ -62,14 +63,21 @@ class PointCloudDataset(Dataset):
         if cache_in_memory:
             print(f"    Data cached in memory.")
 
-    def _load_cache(self, split_name: str = None):
-        """Load all point clouds into memory."""
-        self.point_cache = []
+    def _load_cache(self, split_name: str = None, num_threads: int = 32):
+        """Load all point clouds into memory in parallel."""
+        n_samples = len(self.metadata)
+        self.point_cache = [None] * n_samples
         desc = f"Caching {split_name}" if split_name else "Caching data"
-        for idx in tqdm(range(len(self.metadata)), desc=desc, leave=False):
+
+        def load_one(idx):
             row = self.metadata.iloc[idx]
-            points = zarr.load(row["file_path"])
-            self.point_cache.append(points)
+            return idx, zarr.load(row["file_path"])
+
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = [executor.submit(load_one, idx) for idx in range(n_samples)]
+            for future in tqdm(as_completed(futures), total=n_samples, desc=desc, leave=False):
+                idx, points = future.result()
+                self.point_cache[idx] = points
 
     def __len__(self):
         return len(self.metadata)
