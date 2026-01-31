@@ -10,6 +10,7 @@ metadata in attributes. If interrupted, can resume from where it left off.
 """
 
 import matplotlib
+
 matplotlib.use("Agg")
 
 import torch
@@ -209,7 +210,6 @@ def generate_samples(args):
         args.experiment_name = gen_config["experiment_name"]
         args.checkpoint = gen_config["checkpoint"]
         args.data_path = gen_config["data_path"]
-        args.csv_path = gen_config["csv_path"]
         args.max_points = gen_config["max_points"]
         args.num_samples_per_tree = gen_config["num_samples_per_tree"]
         args.cfg_scale = gen_config["cfg_scale"]
@@ -230,7 +230,9 @@ def generate_samples(args):
         zarr_dir = output_dir / "zarr"
         existing_samples = scan_existing_samples(zarr_dir)
         total_existing = sum(len(v) for v in existing_samples.values())
-        print(f"  Found {total_existing} existing samples from {len(existing_samples)} trees")
+        print(
+            f"  Found {total_existing} existing samples from {len(existing_samples)} trees"
+        )
     else:
         output_dir = Path(args.output_dir)
         existing_samples = {}
@@ -255,11 +257,9 @@ def generate_samples(args):
     print(f"  Species: {len(species_list)}, Types: {len(type_list)}")
 
     # Create datasets with same settings as training
-    # Splits are pre-assigned in the CSV by preprocess_laz.py
-    print(f"\nPreparing datasets from {args.csv_path}...")
+    print(f"\nPreparing datasets from {args.data_path}...")
     _, val_ds, test_ds, ds_species_list, ds_type_list = create_datasets(
         data_path=args.data_path,
-        csv_path=args.csv_path,
         sample_exponent=None,  # No augmentation for generation
         rotation_augment=False,
         shuffle_augment=False,
@@ -324,7 +324,6 @@ def generate_samples(args):
             "experiment_name": args.experiment_name,
             "checkpoint": args.checkpoint,
             "data_path": args.data_path,
-            "csv_path": args.csv_path,
             "max_points": args.max_points,
             "num_samples_per_tree": args.num_samples_per_tree,
             "cfg_scale": args.cfg_scale,
@@ -368,7 +367,9 @@ def generate_samples(args):
         split_start = max(0, start_idx - global_idx)
         split_end = min(split_size, end_idx - global_idx)
 
-        print(f"\nProcessing {split_name} split (indices {split_start}-{split_end} of {split_size})...")
+        print(
+            f"\nProcessing {split_name} split (indices {split_start}-{split_end} of {split_size})..."
+        )
 
         pbar = tqdm(range(split_start, split_end), desc=split_name)
         for idx in pbar:
@@ -470,9 +471,7 @@ def generate_samples(args):
 
             # Update skipped counter for any pre-existing samples from this tree
             skipped_counter += len(completed_indices)
-            pbar.set_postfix(
-                {"generated": sample_counter, "skipped": skipped_counter}
-            )
+            pbar.set_postfix({"generated": sample_counter, "skipped": skipped_counter})
 
         global_idx += split_size
 
@@ -484,8 +483,10 @@ def generate_samples(args):
     print(f"  Output directory: {output_dir}")
     print(f"  Point clouds (zarr): {zarr_dir}")
     print(f"  Comparison images: {images_dir}")
-    print(f"\nRun postprocess_samples.py to collect metadata into CSV:"
-          f"\n  python postprocess_samples.py {output_dir}")
+    print(
+        f"\nRun postprocess_samples.py to collect metadata into CSV:"
+        f"\n  python postprocess_samples.py {output_dir}"
+    )
 
 
 def main():
@@ -518,14 +519,8 @@ def main():
     parser.add_argument(
         "--data_path",
         type=str,
-        default="FOR-species20K",
-        help="Path to FOR-species20K directory",
-    )
-    parser.add_argument(
-        "--csv_path",
-        type=str,
-        default="FOR-species20K/tree_metadata_dev.csv",
-        help="Path to metadata CSV",
+        default="data/preprocessed-full",
+        help="Path to preprocessed dataset directory (e.g., data/preprocessed-full or data/preprocessed-4096)",
     )
     parser.add_argument(
         "--max_points",

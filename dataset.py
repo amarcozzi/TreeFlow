@@ -202,46 +202,44 @@ def collate_fn_batched(batch):
 
 def create_datasets(
     data_path: str,
-    csv_path: str,
     **dataset_kwargs,
 ):
     """
-    Factory function to create Train, Val, and Test datasets from the dev metadata CSV.
+    Factory function to create Train, Val, and Test datasets.
 
-    The CSV must contain a 'split' column with values 'train', 'val', or 'test'.
-    This column is assigned during preprocessing by preprocess_laz.py to ensure
-    consistent splits across all dataset loads.
+    Args:
+        data_path: Path to preprocessed dataset directory (e.g., "data/full" or "data/4096").
+                   Must contain metadata.csv and *.zarr files.
+        **dataset_kwargs: Passed to PointCloudDataset (max_points, rotation_augment, etc.)
+
+    Returns:
+        train_ds, val_ds, test_ds, species_list, type_list
     """
     data_path = Path(data_path)
-    csv_path = Path(csv_path)
+    csv_path = data_path / "metadata.csv"
+
+    if not data_path.exists():
+        raise FileNotFoundError(f"Data directory not found: {data_path}")
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Metadata CSV not found: {csv_path}")
 
     # 1. Load Metadata
-    print(f"Loading metadata from {csv_path}...")
+    print(f"Loading dataset from {data_path}...")
     df = pd.read_csv(csv_path)
 
     # Verify split column exists
     if "split" not in df.columns:
         raise ValueError(
-            f"CSV missing 'split' column. Run preprocess_laz.py to assign splits, "
-            f"or manually add a 'split' column with values 'train', 'val', or 'test'."
+            f"CSV missing 'split' column. Run preprocess_laz.py to create the dataset."
         )
 
-    # 2. Filter for existence
-    # The CSV has filenames like "/train/00070.las". We need "00070.zarr" in the dev folder.
-    zarr_base_dir = data_path / "zarr" / "dev"
-
-    if not zarr_base_dir.exists():
-        raise FileNotFoundError(f"Directory not found: {zarr_base_dir}")
-
-    # Extract ID from filename and check existence
-    # Assuming standard format /train/XXXXX.las
+    # 2. Build file paths and filter for existence
     df["file_id"] = df["filename"].apply(lambda x: Path(x).stem)
-    df["file_path"] = df["file_id"].apply(lambda x: zarr_base_dir / f"{x}.zarr")
+    df["file_path"] = df["file_id"].apply(lambda x: data_path / f"{x}.zarr")
 
-    # Filter rows where file exists
     initial_len = len(df)
     df = df[df["file_path"].apply(lambda x: x.exists())]
-    print(f"Found {len(df)}/{initial_len} matching Zarr files in {zarr_base_dir}")
+    print(f"Found {len(df)}/{initial_len} matching Zarr files")
 
     # 3. Create Global Mappings
     species_list = sorted(df["species"].unique())
@@ -261,7 +259,6 @@ def create_datasets(
     print(f"Splits: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
 
     # 5. Create Datasets
-    # Pass mappings to all datasets to ensure consistency
     common_args = {
         "data_path": data_path,
         "species_map": species_map,
@@ -329,13 +326,11 @@ def visualize_augmentation(dataset, idx, num_samples=6, denormalize=True):
 
 if __name__ == "__main__":
     # Example usage for debugging
-    data_path = "./FOR-species20K"
-    csv_path = "./FOR-species20K/tree_metadata_dev.csv"
+    data_path = "./data/preprocessed-full"
 
     try:
         train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
             data_path=data_path,
-            csv_path=csv_path,
             sample_exponent=0.3,
             rotation_augment=True,
         )

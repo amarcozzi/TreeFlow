@@ -16,8 +16,7 @@ DOWNSAMPLE_POINTS = 4096
 
 
 def create_figure_1(
-    data_path: str = "./FOR-species20K",
-    csv_path: str = "./FOR-species20K/tree_metadata_dev.csv",
+    data_path: str = "./data/preprocessed-full",
     output_dir: str = "figures",
     seed: int = 42,
 ):
@@ -25,8 +24,7 @@ def create_figure_1(
     Create 4 PDF subfigures showing example tree point clouds as input to the model.
 
     Args:
-        data_path: Path to FOR-species20K directory
-        csv_path: Path to tree metadata CSV
+        data_path: Path to preprocessed dataset directory
         output_dir: Directory to save PDF figures
         seed: Random seed for reproducibility
     """
@@ -37,11 +35,9 @@ def create_figure_1(
     output_dir.mkdir(exist_ok=True)
 
     # Load dataset with same settings as training
-    # (from submit_train_transformer_8_256.sh)
     print("Loading dataset...")
     train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
         data_path=data_path,
-        csv_path=csv_path,
         rotation_augment=True,
         shuffle_augment=True,
         max_points=DOWNSAMPLE_POINTS,
@@ -173,8 +169,7 @@ def create_figure_1(
 
 def create_figure_2(
     sample_idx=123,
-    data_path: str = "./FOR-species20K",
-    csv_path: str = "./FOR-species20K/tree_metadata_dev.csv",
+    data_path: str = "./data/preprocessed-full",
     output_dir: str = "figures",
     seed: int = 42,
 ):
@@ -194,7 +189,6 @@ def create_figure_2(
     print("Loading dataset...")
     train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
         data_path=data_path,
-        csv_path=csv_path,
         rotation_augment=False,
         shuffle_augment=False,
         max_points=DOWNSAMPLE_POINTS,
