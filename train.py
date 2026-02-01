@@ -22,6 +22,7 @@ import logging
 from logging import NullHandler
 
 from accelerate import Accelerator
+from accelerate.utils import TorchDynamoPlugin
 
 from models import get_model
 from dataset import create_datasets, collate_fn_batched
@@ -293,8 +294,20 @@ def visualize_validation_comparisons(
 
 
 def train(args):
-    # Initialize Accelerator
-    accelerator = Accelerator(mixed_precision=args.mixed_precision)
+    # Initialize Accelerator with optional torch.compile via TorchDynamoPlugin
+    dynamo_plugin = None
+    if args.compile:
+        dynamo_plugin = TorchDynamoPlugin(
+            backend="inductor",      # Best general-purpose backend, uses Triton kernels
+            mode="max-autotune",     # Worth it for long training runs - finds optimal kernels
+            fullgraph=False,         # Allow graph breaks for compatibility
+            dynamic=False,           # Static shapes (fixed batch_size + max_points)
+        )
+
+    accelerator = Accelerator(
+        mixed_precision=args.mixed_precision,
+        dynamo_plugin=dynamo_plugin,
+    )
 
     # Silence logging on non-main processes
     if not accelerator.is_main_process:
@@ -317,6 +330,8 @@ def train(args):
         for d in dirs.values():
             d.mkdir(parents=True, exist_ok=True)
         logger.info(f"Accelerate found {accelerator.num_processes} GPUs to use.")
+        if args.compile:
+            logger.info("torch.compile enabled (backend=inductor, mode=max-autotune)")
         logger.info(f"Output directory: {output_dir.resolve()}")
 
     accelerator.wait_for_everyone()
@@ -404,14 +419,6 @@ def train(args):
 
     # Prepare model, optimizer, and dataloader with accelerator
     model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
-
-    # Compile after prepare() for better compatibility
-    if args.compile:
-        try:
-            logger.info("Compiling model with torch.compile...")
-            model = torch.compile(model)
-        except Exception as e:
-            logger.warning(f"Compilation failed (safe to ignore): {e}")
 
     start_epoch = 1
     if args.resume_from:
@@ -556,7 +563,12 @@ def main():
         choices=["no", "fp16", "bf16"],
         help="Mixed precision training mode (no, fp16, or bf16)",
     )
-    parser.add_argument("--compile", action="store_true", default=False)
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        default=False,
+        help="Enable torch.compile via Accelerate's TorchDynamoPlugin for faster training",
+    )
     parser.add_argument(
         "--resume_from",
         type=str,
