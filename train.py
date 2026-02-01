@@ -334,7 +334,7 @@ def train(args):
             d.mkdir(parents=True, exist_ok=True)
         logger.info(f"Accelerate found {accelerator.num_processes} GPUs to use.")
         if args.compile:
-            logger.info("torch.compile enabled (backend=inductor, mode=max-autotune)")
+            logger.info("torch.compile enabled (regional compilation for transformer blocks)")
         logger.info(f"Output directory: {output_dir.resolve()}")
 
     accelerator.wait_for_everyone()
