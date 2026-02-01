@@ -297,11 +297,14 @@ def train(args):
     # Initialize Accelerator with optional torch.compile via TorchDynamoPlugin
     dynamo_plugin = None
     if args.compile:
+        # dynamo_plugin = TorchDynamoPlugin(
+        #     backend="inductor",      # Best general-purpose backend, uses Triton kernels
+        #     mode="max-autotune",     # Worth it for long training runs - finds optimal kernels
+        #     fullgraph=False,         # Allow graph breaks for compatibility
+        #     dynamic=False,           # Static shapes (fixed batch_size + max_points)
+        # )
         dynamo_plugin = TorchDynamoPlugin(
-            backend="inductor",      # Best general-purpose backend, uses Triton kernels
-            mode="max-autotune",     # Worth it for long training runs - finds optimal kernels
-            fullgraph=False,         # Allow graph breaks for compatibility
-            dynamic=False,           # Static shapes (fixed batch_size + max_points)
+            use_regional_compilation=True,
         )
 
     accelerator = Accelerator(
