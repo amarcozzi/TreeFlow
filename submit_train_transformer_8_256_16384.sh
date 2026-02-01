@@ -13,7 +13,7 @@ module load cuda
 source /project/umontana_fire_modeling/anthony.marcozzi/miniforge3/etc/profile.d/conda.sh
 conda activate treeflow
 
-accelerate launch train.py \
+accelerate launch --num_processes=4 train.py \
     --output_dir experiments \
     --experiment_name "transformer-8-256-16384-zarr" \
     --data_path ./data/preprocessed-16384 \
