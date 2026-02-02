@@ -132,9 +132,10 @@ def train_epoch(
             p_uncond=cfg_dropout_prob,
         )
 
+        # Check for NaN/Inf but don't skip - all ranks must call backward together
         if torch.isnan(loss) or torch.isinf(loss):
-            logger.warning("NaN/Inf loss detected, skipping batch")
-            continue
+            logger.warning("NaN/Inf loss detected, using zero loss for this batch")
+            loss = torch.tensor(0.0, device=accelerator.device, requires_grad=True)
 
         accelerator.backward(loss)
         if accelerator.sync_gradients:
@@ -321,7 +322,16 @@ def train(args):
 
     accelerator.wait_for_everyone()
 
-    # Set seeds for reproducibility
+    # Synchronize seed across all ranks (rank 0's seed is broadcast to others)
+    if accelerator.num_processes > 1:
+        seed_tensor = torch.tensor([args.seed], dtype=torch.long, device=accelerator.device)
+        torch.distributed.broadcast(seed_tensor, src=0)
+        args.seed = seed_tensor.item()
+
+    if accelerator.is_main_process:
+        logger.info(f"Random Seed: {args.seed}")
+
+    # Set seeds for reproducibility (now same on all ranks)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -431,12 +441,10 @@ def train(args):
         logger.info(f"Resuming training from epoch {start_epoch}")
 
     # 4. Training Loop
-    best_loss = float("inf")
-
     for epoch in range(start_epoch, args.num_epochs + 1):
         logger.info(f"Epoch {epoch}/{args.num_epochs}")
 
-        train_loss = train_epoch(
+        local_train_loss = train_epoch(
             model,
             train_loader,
             optimizer,
@@ -445,39 +453,35 @@ def train(args):
             cfg_dropout_prob=args.cfg_dropout_prob,
             grad_clip_norm=args.grad_clip_norm,
         )
-        logger.info(f"Train Loss: {train_loss:.6f}")
 
-        # Step scheduler
+        # Synchronize loss across all ranks for logging and save decisions
+        train_loss_tensor = torch.tensor([local_train_loss], device=accelerator.device)
+        gathered_losses = accelerator.gather(train_loss_tensor)
+        global_train_loss = gathered_losses.mean().item()
+
+        logger.info(f"Train Loss: {global_train_loss:.6f}")
+
+        # Step scheduler with synchronized loss
         if scheduler is not None:
             if args.lr_scheduler == "plateau":
-                scheduler.step(train_loss)
+                scheduler.step(global_train_loss)
             else:
                 scheduler.step()
 
-        # Save Checkpoint - all ranks participate but only main writes
-        should_save_best = train_loss < best_loss
-        should_save_periodic = epoch % args.save_every == 0
-
-        if should_save_best:
-            best_loss = train_loss
-
-        if should_save_best or should_save_periodic:
-            # Build checkpoint on all ranks (only main will write)
+        # Save Checkpoint - periodic only (deterministic condition, all ranks agree)
+        if epoch % args.save_every == 0:
             checkpoint = {
                 "model": accelerator.unwrap_model(model).state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "seed": args.seed,
                 "epoch": epoch,
+                "train_loss": global_train_loss,
                 "args": vars(args),
             }
             if scheduler is not None:
                 checkpoint["scheduler"] = scheduler.state_dict()
 
-            if should_save_best:
-                accelerator.save(checkpoint, dirs["ckpt"] / "best_model.pt")
-
-            if should_save_periodic:
-                accelerator.save(checkpoint, dirs["ckpt"] / f"epoch_{epoch}.pt")
+            accelerator.save(checkpoint, dirs["ckpt"] / f"epoch_{epoch}.pt")
 
         # Visualization (only on main process)
         if epoch % args.visualize_every == 0:
@@ -586,10 +590,10 @@ def main():
 
     args = parser.parse_args()
 
+    # Note: Seed will be synchronized in train() after Accelerator init
+    # If no seed provided, main process will generate one and broadcast
     if args.seed is None:
         args.seed = random.randint(0, 100000)
-
-    print(f"Random Seed: {args.seed}")
 
     train(args)
 
