@@ -21,7 +21,7 @@ accelerate launch --num_processes=4 train.py \
     --num_heads 8 \
     --num_layers 8 \
     --dropout 0.1 \
-    --batch_size 64 \
+    --batch_size 16 \
     --visualize_every 10 \
     --save_every 100 \
     --rotation_augment \
