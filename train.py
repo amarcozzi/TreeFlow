@@ -152,7 +152,6 @@ def train_epoch(
     return total_loss / num_samples if num_samples > 0 else 0.0
 
 
-@torch.compiler.disable
 @torch.no_grad()
 def sample_conditional(
     model, num_points, accelerator, target_height, species_idx, type_idx, cfg_scale=1.0
@@ -202,7 +201,6 @@ def sample_conditional(
     return x_meters
 
 
-@torch.compiler.disable
 def visualize_validation_comparisons(
     model, val_ds, species_list, type_list, epoch, save_dir, accelerator, num_samples=3
 ):
@@ -211,8 +209,6 @@ def visualize_validation_comparisons(
     Generates a synthetic counterpart for each.
     Plots Real (Left) vs Generated (Right) side-by-side.
     Only runs on main process.
-
-    Note: model should be the unwrapped model (not DDP-wrapped).
     """
     model.eval()
     logger.info(f"Generating {num_samples} validation comparisons...")
@@ -300,7 +296,8 @@ def visualize_validation_comparisons(
 
 def train(args):
     # Initialize Accelerator
-    accelerator = Accelerator(mixed_precision=args.mixed_precision)
+    # dynamo_backend="no" prevents NCCL desync issues during visualization
+    accelerator = Accelerator(mixed_precision=args.mixed_precision, dynamo_backend="no")
 
     # Silence logging on non-main processes
     if not accelerator.is_main_process:
