@@ -294,8 +294,11 @@ def visualize_validation_comparisons(
 
 
 def train(args):
-    # Initialize Accelerator (matching reference implementation - no torch.compile)
-    accelerator = Accelerator(mixed_precision=args.mixed_precision)
+    # Initialize Accelerator
+    accelerator = Accelerator(
+        mixed_precision=args.mixed_precision,
+        dynamo_backend="no",  # Disable torch.compile to prevent NCCL issues during visualization
+    )
 
     # Silence logging on non-main processes
     if not accelerator.is_main_process:
@@ -324,7 +327,9 @@ def train(args):
 
     # Synchronize seed across all ranks (rank 0's seed is broadcast to others)
     if accelerator.num_processes > 1:
-        seed_tensor = torch.tensor([args.seed], dtype=torch.long, device=accelerator.device)
+        seed_tensor = torch.tensor(
+            [args.seed], dtype=torch.long, device=accelerator.device
+        )
         torch.distributed.broadcast(seed_tensor, src=0)
         args.seed = seed_tensor.item()
 
