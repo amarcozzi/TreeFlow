@@ -454,8 +454,15 @@ def train(args):
             else:
                 scheduler.step()
 
-        # Save Checkpoint (only on main process)
-        if accelerator.is_main_process:
+        # Save Checkpoint - all ranks participate but only main writes
+        should_save_best = train_loss < best_loss
+        should_save_periodic = epoch % args.save_every == 0
+
+        if should_save_best:
+            best_loss = train_loss
+
+        if should_save_best or should_save_periodic:
+            # Build checkpoint on all ranks (only main will write)
             checkpoint = {
                 "model": accelerator.unwrap_model(model).state_dict(),
                 "optimizer": optimizer.state_dict(),
@@ -466,34 +473,37 @@ def train(args):
             if scheduler is not None:
                 checkpoint["scheduler"] = scheduler.state_dict()
 
-            if train_loss < best_loss:
-                best_loss = train_loss
+            if should_save_best:
                 accelerator.save(checkpoint, dirs["ckpt"] / "best_model.pt")
 
-            if epoch % args.save_every == 0:
+            if should_save_periodic:
                 accelerator.save(checkpoint, dirs["ckpt"] / f"epoch_{epoch}.pt")
 
         # Visualization (only on main process)
-        if epoch % args.visualize_every == 0 and accelerator.is_main_process:
-            try:
-                unwrapped_model = accelerator.unwrap_model(model)
-                unwrapped_model.eval()
-                with torch.no_grad():
-                    visualize_validation_comparisons(
-                        model=unwrapped_model,
-                        val_ds=val_ds,
-                        species_list=species_list,
-                        type_list=type_list,
-                        epoch=epoch,
-                        save_dir=dirs["viz"],
-                        accelerator=accelerator,
-                        num_samples=args.num_viz_samples,
-                    )
-            except Exception as e:
-                logger.error(f"Visualization error: {e}")
-                import traceback
+        if epoch % args.visualize_every == 0:
+            if accelerator.is_main_process:
+                try:
+                    unwrapped_model = accelerator.unwrap_model(model)
+                    unwrapped_model.eval()
+                    with torch.no_grad():
+                        visualize_validation_comparisons(
+                            model=unwrapped_model,
+                            val_ds=val_ds,
+                            species_list=species_list,
+                            type_list=type_list,
+                            epoch=epoch,
+                            save_dir=dirs["viz"],
+                            accelerator=accelerator,
+                            num_samples=args.num_viz_samples,
+                        )
+                except Exception as e:
+                    logger.error(f"Visualization error: {e}")
+                    import traceback
 
-                traceback.print_exc()
+                    traceback.print_exc()
+            # Synchronize all ranks after visualization
+            # This MUST be called by ALL ranks to avoid NCCL desync
+            accelerator.wait_for_everyone()
 
 
 def main():
