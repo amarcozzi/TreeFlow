@@ -2,11 +2,11 @@
 #SBATCH --account=umontana_fire_modeling
 #SBATCH --partition=gpu-l40s
 #SBATCH --gres=gpu:l40s:4
-#SBATCH --job-name="train_tf_4096"
+#SBATCH --job-name="train_tf_4096_sampled"
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=256G
 #SBATCH --time=2-0
-#SBATCH --output=log_train_transformer_8_256_4096.out
+#SBATCH --output=log_train_transformer_8_256_4096_sampled.out
 
 module load cuda
 
