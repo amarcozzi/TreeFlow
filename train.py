@@ -472,6 +472,9 @@ def train(args):
             else:
                 scheduler.step()
 
+        # Synchronize all ranks before any divergent operations
+        accelerator.wait_for_everyone()
+
         # Save Checkpoint (only on main process)
         if accelerator.is_main_process:
             checkpoint = {
@@ -496,22 +499,26 @@ def train(args):
             try:
                 unwrapped_model = accelerator.unwrap_model(model)
                 unwrapped_model.eval()
-                visualize_validation_comparisons(
-                    model=unwrapped_model,
-                    val_ds=val_ds,
-                    species_list=species_list,
-                    type_list=type_list,
-                    epoch=epoch,
-                    save_dir=dirs["viz"],
-                    accelerator=accelerator,
-                    num_samples=args.num_viz_samples,
-                )
+                with torch.no_grad():
+                    visualize_validation_comparisons(
+                        model=unwrapped_model,
+                        val_ds=val_ds,
+                        species_list=species_list,
+                        type_list=type_list,
+                        epoch=epoch,
+                        save_dir=dirs["viz"],
+                        accelerator=accelerator,
+                        num_samples=args.num_viz_samples,
+                    )
+                # Restore training mode
+                unwrapped_model.train()
             except Exception as e:
                 logger.error(f"Visualization error: {e}")
                 import traceback
 
                 traceback.print_exc()
 
+        # Synchronize again before next epoch
         accelerator.wait_for_everyone()
 
 
