@@ -24,7 +24,7 @@ from logging import NullHandler
 from accelerate import Accelerator
 
 from models import get_model
-from dataset import create_datasets, collate_fn_batched
+from dataset import create_datasets, make_collate_fn
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 
@@ -344,7 +344,6 @@ def train(args):
     logger.info(f"Preparing datasets from {args.data_path}...")
     train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
         data_path=args.data_path,
-        sample_exponent=args.sample_exponent,
         rotation_augment=args.rotation_augment,
         shuffle_augment=args.shuffle_augment,
         max_points=args.max_points,
@@ -355,12 +354,19 @@ def train(args):
         save_config(args, output_dir, species_list, type_list)
 
     # 2. Dataloaders
+    collate_fn = make_collate_fn(sample_exponent=args.sample_exponent)
+    if accelerator.is_main_process:
+        if args.sample_exponent is not None:
+            logger.info(f"Batch-level sampling: exponent={args.sample_exponent}")
+        else:
+            logger.info("Batch-level sampling: disabled (using min points in batch)")
+
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        collate_fn=collate_fn_batched,
+        collate_fn=collate_fn,
         pin_memory=True,
         persistent_workers=args.num_workers > 0,
         prefetch_factor=4 if args.num_workers > 0 else None,
@@ -574,7 +580,13 @@ def main():
     parser.add_argument("--seed", type=int, default=None)
 
     # Augmentation
-    parser.add_argument("--sample_exponent", type=float, default=None)
+    parser.add_argument(
+        "--sample_exponent",
+        type=float,
+        default=None,
+        help="Batch-level point sampling exponent for regularization. "
+             "Higher values bias toward max_points. E.g., 0.3 provides variation.",
+    )
     parser.add_argument("--rotation_augment", action="store_true", default=True)
     parser.add_argument("--shuffle_augment", action="store_true", default=True)
     parser.add_argument("--max_points", type=int, default=None)

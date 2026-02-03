@@ -75,7 +75,9 @@ class PointCloudDataset(Dataset):
 
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             futures = [executor.submit(load_one, idx) for idx in range(n_samples)]
-            for future in tqdm(as_completed(futures), total=n_samples, desc=desc, leave=False):
+            for future in tqdm(
+                as_completed(futures), total=n_samples, desc=desc, leave=False
+            ):
                 idx, points = future.result()
                 self.point_cache[idx] = points
 
@@ -153,18 +155,40 @@ def collate_fn(batch):
     return batch
 
 
-def collate_fn_batched(batch):
+def collate_fn_batched(
+    batch, sample_exponent: float = None, min_points_floor: int = 256
+):
     """
-    Custom collate function that samples all point clouds to the minimum size in the batch.
-    Includes conditioning information.
+    Collate function that samples all point clouds to a target size.
+
+    If sample_exponent is provided, applies batch-level exponential sampling:
+    - Draws u ~ Uniform(0, 1)
+    - Computes target = max(min_points_floor, int(u^sample_exponent * batch_max_points))
+    - All samples are downsampled to target
+
+    This provides regularization by varying sequence length across batches.
+
+    Args:
+        batch: List of samples from the dataset.
+        sample_exponent: Exponent for power-law sampling. Higher = more samples near max.
+                         None disables (uses min points in batch).
+        min_points_floor: Minimum number of points (default 256).
     """
-    min_points = min(sample["num_points"] for sample in batch)
+    batch_max_points = max(sample["num_points"] for sample in batch)
+    batch_min_points = min(sample["num_points"] for sample in batch)
+
+    if sample_exponent is not None:
+        u = torch.rand(1).item()
+        target_points = max(
+            min_points_floor, int((u**sample_exponent) * batch_max_points)
+        )
+        target_points = min(target_points, batch_min_points)
+    else:
+        target_points = batch_min_points
 
     sampled_points = []
     file_ids = []
     original_num_points = []
-
-    # Conditioning lists
     species_idxs = []
     type_idxs = []
     height_norms = []
@@ -174,15 +198,13 @@ def collate_fn_batched(batch):
         points = sample["points"]
         num_points = sample["num_points"]
 
-        if num_points > min_points:
-            indices = torch.randperm(num_points)[:min_points]
+        if num_points > target_points:
+            indices = torch.randperm(num_points)[:target_points]
             points = points[indices]
 
         sampled_points.append(points)
         file_ids.append(sample["file_id"])
         original_num_points.append(num_points)
-
-        # Collect conditioning
         species_idxs.append(sample["species_idx"])
         type_idxs.append(sample["type_idx"])
         height_norms.append(sample["height_norm"])
@@ -192,12 +214,29 @@ def collate_fn_batched(batch):
         "points": torch.stack(sampled_points, dim=0),
         "file_ids": file_ids,
         "original_num_points": original_num_points,
-        "sampled_num_points": min_points,
+        "sampled_num_points": target_points,
         "species_idx": torch.stack(species_idxs),
         "type_idx": torch.stack(type_idxs),
         "height_norm": torch.stack(height_norms),
         "height_raw": torch.stack(height_raws),
     }
+
+
+def make_collate_fn(sample_exponent: float = None, min_points_floor: int = 256):
+    """
+    Factory to create a collate function with batch-level point sampling.
+
+    Args:
+        sample_exponent: Exponent for power-law sampling (e.g., 0.3).
+        min_points_floor: Minimum points per batch (default 256).
+    """
+    from functools import partial
+
+    return partial(
+        collate_fn_batched,
+        sample_exponent=sample_exponent,
+        min_points_floor=min_points_floor,
+    )
 
 
 def create_datasets(
