@@ -15,7 +15,7 @@ conda activate treeflow
 
 accelerate launch --num_processes=4 train.py \
     --output_dir experiments \
-    --experiment_name "transformer-8-256-4096" \
+    --experiment_name "transformer-8-256-4096-full" \
     --data_path ./data/preprocessed-full \
     --model_dim 256 \
     --num_heads 8 \

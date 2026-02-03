@@ -15,7 +15,7 @@ conda activate treeflow
 
 accelerate launch --num_processes=4 train.py \
     --output_dir experiments \
-    --experiment_name "transformer-8-256-4096" \
+    --experiment_name "transformer-8-256-4096-sampled" \
     --data_path ./data/preprocessed-4096 \
     --model_dim 256 \
     --num_heads 8 \
@@ -34,4 +34,5 @@ accelerate launch --num_processes=4 train.py \
     --grad_clip_norm 1.0 \
     --mixed_precision bf16 \
     --cfg_dropout_prob 0.15 \
-    --max_points 4096
+    --max_points 4096 \
+    --sample_exponent 0.3
