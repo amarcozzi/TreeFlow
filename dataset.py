@@ -174,17 +174,13 @@ def collate_fn_batched(
                          None disables (uses min points in batch).
         min_points_floor: Minimum number of points (default 256).
     """
-    batch_max_points = max(sample["num_points"] for sample in batch)
-    batch_min_points = min(sample["num_points"] for sample in batch)
+    max_points = batch[0]["num_points"]
 
     if sample_exponent is not None:
         u = torch.rand(1).item()
-        target_points = max(
-            min_points_floor, int((u**sample_exponent) * batch_max_points)
-        )
-        target_points = min(target_points, batch_min_points)
+        target_points = max(min_points_floor, int((u**sample_exponent) * max_points))
     else:
-        target_points = batch_min_points
+        target_points = max_points
 
     sampled_points = []
     file_ids = []
@@ -198,11 +194,8 @@ def collate_fn_batched(
         points = sample["points"]
         num_points = sample["num_points"]
 
-        if num_points > target_points:
-            indices = torch.randperm(num_points)[:target_points]
-            points = points[indices]
-
-        sampled_points.append(points)
+        # Points are already shuffled in __getitem__, just slice
+        sampled_points.append(points[:target_points])
         file_ids.append(sample["file_id"])
         original_num_points.append(num_points)
         species_idxs.append(sample["species_idx"])
