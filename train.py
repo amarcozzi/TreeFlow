@@ -341,13 +341,18 @@ def train(args):
     random.seed(args.seed)
 
     # 1. Create Datasets
+    # Note: sample_exponent is applied to val/test for visualization, not train
+    # Train sampling is handled by make_collate_fn below
     logger.info(f"Preparing datasets from {args.data_path}...")
     train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
         data_path=args.data_path,
+        sample_exponent=args.sample_exponent,
+        cache_train=not args.no_cache,
+        cache_val=not args.no_cache,
+        cache_test=not args.no_cache,
         rotation_augment=args.rotation_augment,
         shuffle_augment=args.shuffle_augment,
         max_points=args.max_points,
-        cache_in_memory=not args.no_cache,
     )
 
     if accelerator.is_main_process:

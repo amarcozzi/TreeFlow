@@ -234,6 +234,13 @@ def make_collate_fn(sample_exponent: float = None, min_points_floor: int = 256):
 
 def create_datasets(
     data_path: str,
+    sample_exponent: float = None,
+    sample_exp_train: bool = False,
+    sample_exp_val: bool = True,
+    sample_exp_test: bool = True,
+    cache_train: bool = True,
+    cache_val: bool = True,
+    cache_test: bool = True,
     **dataset_kwargs,
 ):
     """
@@ -242,6 +249,13 @@ def create_datasets(
     Args:
         data_path: Path to preprocessed dataset directory (e.g., "data/full" or "data/4096").
                    Must contain metadata.csv and *.zarr files.
+        sample_exponent: Point sampling exponent value (e.g., 0.3).
+        sample_exp_train: Apply sample_exponent to train? Default False (handled by collate_fn).
+        sample_exp_val: Apply sample_exponent to val? Default True (for visualization).
+        sample_exp_test: Apply sample_exponent to test? Default True (for evaluation).
+        cache_train: Cache train data in memory? Default True.
+        cache_val: Cache val data in memory? Default True.
+        cache_test: Cache test data in memory? Default True.
         **dataset_kwargs: Passed to PointCloudDataset (max_points, rotation_augment, etc.)
 
     Returns:
@@ -298,9 +312,27 @@ def create_datasets(
         **dataset_kwargs,
     }
 
-    train_ds = PointCloudDataset(train_df, split_name="train", **common_args)
-    val_ds = PointCloudDataset(val_df, split_name="val", **common_args)
-    test_ds = PointCloudDataset(test_df, split_name="test", **common_args)
+    train_ds = PointCloudDataset(
+        train_df,
+        split_name="train",
+        sample_exponent=sample_exponent if sample_exp_train else None,
+        cache_in_memory=cache_train,
+        **common_args,
+    )
+    val_ds = PointCloudDataset(
+        val_df,
+        split_name="val",
+        sample_exponent=sample_exponent if sample_exp_val else None,
+        cache_in_memory=cache_val,
+        **common_args,
+    )
+    test_ds = PointCloudDataset(
+        test_df,
+        split_name="test",
+        sample_exponent=sample_exponent if sample_exp_test else None,
+        cache_in_memory=cache_test,
+        **common_args,
+    )
 
     return train_ds, val_ds, test_ds, species_list, type_list
 
@@ -361,15 +393,55 @@ if __name__ == "__main__":
     data_path = "./data/preprocessed-full"
 
     try:
+        sample_exp = 0.5
         train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
             data_path=data_path,
-            sample_exponent=0.3,
+            sample_exponent=sample_exp,
+            cache_train=False,
+            cache_val=False,
+            cache_test=False,
             rotation_augment=True,
         )
 
-        print("\nVisualizing random training sample...")
-        idx = np.random.randint(len(train_ds))
-        visualize_augmentation(train_ds, idx, denormalize=False)
+        # Visualize from val_ds to see effect of sample_exponent
+        # (train_ds doesn't use sample_exponent - it's handled by collate_fn)
+        print(f"\nVisualizing random val sample with sample_exponent={sample_exp}...")
+        idx = np.random.randint(len(val_ds))
+        visualize_augmentation(val_ds, idx, denormalize=False)
+
+        # Histogram of point counts to show impact of sample_exponent
+        print(f"\nSampling same tree 100 times to show point count distribution...")
+        n_iterations = 100
+        point_counts = []
+        for _ in range(n_iterations):
+            sample = val_ds[idx]
+            point_counts.append(sample["num_points"])
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.hist(point_counts, bins=20, edgecolor="black", alpha=0.7)
+        ax.axvline(
+            np.mean(point_counts),
+            color="red",
+            linestyle="--",
+            label=f"Mean: {np.mean(point_counts):.0f}",
+        )
+        ax.axvline(
+            np.median(point_counts),
+            color="orange",
+            linestyle="--",
+            label=f"Median: {np.median(point_counts):.0f}",
+        )
+        ax.set_xlabel("Number of Points")
+        ax.set_ylabel("Frequency")
+        ax.set_title(
+            f"Point Count Distribution (sample_exponent={sample_exp}, n={n_iterations})"
+        )
+        ax.legend()
+        plt.tight_layout()
+        plt.show()
+
+        print(f"  Min: {min(point_counts)}, Max: {max(point_counts)}")
+        print(f"  Mean: {np.mean(point_counts):.1f}, Std: {np.std(point_counts):.1f}")
 
     except Exception as e:
         print(f"Skipping visualization (setup required): {e}")
