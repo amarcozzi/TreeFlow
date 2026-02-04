@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=umontana_fire_modeling
-#SBATCH --partition=gpu-a100
-#SBATCH --gres=gpu:a100:1
+#SBATCH --partition=gpu-l40s
+#SBATCH --gres=gpu:l40s:4
 #SBATCH --job-name="train_tf_16384"
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=256G
@@ -21,7 +21,7 @@ accelerate launch --num_processes=4 train.py \
     --num_heads 8 \
     --num_layers 8 \
     --dropout 0.1 \
-    --batch_size 64 \
+    --batch_size 16 \
     --visualize_every 10 \
     --save_every 100 \
     --rotation_augment \
