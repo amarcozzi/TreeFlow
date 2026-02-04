@@ -5,7 +5,7 @@
 #SBATCH --job-name="pretrain_tf_4096"
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=256G
-#SBATCH --time=1-0
+#SBATCH --time=2-0
 #SBATCH --output=log_pretrain_transformer_8_256_4096.out
 
 module load cuda
@@ -21,7 +21,7 @@ accelerate launch --num_processes=4 train.py \
     --num_heads 8 \
     --num_layers 8 \
     --dropout 0.1 \
-    --batch_size 64 \
+    --batch_size 16 \
     --visualize_every 10 \
     --save_every 100 \
     --rotation_augment \
