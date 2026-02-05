@@ -431,7 +431,26 @@ def train(args):
     model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
 
     start_epoch = 1
-    if args.resume_from:
+    if args.pretrained_weights:
+        # Load only model weights (for curriculum learning / fine-tuning)
+        checkpoint_path = Path(args.pretrained_weights)
+        logger.info(f"Loading pretrained weights from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+        if isinstance(checkpoint, dict) and "model" in checkpoint:
+            state_dict = checkpoint["model"]
+            new_state_dict = {
+                key.replace("_orig_mod.", ""): value
+                for key, value in state_dict.items()
+            }
+            accelerator.unwrap_model(model).load_state_dict(new_state_dict)
+        else:
+            accelerator.unwrap_model(model).load_state_dict(checkpoint)
+
+        logger.info("Loaded pretrained weights (optimizer/scheduler/epoch reset)")
+
+    elif args.resume_from:
+        # Full resume: model, optimizer, scheduler, epoch
         checkpoint_path = output_dir / "checkpoints" / args.resume_from
         logger.info(f"Loading checkpoint from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
@@ -578,7 +597,13 @@ def main():
         "--resume_from",
         type=str,
         default=None,
-        help="Path to checkpoint to resume from",
+        help="Checkpoint filename to resume from (within same experiment)",
+    )
+    parser.add_argument(
+        "--pretrained_weights",
+        type=str,
+        default=None,
+        help="Path to checkpoint for loading model weights only (resets optimizer/scheduler/epoch)",
     )
     parser.add_argument("--num_workers", type=int, default=16)
     parser.add_argument("--cfg_dropout_prob", type=float, default=0.1)
