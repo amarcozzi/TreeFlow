@@ -280,7 +280,7 @@ class FlowMatchingTransformer(nn.Module):
         point_tokens = self.point_embed(x)  # (B, N, D)
 
         # 2. Build conditioning tokens
-        t_emb = self.t_embedder(t)  # (B, D)
+        t_emb = self.t_embedder(t * 1000.0)  # (B, D) — scale t∈[0,1] for sinusoidal resolution
 
         if drop_mask is not None:
             mask = drop_mask.unsqueeze(1).float()
