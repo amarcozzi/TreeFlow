@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:l40s:4
 #SBATCH --job-name="tf_8_256_4096"
 #SBATCH --cpus-per-task=20
-#SBATCH --mem=256G
+#SBATCH --mem=64G
 #SBATCH --time=2-0
 #SBATCH --output=log_train_transformer_8_256_4096.out
 
@@ -22,7 +22,7 @@ accelerate launch --num_processes=4 train.py \
     --num_heads 8 \
     --num_layers 8 \
     --dropout 0.1 \
-    --batch_size 16 \
+    --batch_size 64 \
     --visualize_every 10 \
     --save_every 100 \
     --rotation_augment \
@@ -36,4 +36,5 @@ accelerate launch --num_processes=4 train.py \
     --mixed_precision bf16 \
     --cfg_dropout_prob 0.15 \
     --max_points 4096 \
-    --sample_exponent 0.3
+    --sample_exponent 0.3 \
+    --no_cache
