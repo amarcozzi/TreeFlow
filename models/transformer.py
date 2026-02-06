@@ -71,7 +71,7 @@ class SinusoidalPointEncoding(nn.Module):
         self.num_freq_bands = num_freq_bands
 
         # Fixed NeRF-style frequencies: 2^0, 2^1, ..., 2^(L-1)
-        freqs = 2.0 ** torch.arange(num_freq_bands).float()
+        freqs = (2.0 ** torch.arange(num_freq_bands).float()) * torch.pi
         self.register_buffer("freqs", freqs)
 
         # Raw features: 3 (raw coords) + L * 2 * 3 (sin/cos per axis)
