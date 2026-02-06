@@ -411,8 +411,10 @@ if __name__ == "__main__":
         visualize_augmentation(val_ds, idx, denormalize=False)
 
         # Histogram of point counts to show impact of sample_exponent
-        print(f"\nSampling same tree 100 times to show point count distribution...")
         n_iterations = 100
+        print(
+            f"\nSampling same tree {n_iterations} times to show point count distribution..."
+        )
         point_counts = []
         for _ in range(n_iterations):
             sample = val_ds[idx]
