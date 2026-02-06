@@ -558,13 +558,20 @@ def main():
         "--model_type",
         type=str,
         default="dit",
-        choices=["dit", "pointnext"],
-        help="Architecture to use: 'dit' (Transformer) or 'pointnext' (U-Net)",
+        choices=["dit", "transformer", "pointnext"],
+        help="Architecture: 'dit' (AdaLN), 'transformer' (token-prepend + U-ViT), or 'pointnext' (U-Net)",
     )
     parser.add_argument("--model_dim", type=int, default=256)
     parser.add_argument("--num_layers", type=int, default=12)
     parser.add_argument("--num_heads", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument(
+        "--num_freq_bands",
+        type=int,
+        default=12,
+        help="Number of NeRF-style frequency bands for point encoding (transformer model only). "
+             "L=10 covers 4k points, L=12 covers 32k+.",
+    )
 
     # Training
     parser.add_argument("--num_epochs", type=int, default=1000)

@@ -2,11 +2,11 @@
 #SBATCH --account=umontana_fire_modeling
 #SBATCH --partition=gpu-l40s
 #SBATCH --gres=gpu:l40s:4
-#SBATCH --job-name="train_tf_16384"
+#SBATCH --job-name="train_dit_16384"
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=256G
 #SBATCH --time=2-0
-#SBATCH --output=log_train_transformer_8_256_16384.out
+#SBATCH --output=log_train_dit_8_256_16384.out
 
 module load cuda
 
@@ -15,7 +15,8 @@ conda activate treeflow
 
 accelerate launch --num_processes=4 train.py \
     --output_dir experiments \
-    --experiment_name "transformer-8-256-16384" \
+    --model_type dit \
+    --experiment_name "dit-8-256-16384" \
     --data_path ./data/preprocessed-16384 \
     --model_dim 256 \
     --num_heads 8 \

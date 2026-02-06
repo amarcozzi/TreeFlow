@@ -159,14 +159,16 @@ def collate_fn_batched(
     batch, sample_exponent: float = None, min_points_floor: int = 256
 ):
     """
-    Collate function that samples all point clouds to a target size.
+    Collate function that samples all point clouds to a uniform target size.
 
     If sample_exponent is provided, applies batch-level exponential sampling:
+    - Finds max_points across the batch
     - Draws u ~ Uniform(0, 1)
-    - Computes target = max(min_points_floor, int(u^sample_exponent * batch_max_points))
+    - Computes target = max(min_points_floor, int(u^sample_exponent * max_points))
     - All samples are downsampled to target
 
-    This provides regularization by varying sequence length across batches.
+    If sample_exponent is None, uses the minimum point count in the batch
+    so no padding is needed and no points are wasted.
 
     Args:
         batch: List of samples from the dataset.
@@ -174,13 +176,12 @@ def collate_fn_batched(
                          None disables (uses min points in batch).
         min_points_floor: Minimum number of points (default 256).
     """
-    max_points = batch[0]["num_points"]
-
     if sample_exponent is not None:
+        max_points = max(sample["num_points"] for sample in batch)
         u = torch.rand(1).item()
         target_points = max(min_points_floor, int((u**sample_exponent) * max_points))
     else:
-        target_points = max_points
+        target_points = min(sample["num_points"] for sample in batch)
 
     sampled_points = []
     file_ids = []

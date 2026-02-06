@@ -1,19 +1,24 @@
 """
-treeflow/models/transformer.py
+treeflow/models/transformer.py - Plain Transformer with token-prepend conditioning
+and U-ViT skip connections for flow matching on 3D point clouds.
+
+Architecture:
+  - NeRF-style sinusoidal positional encoding (fixed frequencies) + learnable projection
+  - 4 prepended conditioning tokens (time, species, type, height)
+  - Standard pre-norm transformer blocks with QK-norm
+  - U-ViT long skip connections (block i -> block L-1-i)
+  - Output head applied only to point tokens
+
+References:
+  - U-ViT: All are Worth Words (Bao et al., 2023)
+  - NeRF: Neural Radiance Fields (Mildenhall et al., 2020)
+  - DiT: Scalable Diffusion Models with Transformers (Peebles & Xie, 2023)
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
-
-
-def modulate(x, shift, scale):
-    """
-    FiLM / AdaLN modulation function.
-    x: (B, N, D)
-    shift, scale: (B, D)
-    """
-    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
 class TimestepEmbedder(nn.Module):
@@ -30,7 +35,7 @@ class TimestepEmbedder(nn.Module):
 
     @staticmethod
     def timestep_embedding(t, dim, max_period=10000):
-        """Standard sinusoidal embedding."""
+        """Standard sinusoidal embedding for scalar timesteps."""
         half = dim // 2
         freqs = torch.exp(
             -math.log(max_period)
@@ -50,90 +55,80 @@ class TimestepEmbedder(nn.Module):
         return self.mlp(t_freq)
 
 
-class PositionalEncoding3D(nn.Module):
-    """3D positional encoding for point clouds (fixed sinusoidal or learnable MLP)."""
+class SinusoidalPointEncoding(nn.Module):
+    """
+    NeRF-style sinusoidal encoding for 3D point coordinates,
+    followed by a learnable MLP projection.
 
-    def __init__(self, dim: int, max_freq: float = 10000.0, learnable: bool = False):
+    Frequencies: 2^0, 2^1, ..., 2^(L-1) per axis.
+    For L=10: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+
+    Output: raw_coords (3) + sin/cos features (L*2*3) -> MLP -> model_dim
+    """
+
+    def __init__(self, model_dim: int, num_freq_bands: int = 10):
         super().__init__()
-        self.dim = dim
-        self.max_freq = max_freq
-        self.learnable = learnable
+        self.num_freq_bands = num_freq_bands
 
-        if learnable:
-            # Learnable MLP-based positional encoding
-            self.pos_mlp = nn.Sequential(
-                nn.Linear(3, dim * 2), nn.GELU(), nn.Linear(dim * 2, dim)
-            )
-        else:
-            # Fixed sinusoidal positional encoding
-            dim_per_axis = dim // 3
-            freq_bands = dim_per_axis // 2
+        # Fixed NeRF-style frequencies: 2^0, 2^1, ..., 2^(L-1)
+        freqs = 2.0 ** torch.arange(num_freq_bands).float()
+        self.register_buffer("freqs", freqs)
 
-            if freq_bands == 0:
-                raise ValueError(
-                    f"Dimension {dim} is too small for 3D encoding (need at least 6)"
-                )
+        # Raw features: 3 (raw coords) + L * 2 * 3 (sin/cos per axis)
+        raw_dim = 3 + num_freq_bands * 2 * 3
 
-            inv_freq = 1.0 / (
-                max_freq
-                ** (torch.arange(0, freq_bands).float() / max(freq_bands - 1, 1))
-            )
-            self.register_buffer("inv_freq", inv_freq)
-            self.freq_bands = freq_bands
-            self.dim_per_axis = dim_per_axis
+        # Learnable projection
+        self.proj = nn.Sequential(
+            nn.Linear(raw_dim, model_dim),
+            nn.GELU(),
+            nn.Linear(model_dim, model_dim),
+        )
 
     def forward(self, coords: torch.Tensor) -> torch.Tensor:
-        if self.learnable:
-            # Use learnable MLP
-            return self.pos_mlp(coords)  # (B, N, dim)
-        else:
-            # Use fixed sinusoidal encoding
-            B, N, _ = coords.shape
+        """
+        Args:
+            coords: (B, N, 3) - 3D point coordinates in ~[-1, 1]
+        Returns:
+            (B, N, model_dim)
+        """
+        # coords: (B, N, 3), freqs: (L,)
+        # Expand: (B, N, 3, 1) * (1, 1, 1, L) -> (B, N, 3, L)
+        scaled = coords.unsqueeze(-1) * self.freqs[None, None, None, :]
 
-            x = coords[:, :, 0:1]
-            y = coords[:, :, 1:2]
-            z = coords[:, :, 2:3]
+        # sin/cos: each (B, N, 3, L) -> reshape to (B, N, 3*L)
+        sin_features = torch.sin(scaled).reshape(*coords.shape[:2], -1)
+        cos_features = torch.cos(scaled).reshape(*coords.shape[:2], -1)
 
-            x_freqs = x * self.inv_freq[None, None, :]
-            y_freqs = y * self.inv_freq[None, None, :]
-            z_freqs = z * self.inv_freq[None, None, :]
+        # Concatenate: raw coords + sin + cos
+        features = torch.cat([coords, sin_features, cos_features], dim=-1)
 
-            x_enc = torch.cat([torch.sin(x_freqs), torch.cos(x_freqs)], dim=-1)
-            y_enc = torch.cat([torch.sin(y_freqs), torch.cos(y_freqs)], dim=-1)
-            z_enc = torch.cat([torch.sin(z_freqs), torch.cos(z_freqs)], dim=-1)
-
-            encoding = torch.cat([x_enc, y_enc, z_enc], dim=-1)
-
-            current_dim = encoding.shape[-1]
-            if current_dim < self.dim:
-                padding = torch.zeros(
-                    B, N, self.dim - current_dim, device=coords.device
-                )
-                encoding = torch.cat([encoding, padding], dim=-1)
-            elif current_dim > self.dim:
-                encoding = encoding[:, :, : self.dim]
-
-            return encoding
+        return self.proj(features)
 
 
-class DiTBlock(nn.Module):
+class TransformerBlock(nn.Module):
     """
-    Diffusion Transformer Block with Adaptive Layer Norm (AdaLN).
+    Standard pre-norm transformer block with QK-norm for stability.
+    No conditioning modulation - purely vanilla.
     """
 
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, dropout=0.1):
         super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_size, eps=1e-6)
+        self.norm2 = nn.LayerNorm(hidden_size, eps=1e-6)
 
-        # 1. Norms (elementwise_affine=False because AdaLN handles the affine part)
-        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        # QK-norm layers
+        self.q_norm = nn.LayerNorm(hidden_size // num_heads, eps=1e-6)
+        self.k_norm = nn.LayerNorm(hidden_size // num_heads, eps=1e-6)
 
-        # 2. Attention
-        self.attn = nn.MultiheadAttention(
-            hidden_size, num_heads, batch_first=True, dropout=dropout
-        )
+        self.num_heads = num_heads
+        self.head_dim = hidden_size // num_heads
 
-        # 3. MLP
+        # Attention projections
+        self.qkv = nn.Linear(hidden_size, 3 * hidden_size)
+        self.out_proj = nn.Linear(hidden_size, hidden_size)
+        self.attn_dropout = nn.Dropout(dropout)
+
+        # MLP
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.mlp = nn.Sequential(
             nn.Linear(hidden_size, mlp_hidden_dim),
@@ -143,37 +138,48 @@ class DiTBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
-        # 4. AdaLN Modulation Regressor
-        # Predicts 6 vectors: shift/scale/gate for Attn, shift/scale/gate for MLP
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
-        )
+    def forward(self, x):
+        B, N, D = x.shape
 
-    def forward(self, x, c):
-        # Predict modulation parameters
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-            self.adaLN_modulation(c).chunk(6, dim=1)
-        )
+        # --- Attention with QK-norm ---
+        x_norm = self.norm1(x)
+        qkv = self.qkv(x_norm).reshape(B, N, 3, self.num_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)  # each: (B, N, num_heads, head_dim)
 
-        # --- Block Part 1: Attention ---
-        x_norm = modulate(self.norm1(x), shift_msa, scale_msa)
-        attn_out, _ = self.attn(x_norm, x_norm, x_norm, need_weights=False)
-        x = x + gate_msa.unsqueeze(1) * attn_out
+        # Apply QK-norm per head
+        q = self.q_norm(q)
+        k = self.k_norm(k)
 
-        # --- Block Part 2: MLP ---
-        x_norm = modulate(self.norm2(x), shift_mlp, scale_mlp)
-        mlp_out = self.mlp(x_norm)
-        x = x + gate_mlp.unsqueeze(1) * mlp_out
+        # Transpose for attention: (B, num_heads, N, head_dim)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        # Scaled dot-product attention
+        attn_out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_dropout.p if self.training else 0.0)
+
+        # Reshape back: (B, N, D)
+        attn_out = attn_out.transpose(1, 2).reshape(B, N, D)
+        attn_out = self.out_proj(attn_out)
+
+        x = x + attn_out
+
+        # --- MLP ---
+        x = x + self.mlp(self.norm2(x))
 
         return x
 
 
-class FlowMatchingDiT(nn.Module):
+class FlowMatchingTransformer(nn.Module):
     """
-    Conditional DiT for Flow Matching.
+    Plain Transformer for Flow Matching with token-prepend conditioning
+    and U-ViT skip connections.
+
     Input: Noisy Points (x_t) + Time (t) + Conditions (Species, Type, Height)
     Output: Velocity field (v)
     """
+
+    NUM_COND_TOKENS = 4  # time, species, type, height
 
     def __init__(
         self,
@@ -183,50 +189,57 @@ class FlowMatchingDiT(nn.Module):
         num_species: int = 10,
         num_types: int = 3,
         dropout: float = 0.1,
-        max_freq: float = 10000.0,
-        learnable_pos_encoding: bool = False,
+        num_freq_bands: int = 12,
     ):
         super().__init__()
         self.model_dim = model_dim
+        self.num_layers = num_layers
 
-        # 1. Spatial Embeddings
-        self.pos_encoding = PositionalEncoding3D(
-            model_dim, max_freq, learnable=learnable_pos_encoding
-        )
+        # 1. Point Embedding (NeRF sinusoidal + learned projection)
+        self.point_embed = SinusoidalPointEncoding(model_dim, num_freq_bands)
 
         # 2. Conditioning Embedders
         self.t_embedder = TimestepEmbedder(model_dim)
 
-        # +1 for the "Null/Unconditional" token for CFG
+        # +1 for null/unconditional token for CFG
         self.species_embedder = nn.Embedding(num_species + 1, model_dim)
         self.type_embedder = nn.Embedding(num_types + 1, model_dim)
 
-        # Height: Continuous + Null handling
+        # Height: continuous + null handling
         self.height_mlp = nn.Sequential(
             nn.Linear(1, model_dim), nn.SiLU(), nn.Linear(model_dim, model_dim)
         )
-        self.null_height_embed = nn.Parameter(torch.randn(1, model_dim))
+        self.null_height_embed = nn.Parameter(torch.zeros(1, model_dim))
 
-        # 3. Transformer Backbone
+        # Token type embeddings to distinguish the 4 conditioning tokens
+        self.token_type_embeds = nn.ParameterList([
+            nn.Parameter(torch.zeros(1, model_dim)) for _ in range(self.NUM_COND_TOKENS)
+        ])
+
+        # Null token indices
+        self.null_species_idx = num_species
+        self.null_type_idx = num_types
+
+        # 3. Transformer Blocks
         self.blocks = nn.ModuleList(
-            [DiTBlock(model_dim, num_heads, dropout=dropout) for _ in range(num_layers)]
+            [TransformerBlock(model_dim, num_heads, dropout=dropout) for _ in range(num_layers)]
         )
 
-        # 4. Final Output Head
-        self.final_norm = nn.LayerNorm(model_dim, elementwise_affine=False, eps=1e-6)
-        self.adaLN_final = nn.Sequential(
-            nn.SiLU(), nn.Linear(model_dim, 2 * model_dim, bias=True)
+        # 4. U-ViT Skip Connection Projections
+        # block i connects to block (num_layers - 1 - i) for i < num_layers // 2
+        self.num_skips = num_layers // 2
+        self.skip_projections = nn.ModuleList(
+            [nn.Linear(2 * model_dim, model_dim) for _ in range(self.num_skips)]
         )
+
+        # 5. Output Head
+        self.final_norm = nn.LayerNorm(model_dim, eps=1e-6)
         self.head = nn.Linear(model_dim, 3)
 
         self.initialize_weights()
 
-        # Store the indices for null tokens
-        self.null_species_idx = num_species
-        self.null_type_idx = num_types
-
     def initialize_weights(self):
-        # Xavier initialization for standard layers
+        # Xavier initialization for all linear layers
         def _basic_init(module):
             if isinstance(module, nn.Linear):
                 torch.nn.init.xavier_uniform_(module.weight)
@@ -235,83 +248,100 @@ class FlowMatchingDiT(nn.Module):
 
         self.apply(_basic_init)
 
-        # Zero-Init for AdaLN modulators
-        for block in self.blocks:
-            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+        # Zero-init the output head (stable init for flow matching)
+        nn.init.constant_(self.head.weight, 0)
+        nn.init.constant_(self.head.bias, 0)
 
-        # Zero-Init for final block
-        nn.init.constant_(self.adaLN_final[-1].weight, 0)
-        nn.init.constant_(self.adaLN_final[-1].bias, 0)
+        # Normal init for embeddings
+        nn.init.normal_(self.species_embedder.weight, std=0.02)
+        nn.init.normal_(self.type_embedder.weight, std=0.02)
 
     def forward(self, x, t, species_idx, type_idx, height_norm, drop_mask=None):
         """
         Args:
-            x: (B, N, 3) - Points
+            x: (B, N, 3) - Noisy points
             t: (B,) - Timesteps
-            species_idx: (B,) - Species Integers
-            type_idx: (B,) - Type Integers
-            height_norm: (B,) - Normalized Height (Log scale)
-            drop_mask: (B,) - Boolean tensor. True = Drop condition (CFG).
+            species_idx: (B,) - Species indices
+            type_idx: (B,) - Data type indices
+            height_norm: (B,) - Normalized height (log scale)
+            drop_mask: (B,) - Boolean tensor. True = drop condition (CFG).
         """
-        # 1. Embed Spatial Inputs
-        x = self.pos_encoding(x)
+        B = x.shape[0]
 
-        # 2. Embed Time
-        t_emb = self.t_embedder(t)
+        # 1. Embed point coordinates
+        point_tokens = self.point_embed(x)  # (B, N, D)
 
-        # 3. Handle CFG / Dropping
+        # 2. Build conditioning tokens
+        t_emb = self.t_embedder(t)  # (B, D)
+
         if drop_mask is not None:
             mask = drop_mask.unsqueeze(1).float()
 
-            # Embed real
+            # Real embeddings
             s_real = self.species_embedder(species_idx)
             type_real = self.type_embedder(type_idx)
+            h_real = self.height_mlp(height_norm.unsqueeze(1))
 
-            # Embed null
-            B = x.shape[0]
+            # Null embeddings
             s_null = self.species_embedder(
                 torch.full((B,), self.null_species_idx, device=x.device)
             )
             type_null = self.type_embedder(
                 torch.full((B,), self.null_type_idx, device=x.device)
             )
+            h_null = self.null_height_embed.expand(B, -1)
 
             # Interpolate
             s_emb = s_real * (1 - mask) + s_null * mask
             type_emb = type_real * (1 - mask) + type_null * mask
-
-            # Height
-            h_real = self.height_mlp(height_norm.unsqueeze(1))
-            h_null = self.null_height_embed.expand(B, -1)
             h_emb = h_real * (1 - mask) + h_null * mask
-
         else:
             s_emb = self.species_embedder(species_idx)
             type_emb = self.type_embedder(type_idx)
             h_emb = self.height_mlp(height_norm.unsqueeze(1))
 
-        # 4. Sum Conditioning Context
-        cond = t_emb + s_emb + type_emb + h_emb
+        # Add token type embeddings and stack as (B, 4, D)
+        cond_tokens = torch.stack([
+            t_emb + self.token_type_embeds[0],
+            s_emb + self.token_type_embeds[1],
+            type_emb + self.token_type_embeds[2],
+            h_emb + self.token_type_embeds[3],
+        ], dim=1)
 
-        # 5. Transformer
-        for block in self.blocks:
-            x = block(x, cond)
+        # 3. Concatenate: [cond_tokens, point_tokens] -> (B, 4+N, D)
+        tokens = torch.cat([cond_tokens, point_tokens], dim=1)
 
-        # 6. Output
-        shift, scale = self.adaLN_final(cond).chunk(2, dim=1)
-        x = modulate(self.final_norm(x), shift, scale)
+        # 4. Transformer with U-ViT skip connections
+        # First half: save activations for skip connections
+        skip_cache = []
+        for i in range(self.num_skips):
+            tokens = self.blocks[i](tokens)
+            skip_cache.append(tokens)
 
-        return self.head(x)
+        # Second half: apply skip connections
+        for i in range(self.num_skips, self.num_layers):
+            tokens = self.blocks[i](tokens)
+            skip_idx = self.num_layers - 1 - i
+            if skip_idx < self.num_skips:
+                # Concatenate with skip and project back
+                tokens = self.skip_projections[skip_idx](
+                    torch.cat([tokens, skip_cache[skip_idx]], dim=-1)
+                )
+
+        # 5. Output: only point tokens (discard first 4 conditioning tokens)
+        point_out = tokens[:, self.NUM_COND_TOKENS:]
+        point_out = self.final_norm(point_out)
+
+        return self.head(point_out)
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
 if __name__ == "__main__":
-    print("Testing ConditionalFlowMatching (DiT)...")
+    print("Testing FlowMatchingTransformer...")
 
-    model = ConditionalFlowMatching(
+    model = FlowMatchingTransformer(
         model_dim=256, num_layers=8, num_heads=8, num_species=10, num_types=3
     )
 
@@ -326,11 +356,12 @@ if __name__ == "__main__":
 
     # Test standard forward
     velocity = model(x_0, t_0, s_0, dt_0, h_0)
-    assert velocity.shape == x_0.shape
+    assert velocity.shape == x_0.shape, f"Expected {x_0.shape}, got {velocity.shape}"
 
     # Test with masking
     mask = torch.tensor([True, False, True, False])
     velocity_masked = model(x_0, t_0, s_0, dt_0, h_0, drop_mask=mask)
     assert velocity_masked.shape == x_0.shape
 
-    print("\n✓ Model works correctly!")
+    print(f"Output shape: {velocity.shape}")
+    print("\nDone.")
