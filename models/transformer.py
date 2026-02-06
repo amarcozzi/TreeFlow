@@ -156,7 +156,9 @@ class TransformerBlock(nn.Module):
         v = v.transpose(1, 2)
 
         # Scaled dot-product attention
-        attn_out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_dropout.p if self.training else 0.0)
+        attn_out = F.scaled_dot_product_attention(
+            q, k, v, dropout_p=self.attn_dropout.p if self.training else 0.0
+        )
 
         # Reshape back: (B, N, D)
         attn_out = attn_out.transpose(1, 2).reshape(B, N, D)
@@ -212,9 +214,12 @@ class FlowMatchingTransformer(nn.Module):
         self.null_height_embed = nn.Parameter(torch.zeros(1, model_dim))
 
         # Token type embeddings to distinguish the 4 conditioning tokens
-        self.token_type_embeds = nn.ParameterList([
-            nn.Parameter(torch.zeros(1, model_dim)) for _ in range(self.NUM_COND_TOKENS)
-        ])
+        self.token_type_embeds = nn.ParameterList(
+            [
+                nn.Parameter(torch.zeros(1, model_dim))
+                for _ in range(self.NUM_COND_TOKENS)
+            ]
+        )
 
         # Null token indices
         self.null_species_idx = num_species
@@ -222,7 +227,10 @@ class FlowMatchingTransformer(nn.Module):
 
         # 3. Transformer Blocks
         self.blocks = nn.ModuleList(
-            [TransformerBlock(model_dim, num_heads, dropout=dropout) for _ in range(num_layers)]
+            [
+                TransformerBlock(model_dim, num_heads, dropout=dropout)
+                for _ in range(num_layers)
+            ]
         )
 
         # 4. U-ViT Skip Connection Projections
@@ -301,12 +309,15 @@ class FlowMatchingTransformer(nn.Module):
             h_emb = self.height_mlp(height_norm.unsqueeze(1))
 
         # Add token type embeddings and stack as (B, 4, D)
-        cond_tokens = torch.stack([
-            t_emb + self.token_type_embeds[0],
-            s_emb + self.token_type_embeds[1],
-            type_emb + self.token_type_embeds[2],
-            h_emb + self.token_type_embeds[3],
-        ], dim=1)
+        cond_tokens = torch.stack(
+            [
+                t_emb + self.token_type_embeds[0],
+                s_emb + self.token_type_embeds[1],
+                type_emb + self.token_type_embeds[2],
+                h_emb + self.token_type_embeds[3],
+            ],
+            dim=1,
+        )
 
         # 3. Concatenate: [cond_tokens, point_tokens] -> (B, 4+N, D)
         tokens = torch.cat([cond_tokens, point_tokens], dim=1)
@@ -329,7 +340,7 @@ class FlowMatchingTransformer(nn.Module):
                 )
 
         # 5. Output: only point tokens (discard first 4 conditioning tokens)
-        point_out = tokens[:, self.NUM_COND_TOKENS:]
+        point_out = tokens[:, self.NUM_COND_TOKENS :]
         point_out = self.final_norm(point_out)
 
         return self.head(point_out)
@@ -342,7 +353,7 @@ if __name__ == "__main__":
     print("Testing FlowMatchingTransformer...")
 
     model = FlowMatchingTransformer(
-        model_dim=256, num_layers=8, num_heads=8, num_species=10, num_types=3
+        model_dim=512, num_layers=8, num_heads=8, num_species=10, num_types=3
     )
 
     print(f"Model parameters: {model.count_parameters():,}")
