@@ -2,7 +2,7 @@
 #SBATCH --account=umontana_fire_modeling
 #SBATCH --partition=gpu-l40s
 #SBATCH --gres=gpu:l40s:4
-#SBATCH --job-name="train_transformer_4096"
+#SBATCH --job-name="tf_8_512_4096"
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=256G
 #SBATCH --time=2-0
