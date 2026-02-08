@@ -34,6 +34,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def discover_checkpoints(checkpoint_dir):
+    """Glob for epoch_*.pt files and return sorted list of epoch numbers."""
+    checkpoint_dir = Path(checkpoint_dir)
+    files = sorted(checkpoint_dir.glob("epoch_*.pt"))
+    epochs = []
+    for f in files:
+        try:
+            epoch_num = int(f.stem.replace("epoch_", ""))
+            epochs.append(epoch_num)
+        except ValueError:
+            continue
+    return sorted(epochs)
+
+
 def save_config(args, output_dir, species_list, type_list):
     """Save training config and mappings."""
     config = vars(args).copy()
@@ -322,6 +336,17 @@ def train(args):
         logger.info(f"Accelerate found {accelerator.num_processes} GPUs to use.")
         logger.info(f"Output directory: {output_dir.resolve()}")
 
+    # Resolve --resume to --resume_from by discovering latest checkpoint
+    if args.resume and not args.resume_from:
+        epochs = discover_checkpoints(dirs["ckpt"])
+        if epochs:
+            args.resume_from = f"epoch_{epochs[-1]}.pt"
+            if accelerator.is_main_process:
+                logger.info(f"Auto-discovered latest checkpoint: {args.resume_from}")
+        else:
+            if accelerator.is_main_process:
+                logger.info("No checkpoints found, starting from scratch")
+
     accelerator.wait_for_everyone()
 
     # Synchronize seed across all ranks (rank 0's seed is broadcast to others)
@@ -599,6 +624,12 @@ def main():
         default="bf16",
         choices=["no", "fp16", "bf16"],
         help="Mixed precision training mode (no, fp16, or bf16)",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Auto-discover and resume from the latest checkpoint in the experiment directory",
     )
     parser.add_argument(
         "--resume_from",
