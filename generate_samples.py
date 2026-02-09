@@ -211,30 +211,30 @@ def generate_samples(args):
     # Handle resume mode
     if args.resume:
         gen_config_path = output_dir / "generation_config.json"
-        if not gen_config_path.exists():
-            raise FileNotFoundError(f"Generation config not found: {gen_config_path}")
+        if gen_config_path.exists():
+            with open(gen_config_path) as f:
+                gen_config = json.load(f)
 
-        with open(gen_config_path) as f:
-            gen_config = json.load(f)
+            # Use settings from previous run
+            args.checkpoint = gen_config["checkpoint"]
+            args.data_path = gen_config["data_path"]
+            args.max_points = gen_config["max_points"]
+            args.num_samples_per_tree = gen_config["num_samples_per_tree"]
+            args.cfg_scale = gen_config["cfg_scale"]
+            args.num_ode_steps = gen_config["num_ode_steps"]
+            args.solver_method = gen_config["solver_method"]
+            args.use_validation = gen_config["use_validation"]
+            # Use seed from previous run for consistent CFG sampling
+            args.seed = gen_config["seed"]
+            # Restore index range if not overridden on command line
+            if args.start_idx is None:
+                args.start_idx = gen_config.get("start_idx")
+            if args.end_idx is None:
+                args.end_idx = gen_config.get("end_idx")
 
-        # Use settings from previous run
-        args.checkpoint = gen_config["checkpoint"]
-        args.data_path = gen_config["data_path"]
-        args.max_points = gen_config["max_points"]
-        args.num_samples_per_tree = gen_config["num_samples_per_tree"]
-        args.cfg_scale = gen_config["cfg_scale"]
-        args.num_ode_steps = gen_config["num_ode_steps"]
-        args.solver_method = gen_config["solver_method"]
-        args.use_validation = gen_config["use_validation"]
-        # Use seed from previous run for consistent CFG sampling
-        args.seed = gen_config["seed"]
-        # Restore index range if not overridden on command line
-        if args.start_idx is None:
-            args.start_idx = gen_config.get("start_idx")
-        if args.end_idx is None:
-            args.end_idx = gen_config.get("end_idx")
-
-        print(f"Resuming generation from {output_dir}")
+            print(f"Resuming generation from {output_dir}")
+        else:
+            print(f"Resume: no generation_config.json found, using command-line args")
 
         # Scan for existing samples
         zarr_dir = output_dir / "zarr"
