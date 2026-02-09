@@ -254,11 +254,14 @@ def generate_samples(args):
 
     # Create datasets with same settings as training
     print(f"\nPreparing datasets from {args.data_path}...")
-    _, val_ds, test_ds, ds_species_list, ds_type_list = create_datasets(
+    _, _, test_ds, ds_species_list, ds_type_list = create_datasets(
         data_path=args.data_path,
         sample_exponent=None,  # No augmentation for generation
         rotation_augment=False,
         shuffle_augment=False,
+        cache_train=False,
+        cache_val=False,
+        cache_test=True,
         max_points=args.max_points,
     )
 
@@ -278,8 +281,6 @@ def generate_samples(args):
 
     # Select which datasets to use
     datasets_to_process = [("test", test_ds)]
-    if args.use_validation:
-        datasets_to_process.append(("validation", val_ds))
 
     total_trees = sum(len(ds) for _, ds in datasets_to_process)
     print(f"Will process {total_trees} trees from {len(datasets_to_process)} split(s)")
