@@ -13,21 +13,16 @@ module load cuda
 source /project/umontana_fire_modeling/anthony.marcozzi/miniforge3/etc/profile.d/conda.sh
 conda activate treeflow
 
-OUTPUT_DIR="generated_samples/transformer-8-256-16384"
-
 python generate_samples.py \
-    --experiment_name transformer-8-256-16384 \
-    --checkpoint epoch_3000.pt \
-    --data_path FOR-species20K \
-    --csv_path FOR-species20K/tree_metadata_dev.csv \
-    --max_points 16384 \
-    --num_samples_per_tree 16 \
-    --cfg_scale "1.0 4" \
+    --experiment_name transformer-8-512-4096 \
+    --checkpoint epoch_5000.pt \
+    --data_path ./data/preprocessed-4096 \
+    --max_points 4096 \
+    --num_samples_per_tree 32 \
+    --cfg_scale "1.0 4.5" \
     --solver_method dopri5 \
-    --resume ${OUTPUT_DIR} \
+    --resume \
     --start_idx 0 \
     --end_idx 200 \
 
-# To resume an interrupted run, use: --resume ${OUTPUT_DIR}
-
-# python postprocess_samples.py ${OUTPUT_DIR}
+# To resume an interrupted run, add: --resume

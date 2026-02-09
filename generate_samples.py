@@ -192,13 +192,24 @@ def generate_samples(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # Load experiment config
+    experiments_dir = Path(args.experiments_dir)
+    experiment_dir = experiments_dir / args.experiment_name
+    if not experiment_dir.exists():
+        raise FileNotFoundError(f"Experiment not found: {experiment_dir}")
+
+    config = load_experiment_config(experiment_dir)
+    species_list = config["species_list"]
+    type_list = config["type_list"]
+
+    print(f"Loaded config from {args.experiment_name}")
+    print(f"  Species: {len(species_list)}, Types: {len(type_list)}")
+
+    # Output always under experiment directory
+    output_dir = experiment_dir / "samples"
+
     # Handle resume mode
     if args.resume:
-        output_dir = Path(args.resume)
-        if not output_dir.exists():
-            raise FileNotFoundError(f"Resume directory not found: {output_dir}")
-
-        # Load generation config from previous run
         gen_config_path = output_dir / "generation_config.json"
         if not gen_config_path.exists():
             raise FileNotFoundError(f"Generation config not found: {gen_config_path}")
@@ -207,7 +218,6 @@ def generate_samples(args):
             gen_config = json.load(f)
 
         # Use settings from previous run
-        args.experiment_name = gen_config["experiment_name"]
         args.checkpoint = gen_config["checkpoint"]
         args.data_path = gen_config["data_path"]
         args.max_points = gen_config["max_points"]
@@ -234,7 +244,6 @@ def generate_samples(args):
             f"  Found {total_existing} existing samples from {len(existing_samples)} trees"
         )
     else:
-        output_dir = Path(args.output_dir)
         existing_samples = {}
 
     # Set random seed
@@ -242,19 +251,6 @@ def generate_samples(args):
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
     rng = np.random.default_rng(args.seed)
-
-    # Load experiment config
-    experiments_dir = Path(args.experiments_dir)
-    experiment_dir = experiments_dir / args.experiment_name
-    if not experiment_dir.exists():
-        raise FileNotFoundError(f"Experiment not found: {experiment_dir}")
-
-    config = load_experiment_config(experiment_dir)
-    species_list = config["species_list"]
-    type_list = config["type_list"]
-
-    print(f"Loaded config from {args.experiment_name}")
-    print(f"  Species: {len(species_list)}, Types: {len(type_list)}")
 
     # Create datasets with same settings as training
     print(f"\nPreparing datasets from {args.data_path}...")
@@ -295,6 +291,7 @@ def generate_samples(args):
         num_layers=config["num_layers"],
         num_heads=config["num_heads"],
         dropout=config.get("dropout", 0.1),
+        num_freq_bands=config.get("num_freq_bands", 12),
         species_list=species_list,
         type_list=type_list,
     )
@@ -499,8 +496,7 @@ def main():
         "--experiment_name",
         type=str,
         default=None,
-        help="Name of trained experiment (e.g., 'transformer-8-256-4096'). "
-        "Required unless --resume is provided.",
+        help="Name of trained experiment (e.g., 'transformer-8-256-4096')",
     )
     parser.add_argument(
         "--checkpoint",
@@ -568,12 +564,6 @@ def main():
         help="ODE solver method",
     )
     parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="generated_samples",
-        help="Output directory for generated samples",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -590,16 +580,15 @@ def main():
     # Resume
     parser.add_argument(
         "--resume",
-        type=str,
-        default=None,
-        help="Path to existing output directory to resume generation",
+        action="store_true",
+        help="Resume generation from existing samples in the experiment directory",
     )
 
     args = parser.parse_args()
 
     # Validate arguments
-    if not args.resume and not args.experiment_name:
-        parser.error("--experiment_name is required when not resuming")
+    if not args.experiment_name:
+        parser.error("--experiment_name is required")
 
     generate_samples(args)
 
