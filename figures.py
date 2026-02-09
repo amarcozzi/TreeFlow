@@ -219,9 +219,9 @@ def create_figure_2(
     noise_points = np.random.randn(n_points, 3)
 
     # ==========================================
-    # Figure 2a: Source Gaussian Distribution
+    # Figure 2b: Source Gaussian Distribution (3D point cloud)
     # ==========================================
-    print("Creating Figure 2a: Source Gaussian distribution...")
+    print("Creating Figure 2b: Source Gaussian distribution (3D)...")
     fig_a = plt.figure(figsize=(5, 5))
     ax_a = fig_a.add_subplot(111, projection="3d")
 
@@ -240,33 +240,33 @@ def create_figure_2(
     ax_a.set_xlim(-lim, lim)
     ax_a.set_ylim(-lim, lim)
     ax_a.set_zlim(-lim, lim)
-    ax_a.set_title(r"$p_0 \sim \mathcal{N}(0, I)$", fontsize=12, pad=10)
+    ax_a.set_title(r"$p_0 \sim \mathcal{N}(0, I)$", fontsize=14, pad=10)
     ax_a.view_init(elev=20, azim=45)
     ax_a.set_box_aspect([1, 1, 1])
 
-    # # Remove axis labels and tick labels
-    # ax_a.set_xticklabels([])
-    # ax_a.set_yticklabels([])
-    # ax_a.set_zticklabels([])
-
-    # White background
+    # Clean axis styling
     ax_a.xaxis.pane.fill = False
     ax_a.yaxis.pane.fill = False
     ax_a.zaxis.pane.fill = False
-    ax_a.xaxis.pane.set_edgecolor("lightgray")
-    ax_a.yaxis.pane.set_edgecolor("lightgray")
-    ax_a.zaxis.pane.set_edgecolor("lightgray")
+    ax_a.xaxis.pane.set_edgecolor('lightgray')
+    ax_a.yaxis.pane.set_edgecolor('lightgray')
+    ax_a.zaxis.pane.set_edgecolor('lightgray')
     ax_a.grid(True, alpha=0.3)
 
+    # White background
+    fig_a.patch.set_facecolor('white')
+
     plt.tight_layout()
-    fig_a.savefig(output_dir / "figure_2_a.pdf", bbox_inches="tight", dpi=800)
+    fig_a.savefig(
+        output_dir / "figure_2_b.png", format="png", bbox_inches="tight", dpi=300
+    )
     plt.close(fig_a)
-    print(f"  Saved: {output_dir}/figure_2_a.pdf")
+    print(f"  Saved: {output_dir}/figure_2_b.png")
 
     # ==========================================
-    # Figure 2b: Target Tree Distribution
+    # Figure 2c: Target Tree Distribution (3D point cloud)
     # ==========================================
-    print("Creating Figure 2b: Target tree distribution...")
+    print("Creating Figure 2c: Target tree distribution (3D)...")
     fig_b = plt.figure(figsize=(5, 5))
     ax_b = fig_b.add_subplot(111, projection="3d")
 
@@ -300,143 +300,439 @@ def create_figure_2(
     ax_b.set_ylim(mid_y - max_range, mid_y + max_range)
     ax_b.set_zlim(mid_z - max_range, mid_z + max_range)
 
-    ax_b.set_title(r"$p_1 \sim p_{\mathrm{data}}$", fontsize=12, pad=10)
+    ax_b.set_title(r"$p_1 \sim p_{\mathrm{data}}$", fontsize=14, pad=10)
     ax_b.view_init(elev=20, azim=45)
 
-    # # Remove axis labels and tick labels
-    # ax_b.set_xticklabels([])
-    # ax_b.set_yticklabels([])
-    # ax_b.set_zticklabels([])
+    # Clean axis styling
+    ax_b.xaxis.pane.fill = False
+    ax_b.yaxis.pane.fill = False
+    ax_b.zaxis.pane.fill = False
+    ax_b.xaxis.pane.set_edgecolor('lightgray')
+    ax_b.yaxis.pane.set_edgecolor('lightgray')
+    ax_b.zaxis.pane.set_edgecolor('lightgray')
+    ax_b.grid(True, alpha=0.3)
 
     ax_b.xaxis.set_major_locator(MaxNLocator(nbins=4))
     ax_b.yaxis.set_major_locator(MaxNLocator(nbins=4))
     ax_b.zaxis.set_major_locator(MaxNLocator(nbins=4))
 
     # White background
-    ax_b.xaxis.pane.fill = False
-    ax_b.yaxis.pane.fill = False
-    ax_b.zaxis.pane.fill = False
-    ax_b.xaxis.pane.set_edgecolor("lightgray")
-    ax_b.yaxis.pane.set_edgecolor("lightgray")
-    ax_b.zaxis.pane.set_edgecolor("lightgray")
-    ax_b.grid(True, alpha=0.3)
+    fig_b.patch.set_facecolor('white')
 
     plt.tight_layout()
-    fig_b.savefig(output_dir / "figure_2_b.pdf", bbox_inches="tight", dpi=800)
+    fig_b.savefig(
+        output_dir / "figure_2_c.png", bbox_inches="tight", dpi=300
+    )
     plt.close(fig_b)
-    print(f"  Saved: {output_dir}/figure_2_b.pdf")
+    print(f"  Saved: {output_dir}/figure_2_c.png")
 
     # ==========================================
-    # Figure 2c: Probability Density Evolution
+    # Figure 2a (was 2c): 2D Probability Space with Flow Matching Paths
+    # Horizontal layout to span full text width
     # ==========================================
-    print("Creating Figure 2c: Probability density evolution...")
+    print("Creating Figure 2a: 2D probability space (horizontal)...")
 
-    fig_c, ax_c = plt.subplots(figsize=(8, 4))
+    # Set seed for reproducible stochastic path
+    np.random.seed(42)
 
-    # Create density evolution heatmap
-    n_time = 200
-    n_space = 300
-    t_vals = np.linspace(0, 1, n_time)
-    z_vals = np.linspace(-4, 4, n_space)
+    # Horizontal aspect ratio for full-width subfigure
+    # With xlim 10 units and ylim 4.5 units, figsize should match this ratio
+    fig_c, ax_c = plt.subplots(figsize=(14, 6.5))
 
-    density = np.zeros((n_space, n_time))
+    # Define grid for probability densities - horizontal layout
+    grid_size = 500
+    x_range = np.linspace(-0.5, 9.5, grid_size)
+    y_range = np.linspace(-0.5, 4.0, grid_size)
+    X, Y = np.meshgrid(x_range, y_range)
 
-    # Source: Standard Gaussian p_0 ~ N(0, I)
-    source = np.exp(-0.5 * z_vals**2) / np.sqrt(2 * np.pi)
+    # Define source and target points for paths (used throughout)
+    x0 = np.array([1.5, 1.8])    # Source point (noise sample)
+    x1 = np.array([7.5, 2.0])    # Target point (tree sample)
 
-    # Target: Bimodal distribution representing vertical tree structure
-    # Lower peak (trunk region), upper peak (canopy region)
-    target = (
-        0.2 * np.exp(-0.5 * ((z_vals + 1.0) / 0.4) ** 2) / 0.4
-        + 0.8 * np.exp(-0.5 * ((z_vals - 1.5) / 0.6) ** 2) / 0.6
-    )
-    target = target / target.sum() * source.sum()
-
-    # Create smooth interpolation
-    for i, t in enumerate(t_vals):
-        alpha = t**0.8
-        blended = (1 - alpha) * source + alpha * target
-        if 0.3 < t < 0.7:
-            blended = gaussian_filter(blended, sigma=1.5)
-        density[:, i] = blended
-
-    density = gaussian_filter(density, sigma=[3, 2])
-
-    # Normalize columns
-    for i in range(n_time):
-        if density[:, i].max() > 0:
-            density[:, i] = density[:, i] / density[:, i].max()
-
-    # Plot heatmap
-    im = ax_c.imshow(
-        density,
-        aspect="auto",
-        origin="lower",
-        extent=[0, 1, z_vals.min(), z_vals.max()],
-        cmap="jet",
-        interpolation="bilinear",
+    # Source distribution: Simple Gaussian on the left side
+    source_center = np.array([1.5, 1.8])
+    source_sigma = 0.55
+    source_density = np.exp(
+        -((X - source_center[0]) ** 2 + (Y - source_center[1]) ** 2)
+        / (2 * source_sigma**2)
     )
 
-    # Source distribution curve (left side)
-    source_scaled = source / source.max() * 0.08
-    ax_c.fill_betweenx(
-        z_vals,
-        -source_scaled,
-        0,
-        alpha=0.8,
-        color="#00cfff",
-        edgecolor="white",
-        linewidth=1.5,
+    # Target distribution: Complex multi-modal distribution on the right side
+    # Many modes with varying shapes to show complexity of learned distribution
+    target_centers = [
+        (7.5, 2.0),   # Main mode
+        (8.2, 2.6),   # Secondary mode
+        (6.9, 2.7),   # Third mode
+        (8.1, 1.4),   # Fourth mode
+        (7.0, 1.3),   # Fifth mode (smaller)
+        (8.5, 2.0),   # Sixth mode (smaller)
+    ]
+    target_sigmas = [
+        (0.40, 0.44),  # Slightly elliptical
+        (0.32, 0.36),
+        (0.34, 0.30),
+        (0.26, 0.30),
+        (0.22, 0.24),
+        (0.24, 0.20),
+    ]
+    target_weights = [0.30, 0.22, 0.18, 0.15, 0.08, 0.07]
+
+    target_density = np.zeros_like(X)
+    for center, sigmas, weight in zip(target_centers, target_sigmas, target_weights):
+        # Elliptical Gaussians for more complex shapes
+        target_density += weight * np.exp(
+            -((X - center[0]) ** 2 / (2 * sigmas[0]**2) +
+              (Y - center[1]) ** 2 / (2 * sigmas[1]**2))
+        )
+
+    # Create subtle background gradient
+    combined_density = 0.25 * source_density + 0.75 * target_density
+    combined_density = gaussian_filter(combined_density, sigma=4)
+
+    # Plot filled contours for subtle background
+    ax_c.contourf(
+        X, Y, combined_density,
+        levels=20,
+        cmap="Reds",
+        alpha=0.12,
     )
-    ax_c.plot(-source_scaled, z_vals, color="white", linewidth=1.5)
 
-    # Target distribution curve (right side)
-    target_scaled = target / target.max() * 0.08
-    ax_c.fill_betweenx(
-        z_vals,
-        1,
-        1 + target_scaled,
-        alpha=0.8,
-        color="#e8e855",
-        edgecolor="white",
-        linewidth=1.5,
+    # ==========================================
+    # Velocity field: Shows complex learned transport
+    # Dense field with smooth structured variation
+    # ==========================================
+    # Denser grid for more complexity
+    n_arrows_x = 30
+    n_arrows_y = 15
+    arrow_x = np.linspace(0.2, 8.8, n_arrows_x)
+    arrow_y = np.linspace(0.15, 3.35, n_arrows_y)
+    Arrow_X, Arrow_Y = np.meshgrid(arrow_x, arrow_y)
+
+    # Create velocity components with smooth, structured flow
+    U = np.zeros_like(Arrow_X)
+    V = np.zeros_like(Arrow_Y)
+
+    for i in range(Arrow_X.shape[0]):
+        for j in range(Arrow_X.shape[1]):
+            px, py = Arrow_X[i, j], Arrow_Y[i, j]
+
+            # Distance from source and target centers
+            dist_to_source = np.sqrt((px - x0[0])**2 + (py - x0[1])**2)
+            dist_to_target = np.sqrt((px - x1[0])**2 + (py - x1[1])**2)
+
+            # Skip arrows inside distribution cores
+            if dist_to_source < 0.85 or dist_to_target < 0.95:
+                U[i, j] = 0
+                V[i, j] = 0
+                continue
+
+            # Smooth blending based on position along transport
+            t = (px - x0[0]) / (x1[0] - x0[0])
+            t = np.clip(t, 0, 1)
+
+            # Source influence: radial outward flow
+            radial_from_source = np.array([px - x0[0], py - x0[1]])
+            radial_from_source = radial_from_source / (np.linalg.norm(radial_from_source) + 1e-6)
+
+            # Target influence: weighted attraction to all modes
+            target_pull = np.array([0.0, 0.0])
+            total_weight = 0
+            for k, (tc, tw) in enumerate(zip(target_centers, target_weights)):
+                dist_to_mode = np.sqrt((px - tc[0])**2 + (py - tc[1])**2)
+                weight = tw / (dist_to_mode + 0.5)
+                toward_mode = np.array([tc[0] - px, tc[1] - py])
+                toward_mode = toward_mode / (np.linalg.norm(toward_mode) + 1e-6)
+                target_pull += weight * toward_mode
+                total_weight += weight
+            target_pull = target_pull / (total_weight + 1e-6)
+
+            # Smooth interpolation with smoothstep
+            blend = 3 * t**2 - 2 * t**3
+            local_dir = (1 - blend) * radial_from_source + blend * target_pull
+            local_dir = local_dir / (np.linalg.norm(local_dir) + 1e-6)
+
+            # Add smooth structured variation (gentle waves)
+            # This adds complexity without chaos
+            wave_angle = 0.25 * np.sin(0.8 * px + 0.3 * py) * np.cos(0.5 * py)
+            cos_w, sin_w = np.cos(wave_angle), np.sin(wave_angle)
+            local_dir = np.array([
+                local_dir[0] * cos_w - local_dir[1] * sin_w,
+                local_dir[0] * sin_w + local_dir[1] * cos_w
+            ])
+
+            # Magnitude: fade at edges and near distribution centers
+            edge_fade_x = min(px / 0.8, (9.0 - px) / 0.8, 1.0)
+            edge_fade_y = min(py / 0.5, (3.5 - py) / 0.5, 1.0)
+            source_fade = min(1.0, (dist_to_source - 0.85) / 0.7)
+            target_fade = min(1.0, (dist_to_target - 0.95) / 0.8)
+            magnitude = 0.15 * edge_fade_x * edge_fade_y * source_fade * target_fade
+
+            U[i, j] = local_dir[0] * magnitude
+            V[i, j] = local_dir[1] * magnitude
+
+    # Plot velocity field
+    ax_c.quiver(
+        Arrow_X, Arrow_Y, U, V,
+        color="#78909C",  # Blue-gray
+        alpha=0.5,
+        scale=4,
+        width=0.0025,
+        headwidth=3.5,
+        headlength=4,
+        headaxislength=3.5,
+        zorder=1,
     )
-    ax_c.plot(1 + target_scaled, z_vals, color="white", linewidth=1.5)
 
-    # Axis limits and labels
-    ax_c.set_xlim(-0.12, 1.12)
-    ax_c.set_ylim(z_vals.min(), z_vals.max())
+    # Plot source distribution contours (blue)
+    source_levels = np.linspace(0.12, 0.92, 7) * source_density.max()
+    cs_source = ax_c.contour(
+        X, Y, source_density,
+        levels=source_levels,
+        colors="#1565C0",
+        linewidths=1.6,
+        alpha=0.9,
+    )
 
-    # Labels consistent with flow matching notation
-    ax_c.set_xlabel("Time (t)", fontsize=11)
-    ax_c.text(-0.06, z_vals.min() - 0.8, r"$x_0$", fontsize=12, ha="center", va="top")
-    ax_c.text(1.06, z_vals.min() - 0.8, r"$x_1$", fontsize=12, ha="center", va="top")
+    # Plot target distribution contours (red/dark red)
+    target_levels = np.linspace(0.08, 0.92, 8) * target_density.max()
+    cs_target = ax_c.contour(
+        X, Y, target_density,
+        levels=target_levels,
+        colors="#C62828",
+        linewidths=1.6,
+        alpha=0.9,
+    )
 
-    # Add velocity field notation
+    # ==========================================
+    # Training path: Linear interpolation x_t = (1-t)*x_0 + t*x_1
+    # ==========================================
+    t_train = np.linspace(0, 1, 100)
+    train_path = np.array([(1 - t) * x0 + t * x1 for t in t_train])
+
+    ax_c.plot(
+        train_path[:, 0], train_path[:, 1],
+        color="#00ACC1",
+        linewidth=3.5,
+        linestyle="-",
+        label=r"Training: $x_t = (1-t)x_0 + tx_1$",
+        zorder=5,
+    )
+
+    # Add arrow showing direction on training path
+    arrow_idx = int(len(train_path) * 0.55)
+    ax_c.annotate(
+        "",
+        xy=(train_path[arrow_idx + 3, 0], train_path[arrow_idx + 3, 1]),
+        xytext=(train_path[arrow_idx, 0], train_path[arrow_idx, 1]),
+        arrowprops=dict(arrowstyle="-|>", color="#00ACC1", lw=3, mutation_scale=20),
+        zorder=6,
+    )
+
+    # ==========================================
+    # Inference path: ODE integration following the velocity field
+    # Shows how inference actually follows the learned flow
+    # ==========================================
+
+    def compute_velocity(px, py):
+        """Compute velocity at a point, following the flow field logic."""
+        # Smooth blending based on position along transport
+        t = (px - x0[0]) / (x1[0] - x0[0])
+        t = np.clip(t, 0, 1)
+
+        # Source influence: radial outward flow (or toward target if at source)
+        radial_from_source = np.array([px - x0[0], py - x0[1]])
+        norm_source = np.linalg.norm(radial_from_source)
+        if norm_source > 0.1:
+            radial_from_source = radial_from_source / norm_source
+        else:
+            # At or very near source: use direction toward target
+            toward_target = np.array([x1[0] - px, x1[1] - py])
+            radial_from_source = toward_target / np.linalg.norm(toward_target)
+
+        # Target influence: weighted attraction to all modes
+        target_pull = np.array([0.0, 0.0])
+        total_weight = 0
+        for k, (tc, tw) in enumerate(zip(target_centers, target_weights)):
+            dist_to_mode = np.sqrt((px - tc[0])**2 + (py - tc[1])**2)
+            weight = tw / (dist_to_mode + 0.5)
+            toward_mode = np.array([tc[0] - px, tc[1] - py])
+            norm_mode = np.linalg.norm(toward_mode)
+            if norm_mode > 1e-6:
+                toward_mode = toward_mode / norm_mode
+            target_pull += weight * toward_mode
+            total_weight += weight
+        if total_weight > 1e-6:
+            target_pull = target_pull / total_weight
+
+        # Smooth interpolation with smoothstep
+        blend = 3 * t**2 - 2 * t**3
+        local_dir = (1 - blend) * radial_from_source + blend * target_pull
+        norm_dir = np.linalg.norm(local_dir)
+        if norm_dir > 1e-6:
+            local_dir = local_dir / norm_dir
+
+        # Add smooth structured variation (gentle waves) - same as quiver field
+        wave_angle = 0.25 * np.sin(0.8 * px + 0.3 * py) * np.cos(0.5 * py)
+        cos_w, sin_w = np.cos(wave_angle), np.sin(wave_angle)
+        local_dir = np.array([
+            local_dir[0] * cos_w - local_dir[1] * sin_w,
+            local_dir[0] * sin_w + local_dir[1] * cos_w
+        ])
+
+        return local_dir
+
+    # Integrate ODE using Euler method with the velocity field
+    n_steps = 7  # One fewer step, we'll add the final point manually
+    infer_path = [x0.copy()]
+    current_pos = x0.copy()
+
+    # Step size to follow the flow
+    total_distance = np.linalg.norm(x1 - x0)
+    dt = total_distance / 8 * 1.0
+
+    for i in range(n_steps):
+        # Get velocity at current position
+        vel = compute_velocity(current_pos[0], current_pos[1])
+
+        # Euler step
+        current_pos = current_pos + vel * dt
+        infer_path.append(current_pos.copy())
+
+    # Add final point close to target (but not exactly on it)
+    final_point = x1 + np.array([-0.12, 0.08])  # Slightly offset from target
+    infer_path.append(final_point)
+
+    infer_path = np.array(infer_path)
+    # Ensure start point is exact
+    infer_path[0] = x0
+
+    # Plot path segments connecting the steps
+    ax_c.plot(
+        infer_path[:, 0], infer_path[:, 1],
+        color="#FF8F00",
+        linewidth=2.5,
+        linestyle="--",
+        label="Inference: ODE integration",
+        zorder=5,
+    )
+
+    # Plot intermediate step markers (exclude start and end)
+    ax_c.scatter(
+        infer_path[1:-1, 0], infer_path[1:-1, 1],
+        color="#FF8F00",
+        s=60,
+        zorder=7,
+        edgecolors="white",
+        linewidths=1.5,
+        marker="o",
+    )
+
+    # Plot endpoint marker (larger, to show final ODE result)
+    ax_c.scatter(
+        [infer_path[-1, 0]], [infer_path[-1, 1]],
+        color="#FF8F00",
+        s=180,
+        zorder=9,
+        edgecolors="white",
+        linewidths=2.5,
+        marker="o",
+    )
+
+    # ==========================================
+    # Mark source and target points
+    # ==========================================
+    # Source point (x_0)
+    ax_c.scatter(
+        [x0[0]], [x0[1]],
+        color="#1565C0",
+        s=220,
+        marker="o",
+        zorder=10,
+        edgecolors="white",
+        linewidths=2.5,
+    )
+
+    # Target point (x_1)
+    ax_c.scatter(
+        [x1[0]], [x1[1]],
+        color="#C62828",
+        s=220,
+        marker="o",
+        zorder=10,
+        edgecolors="white",
+        linewidths=2.5,
+    )
+
+    # ==========================================
+    # Labels and annotations
+    # ==========================================
+    # Label for source distribution
     ax_c.text(
-        0.5,
-        z_vals.max() + 0.3,
-        r"$v_\theta(x_t, t, c)$",
-        fontsize=11,
+        1.5, 3.2,
+        r"$X_0$ (Source)" + "\n" + r"$\mathcal{N}(0, I)$",
+        fontsize=12,
+        color="#1565C0",
+        fontweight="bold",
         ha="center",
         va="bottom",
-        style="italic",
     )
 
-    # Remove y-axis, clean styling
-    ax_c.spines["top"].set_visible(False)
-    ax_c.spines["right"].set_visible(False)
-    ax_c.spines["left"].set_visible(False)
-    ax_c.tick_params(left=False, labelleft=False)
+    # Label for target distribution
+    ax_c.text(
+        7.5, 3.2,
+        r"$X_1$ (Target)" + "\n" + r"$p_{\mathrm{data}}$",
+        fontsize=12,
+        color="#C62828",
+        fontweight="bold",
+        ha="center",
+        va="bottom",
+    )
+
+    # Axis labels
+    ax_c.set_xlabel("X-axis", fontsize=12)
+    ax_c.set_ylabel("Y-axis", fontsize=12)
+
+    # Set axis limits for horizontal layout
+    ax_c.set_xlim(-0.5, 9.5)
+    ax_c.set_ylim(-0.5, 4.0)
+
+    # Equal aspect ratio so circles look like circles
+    ax_c.set_aspect("equal")
+
+    # Add legend with proxy artist for velocity field
+    from matplotlib.lines import Line2D
+    velocity_proxy = Line2D(
+        [0], [0],
+        color="#78909C",
+        marker=r'$\rightarrow$',
+        markersize=15,
+        linestyle='None',
+        alpha=0.7,
+        label=r"Learned velocity field $v_\theta$",
+    )
+    handles, labels = ax_c.get_legend_handles_labels()
+    handles.append(velocity_proxy)
+    labels.append(velocity_proxy.get_label())
+
+    legend = ax_c.legend(
+        handles, labels,
+        loc="lower center",
+        fontsize=11,
+        framealpha=0.95,
+        edgecolor="gray",
+        ncol=3,
+    )
 
     # White background
     fig_c.patch.set_facecolor("white")
     ax_c.set_facecolor("white")
 
     plt.tight_layout()
-    fig_c.savefig(output_dir / "figure_2_c.pdf", bbox_inches="tight", dpi=800)
+    fig_c.savefig(
+        output_dir / "figure_2_a.png", format="png", bbox_inches="tight", dpi=300
+    )
     plt.close(fig_c)
-    print(f"  Saved: {output_dir}/figure_2_c.pdf")
+    print(f"  Saved: {output_dir}/figure_2_a.png")
 
     print(f"\nAll figures saved to {output_dir}/")
 
