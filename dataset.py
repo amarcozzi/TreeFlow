@@ -390,13 +390,11 @@ def visualize_augmentation(dataset, idx, num_samples=6, denormalize=True):
 
 
 if __name__ == "__main__":
-    # Example usage for debugging
-    data_path = "./data/preprocessed-full"
-
     try:
-        sample_exp = 0.5
+        sample_exp = 0.3
         train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
-            data_path=data_path,
+            data_path="./data/preprocessed-4096",
+            max_points=4096,
             sample_exponent=sample_exp,
             cache_train=False,
             cache_val=False,
@@ -411,7 +409,7 @@ if __name__ == "__main__":
         visualize_augmentation(val_ds, idx, denormalize=False)
 
         # Histogram of point counts to show impact of sample_exponent
-        n_iterations = 100
+        n_iterations = 1000
         print(
             f"\nSampling same tree {n_iterations} times to show point count distribution..."
         )
