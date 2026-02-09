@@ -7,6 +7,7 @@ import laspy
 import numpy as np
 import pandas as pd
 import argparse
+import zarr
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from collections import defaultdict
@@ -695,14 +696,14 @@ def load_generated_samples(samples_dir: Path) -> tuple[pd.DataFrame, dict]:
 
     # Determine point cloud format and directory
     laz_dir = samples_dir / "laz"
-    npy_dir = samples_dir / "npy"
+    zarr_dir = samples_dir / "zarr"
 
     if laz_dir.exists():
         pc_dir = laz_dir
         pc_format = "laz"
-    elif npy_dir.exists():
-        pc_dir = npy_dir
-        pc_format = "npy"
+    elif zarr_dir.exists():
+        pc_dir = zarr_dir
+        pc_format = "zarr"
     else:
         raise FileNotFoundError(f"No point cloud directory found in {samples_dir}")
 
@@ -725,10 +726,10 @@ def load_generated_samples(samples_dir: Path) -> tuple[pd.DataFrame, dict]:
                 point_clouds[sample_id] = points
             else:
                 missing_count += 1
-        else:  # npy
-            pc_path = pc_dir / f"{sample_id}.npy"
+        else:  # zarr
+            pc_path = pc_dir / f"{sample_id}.zarr"
             if pc_path.exists():
-                point_clouds[sample_id] = np.load(pc_path).astype(np.float32)
+                point_clouds[sample_id] = zarr.load(pc_path).astype(np.float32)
             else:
                 missing_count += 1
 
@@ -737,39 +738,16 @@ def load_generated_samples(samples_dir: Path) -> tuple[pd.DataFrame, dict]:
     return metadata_df, point_clouds
 
 
-def normalize_point_cloud(points: np.ndarray, height: float) -> np.ndarray:
-    """
-    Normalize point cloud using the same scheme as preprocessing.
-
-    Normalization steps:
-    1. Center at mean (Center of Mass)
-    2. Scale by height (preserves aspect ratio)
-    3. Scale by 2.0 (matches variance of Gaussian noise)
-
-    Args:
-        points: (N, 3) point cloud in meters
-        height: Tree height in meters
-
-    Returns:
-        Normalized point cloud (N, 3)
-    """
-    centroid = points.mean(axis=0)
-    points_centered = points - centroid
-    points_normalized = points_centered / height
-    points_final = points_normalized * 2.0
-    return points_final.astype(np.float32)
-
-
 def load_real_samples(
     data_path: Path,
     csv_path: Path,
     source_tree_ids: list[str],
-    preprocessed_version: str = "raw",
 ) -> tuple[pd.DataFrame, dict]:
     """
     Load real tree point clouds for the specified source tree IDs.
 
-    Point clouds are kept in normalized form (as stored in .npy files).
+    Only loads samples from the test split to ensure evaluation is on held-out data.
+    Point clouds are kept in normalized form (as stored in .zarr files).
 
     Normalization: points_norm = (points_centered / height) * 2.0
 
@@ -777,10 +755,9 @@ def load_real_samples(
         data_path: Path to FOR-species20K directory
         csv_path: Path to tree_metadata_dev.csv
         source_tree_ids: List of tree IDs to load (from generated samples metadata)
-        preprocessed_version: Which preprocessing version to use (raw, voxel_0.1m, etc.)
 
     Returns:
-        metadata_df: DataFrame with real tree metadata (filtered to requested IDs)
+        metadata_df: DataFrame with real tree metadata (filtered to test split and requested IDs)
         point_clouds: Dict mapping file_id -> np.ndarray of shape (N, 3) normalized
     """
     data_path = Path(data_path)
@@ -789,21 +766,39 @@ def load_real_samples(
     # Load full metadata
     full_df = pd.read_csv(csv_path)
 
+    # Verify split column exists
+    if "split" not in full_df.columns:
+        raise ValueError(
+            f"CSV missing 'split' column. Run preprocess_laz.py to assign splits."
+        )
+
     # Extract file_id from filename (e.g., "/train/00070.las" -> "00070")
     full_df["file_id"] = full_df["filename"].apply(lambda x: Path(x).stem)
 
-    # Filter to requested IDs
+    # Filter to test split only
+    test_df = full_df[full_df["split"] == "test"].copy()
+    print(f"Filtered to test split: {len(test_df)}/{len(full_df)} samples")
+
+    # Filter to requested IDs (within test split)
     source_tree_ids_set = set(source_tree_ids)
-    metadata_df = full_df[full_df["file_id"].isin(source_tree_ids_set)].copy()
+    metadata_df = test_df[test_df["file_id"].isin(source_tree_ids_set)].copy()
+
+    # Warn if some requested IDs are not in test split
+    test_file_ids = set(test_df["file_id"])
+    not_in_test = source_tree_ids_set - test_file_ids
+    if not_in_test:
+        print(
+            f"  Warning: {len(not_in_test)} requested trees are not in test split (skipped)"
+        )
 
     print(
-        f"Found {len(metadata_df)}/{len(source_tree_ids_set)} requested real trees in metadata"
+        f"Found {len(metadata_df)}/{len(source_tree_ids_set)} requested real trees in test split"
     )
 
     # Build file paths
-    npy_dir = data_path / "npy" / preprocessed_version / "dev"
+    zarr_dir = data_path / "zarr" / "dev"
     metadata_df["file_path"] = metadata_df["file_id"].apply(
-        lambda x: npy_dir / f"{x}.npy"
+        lambda x: zarr_dir / f"{x}.zarr"
     )
 
     # Load point clouds (keep normalized)
@@ -817,9 +812,9 @@ def load_real_samples(
         file_path = row["file_path"]
 
         if file_path.exists():
-            # Load normalized points directly from .npy
+            # Load normalized points directly from .zarr
             # These are already normalized: points_norm = (points_centered / height) * 2.0
-            points_norm = np.load(file_path).astype(np.float32)
+            points_norm = zarr.load(file_path).astype(np.float32)
             point_clouds[file_id] = points_norm
         else:
             missing_count += 1
@@ -841,9 +836,10 @@ def build_evaluation_pairs(
     Build list of (real, generated) pairs for evaluation.
 
     Each generated sample is paired with its source real tree.
-    Generated point clouds are normalized to match real point clouds.
+    Both real and generated point clouds are already in normalized coordinates
+    (from preprocessing and model output respectively).
 
-    Normalization: points_norm = (points_centered / height) * 2.0
+    Normalization scheme: points_norm = (points_centered / height) * 2.0
 
     Returns:
         List of dicts with keys:
@@ -871,16 +867,15 @@ def build_evaluation_pairs(
             skipped += 1
             continue
 
-        # Get generated points (in meters) and normalize
-        gen_points_meters = gen_point_clouds[sample_id]
-        gen_points_norm = normalize_point_cloud(gen_points_meters, height_m)
+        # Get generated points (already in normalized coordinates from model output)
+        gen_points_norm = gen_point_clouds[sample_id]
 
         pairs.append(
             {
                 "source_tree_id": source_tree_id,
                 "sample_id": sample_id,
                 "real_points": real_point_clouds[source_tree_id],  # Already normalized
-                "gen_points": gen_points_norm,  # Now normalized
+                "gen_points": gen_points_norm,  # Already normalized from model
                 "species": row["species"],
                 "height_m": height_m,
                 "scan_type": row["scan_type"],
@@ -986,12 +981,6 @@ def main():
         default="FOR-species20K/tree_metadata_dev.csv",
         help="Path to real tree metadata CSV",
     )
-    parser.add_argument(
-        "--preprocessed_version",
-        type=str,
-        default="raw",
-        help="Preprocessing version for real trees (raw, voxel_0.1m, voxel_0.2m)",
-    )
 
     # Evaluation parameters
     parser.add_argument(
@@ -1068,7 +1057,6 @@ def main():
         data_path=data_path,
         csv_path=csv_path,
         source_tree_ids=source_tree_ids,
-        preprocessed_version=args.preprocessed_version,
     )
 
     # Build evaluation pairs

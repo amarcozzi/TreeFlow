@@ -1,7 +1,5 @@
 """
 treeflow/train.py
-
-Train a Flow Matching model on tree point clouds from the FOR-species20K dataset.
 """
 
 import matplotlib
@@ -20,11 +18,34 @@ import argparse
 import json
 from datetime import datetime
 import random
+import logging
+from logging import NullHandler
+
+from accelerate import Accelerator
 
 from models import get_model
-from dataset import create_datasets, collate_fn_batched
+from dataset import create_datasets, make_collate_fn
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+
+def discover_checkpoints(checkpoint_dir):
+    """Glob for epoch_*.pt files and return sorted list of epoch numbers."""
+    checkpoint_dir = Path(checkpoint_dir)
+    files = sorted(checkpoint_dir.glob("epoch_*.pt"))
+    epochs = []
+    for f in files:
+        try:
+            epoch_num = int(f.stem.replace("epoch_", ""))
+            epochs.append(epoch_num)
+        except ValueError:
+            continue
+    return sorted(epochs)
 
 
 def save_config(args, output_dir, species_list, type_list):
@@ -47,14 +68,13 @@ def compute_loss(
     dtype,
     h_norm,
     flow_path,
-    device,
-    use_amp=False,
     p_uncond=0.1,
 ):
     """
     Compute loss with Classifier-Free Guidance (CFG) dropout.
     """
     batch_size = x_1.shape[0]
+    device = x_1.device
 
     # 1. Generate Mask for CFG (% chance to drop conditions)
     if p_uncond > 0:
@@ -64,24 +84,21 @@ def compute_loss(
 
     # 2. Flow Matching Setup
     x_0 = torch.randn_like(x_1)
+    path_sample = flow_path.sample(t=t, x_0=x_0, x_1=x_1)
+    x_t = path_sample.x_t
+    u_t = path_sample.dx_t
 
-    # Use mixed precision if enabled
-    with torch.amp.autocast("cuda", enabled=use_amp):
-        path_sample = flow_path.sample(t=t, x_0=x_0, x_1=x_1)
-        x_t = path_sample.x_t
-        u_t = path_sample.dx_t
+    # 3. Forward Pass with Mask
+    pred_u_t = model(
+        x=x_t,
+        t=t,
+        species_idx=species,
+        type_idx=dtype,
+        height_norm=h_norm,
+        drop_mask=drop_mask,
+    )
 
-        # 3. Forward Pass with Mask
-        pred_u_t = model(
-            x=x_t,
-            t=t,
-            species_idx=species,
-            type_idx=dtype,
-            height_norm=h_norm,
-            drop_mask=drop_mask,
-        )
-
-        loss = nn.functional.mse_loss(pred_u_t, u_t)
+    loss = nn.functional.mse_loss(pred_u_t, u_t)
 
     return loss
 
@@ -90,30 +107,33 @@ def train_epoch(
     model,
     train_loader,
     optimizer,
+    accelerator,
     flow_path,
-    device,
     cfg_dropout_prob=0.1,
-    scaler=None,
     grad_clip_norm=1.0,
 ):
     model.train()
     total_loss = 0.0
     num_samples = 0
-    use_amp = scaler is not None
 
-    pbar = tqdm(total=len(train_loader), desc="Training", dynamic_ncols=True)
+    pbar = tqdm(
+        total=len(train_loader),
+        desc="Training",
+        dynamic_ncols=True,
+        disable=not accelerator.is_main_process,
+    )
 
     for batch in train_loader:
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
-        # Move data to device
-        points = batch["points"].to(device)  # (B, N, 3)
-        species = batch["species_idx"].to(device)  # (B,)
-        dtype = batch["type_idx"].to(device)  # (B,)
-        h_norm = batch["height_norm"].to(device)  # (B,)
+        # Data is already on the correct device via accelerator.prepare()
+        points = batch["points"]  # (B, N, 3)
+        species = batch["species_idx"]  # (B,)
+        dtype = batch["type_idx"]  # (B,)
+        h_norm = batch["height_norm"]  # (B,)
 
         # Sample random timesteps
-        t = torch.rand(points.shape[0], device=device)
+        t = torch.rand(points.shape[0], device=accelerator.device)
 
         loss = compute_loss(
             model,
@@ -123,25 +143,18 @@ def train_epoch(
             dtype,
             h_norm,
             flow_path,
-            device,
-            use_amp=use_amp,
             p_uncond=cfg_dropout_prob,
         )
 
+        # Check for NaN/Inf but don't skip - all ranks must call backward together
         if torch.isnan(loss) or torch.isinf(loss):
-            print("Warning: NaN/Inf loss detected, skipping batch")
-            continue
+            logger.warning("NaN/Inf loss detected, using zero loss for this batch")
+            loss = torch.tensor(0.0, device=accelerator.device, requires_grad=True)
 
-        if scaler is not None:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
-            optimizer.step()
+        accelerator.backward(loss)
+        if accelerator.sync_gradients:
+            accelerator.clip_grad_norm_(model.parameters(), grad_clip_norm)
+        optimizer.step()
 
         total_loss += loss.item() * points.shape[0]
         num_samples += points.shape[0]
@@ -155,13 +168,14 @@ def train_epoch(
 
 @torch.no_grad()
 def sample_conditional(
-    model, num_points, device, target_height, species_idx, type_idx, cfg_scale=1.0
+    model, num_points, accelerator, target_height, species_idx, type_idx, cfg_scale=1.0
 ):
     """
     Generate a tree with specific conditions using CFG.
     Reconstructs from Unit Cube -> Meters.
     """
     model.eval()
+    device = accelerator.device
 
     # Prepare single-item batch
     x_init = torch.randn(1, num_points, 3, device=device)
@@ -202,14 +216,16 @@ def sample_conditional(
 
 
 def visualize_validation_comparisons(
-    model, val_ds, species_list, type_list, epoch, save_dir, device, num_samples=3
+    model, val_ds, species_list, type_list, epoch, save_dir, accelerator, num_samples=3
 ):
     """
     Samples N trees from the validation set.
     Generates a synthetic counterpart for each.
     Plots Real (Left) vs Generated (Right) side-by-side.
+    Only runs on main process.
     """
-    print(f"Generating {num_samples} validation comparisons...")
+    model.eval()
+    logger.info(f"Generating {num_samples} validation comparisons...")
 
     # 1. Pick Random Indices
     indices = random.sample(range(len(val_ds)), num_samples)
@@ -237,7 +253,7 @@ def visualize_validation_comparisons(
         gen_points_meters = sample_conditional(
             model,
             num_points=num_points,
-            device=device,
+            accelerator=accelerator,
             target_height=h_raw,
             species_idx=s_idx,
             type_idx=t_idx,
@@ -272,7 +288,6 @@ def visualize_validation_comparisons(
         ax1.set_xlim(-limit, limit)
         ax1.set_ylim(-limit, limit)
         ax1.set_zlim(z_min, z_max)
-        # ax1.axis("off")
 
         # --- Plot Generated ---
         ax2 = fig.add_subplot(1, 2, 2, projection="3d")
@@ -288,15 +303,23 @@ def visualize_validation_comparisons(
         ax2.set_xlim(-limit, limit)
         ax2.set_ylim(-limit, limit)
         ax2.set_zlim(z_min, z_max)
-        # ax2.axis("off")
 
-        # plt.tight_layout()
         plt.savefig(save_dir / f"ep{epoch}_val_{idx}_{s_name}.png", dpi=300)
         plt.close()
 
 
 def train(args):
-    # Setup Directories
+    # Initialize Accelerator
+    # dynamo_backend="no" prevents NCCL desync issues during visualization
+    accelerator = Accelerator(mixed_precision=args.mixed_precision, dynamo_backend="no")
+
+    # Silence logging on non-main processes
+    if not accelerator.is_main_process:
+        logger.handlers.clear()
+        logger.addHandler(NullHandler())
+        logger.propagate = False
+
+    # Setup Directories (only on main process)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_name = args.experiment_name if args.experiment_name else f"dit_{timestamp}"
     output_dir = Path(args.output_dir) / exp_name
@@ -306,49 +329,91 @@ def train(args):
         "viz": output_dir / "visualizations",
         "logs": output_dir / "logs",
     }
-    for d in dirs.values():
-        d.mkdir(parents=True, exist_ok=True)
 
-    # 1. Create Datasets (CSV Metadata Split)
-    print(f"\nPreparing datasets from {args.csv_path}...")
+    if accelerator.is_main_process:
+        for d in dirs.values():
+            d.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Accelerate found {accelerator.num_processes} GPUs to use.")
+        logger.info(f"Output directory: {output_dir.resolve()}")
+
+    # Resolve --resume to --resume_from by discovering latest checkpoint
+    if args.resume and not args.resume_from:
+        epochs = discover_checkpoints(dirs["ckpt"])
+        if epochs:
+            args.resume_from = f"epoch_{epochs[-1]}.pt"
+            if accelerator.is_main_process:
+                logger.info(f"Auto-discovered latest checkpoint: {args.resume_from}")
+        else:
+            if accelerator.is_main_process:
+                logger.info("No checkpoints found, starting from scratch")
+
+    accelerator.wait_for_everyone()
+
+    # Synchronize seed across all ranks (rank 0's seed is broadcast to others)
+    if accelerator.num_processes > 1:
+        seed_tensor = torch.tensor(
+            [args.seed], dtype=torch.long, device=accelerator.device
+        )
+        torch.distributed.broadcast(seed_tensor, src=0)
+        args.seed = seed_tensor.item()
+
+    if accelerator.is_main_process:
+        logger.info(f"Random Seed: {args.seed}")
+
+    # Set seeds for reproducibility (now same on all ranks)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    random.seed(args.seed)
+
+    # 1. Create Datasets
+    # Note: sample_exponent is applied to val/test for visualization, not train
+    # Train sampling is handled by make_collate_fn below
+    logger.info(f"Preparing datasets from {args.data_path}...")
     train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
         data_path=args.data_path,
-        csv_path=args.csv_path,
-        preprocessed_version=args.preprocessed_version,
         sample_exponent=args.sample_exponent,
+        cache_train=not args.no_cache,
+        cache_val=not args.no_cache,
+        cache_test=not args.no_cache,
         rotation_augment=args.rotation_augment,
         shuffle_augment=args.shuffle_augment,
         max_points=args.max_points,
     )
 
-    save_config(args, output_dir, species_list, type_list)
+    if accelerator.is_main_process:
+        save_config(args, output_dir, species_list, type_list)
 
     # 2. Dataloaders
+    collate_fn = make_collate_fn(sample_exponent=args.sample_exponent)
+    if accelerator.is_main_process:
+        if args.sample_exponent is not None:
+            logger.info(f"Batch-level sampling: exponent={args.sample_exponent}")
+        else:
+            logger.info("Batch-level sampling: disabled (using min points in batch)")
+
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        collate_fn=collate_fn_batched,
+        collate_fn=collate_fn,
         pin_memory=True,
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=4 if args.num_workers > 0 else None,
+        drop_last=True,
     )
 
     # 3. Model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    logger.info(
+        f"Using device: {accelerator.device}. Process index: {accelerator.process_index}"
+    )
 
     args.species_list = species_list
     args.type_list = type_list
-    model = get_model(args, device)
+    # Don't pass device - model will be moved by accelerator.prepare()
+    model = get_model(args, device=None)
 
-    print(f"Model Parameters: {model.count_parameters()/1e6:.2f}M")
-
-    if args.compile:
-        try:
-            print("Compiling model with torch.compile...")
-            model = torch.compile(model)
-        except Exception as e:
-            print(f"Compilation failed (safe to ignore): {e}")
+    logger.info(f"Model Parameters: {model.count_parameters()/1e6:.2f}M")
 
     optimizer = optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
@@ -376,7 +441,7 @@ def train(args):
     else:
         scheduler = None
 
-    print(
+    logger.info(
         f"LR Scheduler: {args.lr_scheduler}"
         + (
             f" (warmup: {args.warmup_epochs} epochs)"
@@ -385,123 +450,157 @@ def train(args):
         )
     )
 
-    scaler = torch.amp.GradScaler("cuda") if args.use_amp else None
     flow_path = CondOTProbPath()
 
+    # Prepare model, optimizer, and dataloader with accelerator
+    model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
+
     start_epoch = 1
-    if args.resume_from:
-        checkpoint_dir = output_dir / "checkpoints" / args.resume_from
-        print(f"Loading checkpoint from {checkpoint_dir}")
-        checkpoint = torch.load(checkpoint_dir, map_location=device)
+    if args.pretrained_weights:
+        # Load only model weights (for curriculum learning / fine-tuning)
+        checkpoint_path = Path(args.pretrained_weights)
+        logger.info(f"Loading pretrained weights from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
         if isinstance(checkpoint, dict) and "model" in checkpoint:
-            model.load_state_dict(checkpoint["model"])
+            state_dict = checkpoint["model"]
+            new_state_dict = {
+                key.replace("_orig_mod.", ""): value
+                for key, value in state_dict.items()
+            }
+            accelerator.unwrap_model(model).load_state_dict(new_state_dict)
+        else:
+            accelerator.unwrap_model(model).load_state_dict(checkpoint)
+
+        logger.info("Loaded pretrained weights (optimizer/scheduler/epoch reset)")
+
+    elif args.resume_from:
+        # Full resume: model, optimizer, scheduler, epoch
+        checkpoint_path = output_dir / "checkpoints" / args.resume_from
+        logger.info(f"Loading checkpoint from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+        if isinstance(checkpoint, dict) and "model" in checkpoint:
+            # Handle compiled model state dict
+            state_dict = checkpoint["model"]
+            new_state_dict = {
+                key.replace("_orig_mod.", ""): value
+                for key, value in state_dict.items()
+            }
+            accelerator.unwrap_model(model).load_state_dict(new_state_dict)
             if "optimizer" in checkpoint:
                 optimizer.load_state_dict(checkpoint["optimizer"])
             if "scheduler" in checkpoint and scheduler is not None:
                 scheduler.load_state_dict(checkpoint["scheduler"])
-            if "scaler" in checkpoint and scaler is not None:
-                scaler.load_state_dict(checkpoint["scaler"])
-            else:
-                if scaler is not None:
-                    print("Warning: No scaler state in checkpoint, using fresh GradScaler")
             if "epoch" in checkpoint:
                 start_epoch = checkpoint["epoch"] + 1
         else:
-            model.load_state_dict(checkpoint)
+            accelerator.unwrap_model(model).load_state_dict(checkpoint)
 
-        print(f"Resuming training from epoch {start_epoch}")
+        logger.info(f"Resuming training from epoch {start_epoch}")
 
     # 4. Training Loop
-    best_loss = float("inf")
-
     for epoch in range(start_epoch, args.num_epochs + 1):
-        print(f"\nEpoch {epoch}/{args.num_epochs}")
+        logger.info(f"Epoch {epoch}/{args.num_epochs}")
 
-        train_loss = train_epoch(
+        local_train_loss = train_epoch(
             model,
             train_loader,
             optimizer,
+            accelerator,
             flow_path,
-            device,
             cfg_dropout_prob=args.cfg_dropout_prob,
-            scaler=scaler,
             grad_clip_norm=args.grad_clip_norm,
         )
-        print(f"Train Loss: {train_loss:.6f}")
 
-        # Step scheduler
+        # Synchronize loss across all ranks for logging and save decisions
+        train_loss_tensor = torch.tensor([local_train_loss], device=accelerator.device)
+        gathered_losses = accelerator.gather(train_loss_tensor)
+        global_train_loss = gathered_losses.mean().item()
+
+        logger.info(f"Train Loss: {global_train_loss:.6f}")
+
+        # Step scheduler with synchronized loss
         if scheduler is not None:
             if args.lr_scheduler == "plateau":
-                scheduler.step(train_loss)
+                scheduler.step(global_train_loss)
             else:
                 scheduler.step()
 
-        # Save Checkpoint
-        checkpoint = {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "seed": args.seed,
-            "epoch": epoch,
-        }
-        if scheduler is not None:
-            checkpoint["scheduler"] = scheduler.state_dict()
-        if scaler is not None:
-            checkpoint["scaler"] = scaler.state_dict()
-
-        if train_loss < best_loss:
-            best_loss = train_loss
-            torch.save(checkpoint, dirs["ckpt"] / "best_model.pt")
-
+        # Save Checkpoint - periodic only (deterministic condition, all ranks agree)
         if epoch % args.save_every == 0:
-            torch.save(checkpoint, dirs["ckpt"] / f"epoch_{epoch}.pt")
+            checkpoint = {
+                "model": accelerator.unwrap_model(model).state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "seed": args.seed,
+                "epoch": epoch,
+                "train_loss": global_train_loss,
+                "args": vars(args),
+            }
+            if scheduler is not None:
+                checkpoint["scheduler"] = scheduler.state_dict()
 
-        # Visualization (Validation Comparisons)
+            accelerator.save(checkpoint, dirs["ckpt"] / f"epoch_{epoch}.pt")
+
+        # Visualization (only on main process)
         if epoch % args.visualize_every == 0:
-            try:
-                visualize_validation_comparisons(
-                    model=model,
-                    val_ds=val_ds,
-                    species_list=species_list,
-                    type_list=type_list,
-                    epoch=epoch,
-                    save_dir=dirs["viz"],
-                    device=device,
-                    num_samples=args.num_viz_samples,
-                )
-            except Exception as e:
-                print(f"Visualization error: {e}")
-                import traceback
+            if accelerator.is_main_process:
+                try:
+                    with torch.no_grad():
+                        visualize_validation_comparisons(
+                            model=accelerator.unwrap_model(model),
+                            val_ds=val_ds,
+                            species_list=species_list,
+                            type_list=type_list,
+                            epoch=epoch,
+                            save_dir=dirs["viz"],
+                            accelerator=accelerator,
+                            num_samples=args.num_viz_samples,
+                        )
+                except Exception as e:
+                    logger.error(f"Visualization error: {e}")
+                    import traceback
 
-                traceback.print_exc()
+                    traceback.print_exc()
+            # Synchronize all ranks after visualization
+            # This MUST be called by ALL ranks to avoid NCCL desync
+            accelerator.wait_for_everyone()
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", type=str, default="experiments")
     parser.add_argument("--experiment_name", type=str, default=None)
-    parser.add_argument("--data_path", type=str, default="FOR-species20K")
     parser.add_argument(
-        "--csv_path", type=str, default="FOR-species20K/tree_metadata_dev.csv"
+        "--data_path",
+        type=str,
+        default="data/preprocessed-full",
+        help="Path to preprocessed dataset directory (e.g., data/preprocessed-full or data/preprocessed-4096)",
     )
-    parser.add_argument("--preprocessed_version", type=str, default="voxel_0.2m")
 
     # Model
     parser.add_argument(
         "--model_type",
         type=str,
         default="dit",
-        choices=["dit", "pointnext"],
-        help="Architecture to use: 'dit' (Transformer) or 'pointnext' (U-Net)",
+        choices=["dit", "transformer", "pointnext"],
+        help="Architecture: 'dit' (AdaLN), 'transformer' (token-prepend + U-ViT), or 'pointnext' (U-Net)",
     )
     parser.add_argument("--model_dim", type=int, default=256)
     parser.add_argument("--num_layers", type=int, default=12)
     parser.add_argument("--num_heads", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument(
+        "--num_freq_bands",
+        type=int,
+        default=12,
+        help="Number of NeRF-style frequency bands for point encoding (transformer model only). "
+             "L=10 covers 4k points, L=12 covers 32k+.",
+    )
 
     # Training
     parser.add_argument("--num_epochs", type=int, default=1000)
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--min_lr", type=float, default=1e-6)
     parser.add_argument(
@@ -519,23 +618,52 @@ def main():
     )
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--grad_clip_norm", type=float, default=2.0)
-    parser.add_argument("--use_amp", action="store_true", default=True)
-    parser.add_argument("--compile", action="store_true", default=False)
+    parser.add_argument(
+        "--mixed_precision",
+        type=str,
+        default="bf16",
+        choices=["no", "fp16", "bf16"],
+        help="Mixed precision training mode (no, fp16, or bf16)",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Auto-discover and resume from the latest checkpoint in the experiment directory",
+    )
     parser.add_argument(
         "--resume_from",
         type=str,
         default=None,
-        help="Path to checkpoint to resume from",
+        help="Checkpoint filename to resume from (within same experiment)",
     )
-    parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument(
+        "--pretrained_weights",
+        type=str,
+        default=None,
+        help="Path to checkpoint for loading model weights only (resets optimizer/scheduler/epoch)",
+    )
+    parser.add_argument("--num_workers", type=int, default=16)
     parser.add_argument("--cfg_dropout_prob", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=None)
 
     # Augmentation
-    parser.add_argument("--sample_exponent", type=float, default=None)
+    parser.add_argument(
+        "--sample_exponent",
+        type=float,
+        default=None,
+        help="Batch-level point sampling exponent for regularization. "
+             "Higher values bias toward max_points. E.g., 0.3 provides variation.",
+    )
     parser.add_argument("--rotation_augment", action="store_true", default=True)
     parser.add_argument("--shuffle_augment", action="store_true", default=True)
     parser.add_argument("--max_points", type=int, default=None)
+    parser.add_argument(
+        "--no_cache",
+        action="store_true",
+        default=False,
+        help="Disable in-memory caching of point clouds (use if RAM is limited)",
+    )
 
     # Misc
     parser.add_argument("--save_every", type=int, default=50)
@@ -544,10 +672,10 @@ def main():
 
     args = parser.parse_args()
 
+    # Note: Seed will be synchronized in train() after Accelerator init
+    # If no seed provided, main process will generate one and broadcast
     if args.seed is None:
         args.seed = random.randint(0, 100000)
-
-    print(f"Random Seed: {args.seed}")
 
     train(args)
 

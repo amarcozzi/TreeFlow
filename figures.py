@@ -12,12 +12,11 @@ from matplotlib.ticker import MaxNLocator
 
 from dataset import create_datasets
 
-DOWNSAMPLE_POINTS = 4096
+DOWNSAMPLE_POINTS = 16384
 
 
 def create_figure_1(
-    data_path: str = "./FOR-species20K",
-    csv_path: str = "./FOR-species20K/tree_metadata_dev.csv",
+    data_path: str = "./data/preprocessed-16384",
     output_dir: str = "figures",
     seed: int = 42,
 ):
@@ -25,8 +24,7 @@ def create_figure_1(
     Create 4 PDF subfigures showing example tree point clouds as input to the model.
 
     Args:
-        data_path: Path to FOR-species20K directory
-        csv_path: Path to tree metadata CSV
+        data_path: Path to preprocessed dataset directory
         output_dir: Directory to save PDF figures
         seed: Random seed for reproducibility
     """
@@ -37,15 +35,15 @@ def create_figure_1(
     output_dir.mkdir(exist_ok=True)
 
     # Load dataset with same settings as training
-    # (from submit_train_transformer_8_256.sh)
     print("Loading dataset...")
     train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
         data_path=data_path,
-        csv_path=csv_path,
-        preprocessed_version="raw",
         rotation_augment=True,
         shuffle_augment=True,
         max_points=DOWNSAMPLE_POINTS,
+        cache_train=False,
+        cache_val=False,
+        cache_test=False,
     )
 
     # Select 4 diverse samples from training set
@@ -174,8 +172,7 @@ def create_figure_1(
 
 def create_figure_2(
     sample_idx=123,
-    data_path: str = "./FOR-species20K",
-    csv_path: str = "./FOR-species20K/tree_metadata_dev.csv",
+    data_path: str = "./data/preprocessed-16384",
     output_dir: str = "figures",
     seed: int = 42,
 ):
@@ -195,11 +192,12 @@ def create_figure_2(
     print("Loading dataset...")
     train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
         data_path=data_path,
-        csv_path=csv_path,
-        preprocessed_version="raw",
         rotation_augment=False,
         shuffle_augment=False,
         max_points=DOWNSAMPLE_POINTS,
+        cache_train=False,
+        cache_val=False,
+        cache_test=False,
     )
 
     # Select a tree sample
@@ -261,11 +259,9 @@ def create_figure_2(
     ax_a.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    fig_a.savefig(
-        output_dir / "figure_2_a.png", format="png", bbox_inches="tight", dpi=800
-    )
+    fig_a.savefig(output_dir / "figure_2_a.pdf", bbox_inches="tight", dpi=800)
     plt.close(fig_a)
-    print(f"  Saved: {output_dir}/figure_2_a.png")
+    print(f"  Saved: {output_dir}/figure_2_a.pdf")
 
     # ==========================================
     # Figure 2b: Target Tree Distribution
@@ -326,9 +322,9 @@ def create_figure_2(
     ax_b.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    fig_b.savefig(output_dir / "figure_2_b.png", bbox_inches="tight", dpi=800)
+    fig_b.savefig(output_dir / "figure_2_b.pdf", bbox_inches="tight", dpi=800)
     plt.close(fig_b)
-    print(f"  Saved: {output_dir}/figure_2_b.png")
+    print(f"  Saved: {output_dir}/figure_2_b.pdf")
 
     # ==========================================
     # Figure 2c: Probability Density Evolution
@@ -438,11 +434,9 @@ def create_figure_2(
     ax_c.set_facecolor("white")
 
     plt.tight_layout()
-    fig_c.savefig(
-        output_dir / "figure_2_c.png", format="png", bbox_inches="tight", dpi=800
-    )
+    fig_c.savefig(output_dir / "figure_2_c.pdf", bbox_inches="tight", dpi=800)
     plt.close(fig_c)
-    print(f"  Saved: {output_dir}/figure_2_c.png")
+    print(f"  Saved: {output_dir}/figure_2_c.pdf")
 
     print(f"\nAll figures saved to {output_dir}/")
 

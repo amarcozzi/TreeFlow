@@ -6,9 +6,11 @@ import torch
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import zarr
 from pathlib import Path
 from torch.utils.data import Dataset
-from sklearn.model_selection import train_test_split
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class PointCloudDataset(Dataset):
@@ -16,7 +18,6 @@ class PointCloudDataset(Dataset):
         self,
         metadata_df: pd.DataFrame,
         data_path: Path,
-        preprocessed_version: str = "raw",
         species_map: dict = None,
         type_map: dict = None,
         sample_exponent: float = None,
@@ -24,17 +25,18 @@ class PointCloudDataset(Dataset):
         shuffle_augment: bool = False,
         max_points: int = None,
         split_name: str = None,
+        cache_in_memory: bool = True,
     ):
         """
-        Dataset for loading preprocessed point clouds (NPY format) with conditioning info.
+        Dataset for loading preprocessed point clouds (Zarr format) with conditioning info.
 
         Args:
             metadata_df: Pandas DataFrame containing ['filename', 'species', 'data_type', 'tree_H', 'file_path']
             data_path: Base path to FOR-species20K directory
-            preprocessed_version: "voxel_0.1m", etc.
             species_map: Dictionary mapping species string to integer index
             type_map: Dictionary mapping data_type string to integer index
             sample_exponent, rotation_augment, etc.: Augmentation parameters
+            cache_in_memory: If True, load all point clouds into RAM at initialization
         """
         self.metadata = metadata_df.reset_index(drop=True)
         self.data_path = Path(data_path)
@@ -42,9 +44,15 @@ class PointCloudDataset(Dataset):
         self.rotation_augment = rotation_augment
         self.shuffle_augment = shuffle_augment
         self.max_points = max_points
+        self.cache_in_memory = cache_in_memory
 
         self.species_map = species_map
         self.type_map = type_map
+
+        # Pre-load all data into memory to avoid I/O bottleneck during training
+        self.point_cache = None
+        if cache_in_memory:
+            self._load_cache(split_name)
 
         print(
             f"  Initialized {split_name + ' ' if split_name is not None else ''}dataset with {len(self.metadata)} samples."
@@ -52,6 +60,26 @@ class PointCloudDataset(Dataset):
         print(
             f"    Augmentation: max_points={max_points}, sample_exponent={sample_exponent}, rotation={rotation_augment}, shuffle={shuffle_augment}"
         )
+        if cache_in_memory:
+            print(f"    Data cached in memory.")
+
+    def _load_cache(self, split_name: str = None, num_threads: int = 32):
+        """Load all point clouds into memory in parallel."""
+        n_samples = len(self.metadata)
+        self.point_cache = [None] * n_samples
+        desc = f"Caching {split_name}" if split_name else "Caching data"
+
+        def load_one(idx):
+            row = self.metadata.iloc[idx]
+            return idx, zarr.load(row["file_path"])
+
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = [executor.submit(load_one, idx) for idx in range(n_samples)]
+            for future in tqdm(
+                as_completed(futures), total=n_samples, desc=desc, leave=False
+            ):
+                idx, points = future.result()
+                self.point_cache[idx] = points
 
     def __len__(self):
         return len(self.metadata)
@@ -85,8 +113,11 @@ class PointCloudDataset(Dataset):
     def __getitem__(self, idx):
         row = self.metadata.iloc[idx]
 
-        # Load NPY file
-        points = np.load(row["file_path"])
+        # Load from cache or disk
+        if self.point_cache is not None:
+            points = self.point_cache[idx].copy()  # Copy to avoid modifying cache
+        else:
+            points = zarr.load(row["file_path"])
 
         # Augmentation (Sampling/Rotation)
         if self.max_points is not None and len(points) > self.max_points:
@@ -102,28 +133,14 @@ class PointCloudDataset(Dataset):
         if self.shuffle_augment:
             np.random.shuffle(points)
 
-        # Normalization & Conditioning
-        # Strategy: Center at Mass -> Scale by Height -> Scale by 2.0 (for variance matching)
+        # Conditioning info
         height = float(row["tree_H"])
-
-        # Center of Mass
-        centroid = points.mean(axis=0)
-        points_centered = points - centroid
-
-        # Normalize by Height (Aspect Ratio Preserved)
-        # Add epsilon to prevent div by zero
-        points_normalized = points_centered / (height + 1e-6)
-
-        # Scale to match Neural Net variance (approx [-1, 1] range)
-        points_final = points_normalized * 2.0
-
-        # Log-Height for conditioning
         height_norm = np.log(height)
 
         return {
-            "points": torch.from_numpy(points_final).float(),
+            "points": torch.from_numpy(points).float(),
             "file_id": row["file_id"],
-            "num_points": len(points_final),
+            "num_points": len(points),
             "species_idx": torch.tensor(
                 self.species_map[row["species"]], dtype=torch.long
             ),
@@ -138,18 +155,37 @@ def collate_fn(batch):
     return batch
 
 
-def collate_fn_batched(batch):
+def collate_fn_batched(
+    batch, sample_exponent: float = None, min_points_floor: int = 256
+):
     """
-    Custom collate function that samples all point clouds to the minimum size in the batch.
-    Includes conditioning information.
+    Collate function that samples all point clouds to a uniform target size.
+
+    If sample_exponent is provided, applies batch-level exponential sampling:
+    - Finds max_points across the batch
+    - Draws u ~ Uniform(0, 1)
+    - Computes target = max(min_points_floor, int(u^sample_exponent * max_points))
+    - All samples are downsampled to target
+
+    If sample_exponent is None, uses the minimum point count in the batch
+    so no padding is needed and no points are wasted.
+
+    Args:
+        batch: List of samples from the dataset.
+        sample_exponent: Exponent for power-law sampling. Higher = more samples near max.
+                         None disables (uses min points in batch).
+        min_points_floor: Minimum number of points (default 256).
     """
-    min_points = min(sample["num_points"] for sample in batch)
+    if sample_exponent is not None:
+        max_points = max(sample["num_points"] for sample in batch)
+        u = torch.rand(1).item()
+        target_points = max(min_points_floor, int((u**sample_exponent) * max_points))
+    else:
+        target_points = min(sample["num_points"] for sample in batch)
 
     sampled_points = []
     file_ids = []
     original_num_points = []
-
-    # Conditioning lists
     species_idxs = []
     type_idxs = []
     height_norms = []
@@ -159,15 +195,10 @@ def collate_fn_batched(batch):
         points = sample["points"]
         num_points = sample["num_points"]
 
-        if num_points > min_points:
-            indices = torch.randperm(num_points)[:min_points]
-            points = points[indices]
-
-        sampled_points.append(points)
+        # Points are already shuffled in __getitem__, just slice
+        sampled_points.append(points[:target_points])
         file_ids.append(sample["file_id"])
         original_num_points.append(num_points)
-
-        # Collect conditioning
         species_idxs.append(sample["species_idx"])
         type_idxs.append(sample["type_idx"])
         height_norms.append(sample["height_norm"])
@@ -177,7 +208,7 @@ def collate_fn_batched(batch):
         "points": torch.stack(sampled_points, dim=0),
         "file_ids": file_ids,
         "original_num_points": original_num_points,
-        "sampled_num_points": min_points,
+        "sampled_num_points": target_points,
         "species_idx": torch.stack(species_idxs),
         "type_idx": torch.stack(type_idxs),
         "height_norm": torch.stack(height_norms),
@@ -185,41 +216,77 @@ def collate_fn_batched(batch):
     }
 
 
+def make_collate_fn(sample_exponent: float = None, min_points_floor: int = 256):
+    """
+    Factory to create a collate function with batch-level point sampling.
+
+    Args:
+        sample_exponent: Exponent for power-law sampling (e.g., 0.3).
+        min_points_floor: Minimum points per batch (default 256).
+    """
+    from functools import partial
+
+    return partial(
+        collate_fn_batched,
+        sample_exponent=sample_exponent,
+        min_points_floor=min_points_floor,
+    )
+
+
 def create_datasets(
     data_path: str,
-    csv_path: str,
-    preprocessed_version: str = "voxel_0.1m",
-    split_ratios: tuple = (0.8, 0.1, 0.1),  # Train, Val, Test
-    seed: int = 42,
+    sample_exponent: float = None,
+    sample_exp_train: bool = False,
+    sample_exp_val: bool = True,
+    sample_exp_test: bool = True,
+    cache_train: bool = True,
+    cache_val: bool = True,
+    cache_test: bool = True,
     **dataset_kwargs,
 ):
     """
-    Factory function to create Train, Val, and Test datasets from the dev metadata CSV.
-    We do not use the 'test' folder as it lacks metadata.
+    Factory function to create Train, Val, and Test datasets.
+
+    Args:
+        data_path: Path to preprocessed dataset directory (e.g., "data/full" or "data/4096").
+                   Must contain metadata.csv and *.zarr files.
+        sample_exponent: Point sampling exponent value (e.g., 0.3).
+        sample_exp_train: Apply sample_exponent to train? Default False (handled by collate_fn).
+        sample_exp_val: Apply sample_exponent to val? Default True (for visualization).
+        sample_exp_test: Apply sample_exponent to test? Default True (for evaluation).
+        cache_train: Cache train data in memory? Default True.
+        cache_val: Cache val data in memory? Default True.
+        cache_test: Cache test data in memory? Default True.
+        **dataset_kwargs: Passed to PointCloudDataset (max_points, rotation_augment, etc.)
+
+    Returns:
+        train_ds, val_ds, test_ds, species_list, type_list
     """
     data_path = Path(data_path)
-    csv_path = Path(csv_path)
+    csv_path = data_path / "metadata.csv"
+
+    if not data_path.exists():
+        raise FileNotFoundError(f"Data directory not found: {data_path}")
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Metadata CSV not found: {csv_path}")
 
     # 1. Load Metadata
-    print(f"Loading metadata from {csv_path}...")
+    print(f"Loading dataset from {data_path}...")
     df = pd.read_csv(csv_path)
 
-    # 2. Filter for existence
-    # The CSV has filenames like "/train/00070.las". We need "00070.npy" in the dev folder.
-    npy_base_dir = data_path / "npy" / preprocessed_version / "dev"
+    # Verify split column exists
+    if "split" not in df.columns:
+        raise ValueError(
+            f"CSV missing 'split' column. Run preprocess_laz.py to create the dataset."
+        )
 
-    if not npy_base_dir.exists():
-        raise FileNotFoundError(f"Directory not found: {npy_base_dir}")
-
-    # Extract ID from filename and check existence
-    # Assuming standard format /train/XXXXX.las
+    # 2. Build file paths and filter for existence
     df["file_id"] = df["filename"].apply(lambda x: Path(x).stem)
-    df["file_path"] = df["file_id"].apply(lambda x: npy_base_dir / f"{x}.npy")
+    df["file_path"] = df["file_id"].apply(lambda x: data_path / f"{x}.zarr")
 
-    # Filter rows where file exists
     initial_len = len(df)
     df = df[df["file_path"].apply(lambda x: x.exists())]
-    print(f"Found {len(df)}/{initial_len} matching NPY files in {npy_base_dir}")
+    print(f"Found {len(df)}/{initial_len} matching Zarr files")
 
     # 3. Create Global Mappings
     species_list = sorted(df["species"].unique())
@@ -231,47 +298,47 @@ def create_datasets(
     print(f"Species found: {len(species_list)}")
     print(f"Data types found: {len(type_list)}")
 
-    # 4. Split Data
-    train_ratio, val_ratio, test_ratio = split_ratios
-    # Normalize ratios just in case
-    total = sum(split_ratios)
-    train_ratio /= total
-    val_ratio /= total
-
-    # Split Train vs (Val+Test)
-    train_df, temp_df = train_test_split(
-        df, test_size=(1 - train_ratio), random_state=seed, stratify=df["species"]
-    )
-
-    # Split Val vs Test
-    relative_test_ratio = test_ratio / (test_ratio + val_ratio)
-    val_df, test_df = train_test_split(
-        temp_df,
-        test_size=relative_test_ratio,
-        random_state=seed,
-        stratify=temp_df["species"],
-    )
+    # 4. Split Data using pre-assigned split column
+    train_df = df[df["split"] == "train"]
+    val_df = df[df["split"] == "val"]
+    test_df = df[df["split"] == "test"]
 
     print(f"Splits: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
 
     # 5. Create Datasets
-    # Pass mappings to all datasets to ensure consistency
     common_args = {
         "data_path": data_path,
-        "preprocessed_version": preprocessed_version,
         "species_map": species_map,
         "type_map": type_map,
         **dataset_kwargs,
     }
 
-    train_ds = PointCloudDataset(train_df, split_name="train", **common_args)
-    val_ds = PointCloudDataset(val_df, split_name="val", **common_args)
-    test_ds = PointCloudDataset(test_df, split_name="test", **common_args)
+    train_ds = PointCloudDataset(
+        train_df,
+        split_name="train",
+        sample_exponent=sample_exponent if sample_exp_train else None,
+        cache_in_memory=cache_train,
+        **common_args,
+    )
+    val_ds = PointCloudDataset(
+        val_df,
+        split_name="val",
+        sample_exponent=sample_exponent if sample_exp_val else None,
+        cache_in_memory=cache_val,
+        **common_args,
+    )
+    test_ds = PointCloudDataset(
+        test_df,
+        split_name="test",
+        sample_exponent=sample_exponent if sample_exp_test else None,
+        cache_in_memory=cache_test,
+        **common_args,
+    )
 
     return train_ds, val_ds, test_ds, species_list, type_list
 
 
-def visualize_augmentation(dataset, idx, num_samples=6):
+def visualize_augmentation(dataset, idx, num_samples=6, denormalize=True):
     """
     Visualize the effect of augmentation by showing multiple samples of the same point cloud.
     """
@@ -294,8 +361,9 @@ def visualize_augmentation(dataset, idx, num_samples=6):
 
         # Scale points to meters
         # points *= 2.0
-        points = (points / 2.0) * s["height_raw"].numpy()
-        points[:, 2] -= points[:, 2].min()
+        if denormalize:
+            points = (points / 2.0) * s["height_raw"].numpy()
+            points[:, 2] -= points[:, 2].min()
 
         ax = fig.add_subplot(2, 3, i + 1, projection="3d")
         ax.scatter(
@@ -323,21 +391,60 @@ def visualize_augmentation(dataset, idx, num_samples=6):
 
 if __name__ == "__main__":
     # Example usage for debugging
-    data_path = "./FOR-species20K"
-    csv_path = "./FOR-species20K/tree_metadata_dev.csv"
+    data_path = "./data/preprocessed-full"
 
     try:
+        sample_exp = 0.5
         train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
             data_path=data_path,
-            csv_path=csv_path,
-            preprocessed_version="voxel_0.2m",
-            sample_exponent=0.3,
+            sample_exponent=sample_exp,
+            cache_train=False,
+            cache_val=False,
+            cache_test=False,
             rotation_augment=True,
         )
 
-        print("\nVisualizing random training sample...")
-        idx = np.random.randint(len(train_ds))
-        visualize_augmentation(train_ds, idx)
+        # Visualize from val_ds to see effect of sample_exponent
+        # (train_ds doesn't use sample_exponent - it's handled by collate_fn)
+        print(f"\nVisualizing random val sample with sample_exponent={sample_exp}...")
+        idx = np.random.randint(len(val_ds))
+        visualize_augmentation(val_ds, idx, denormalize=False)
+
+        # Histogram of point counts to show impact of sample_exponent
+        n_iterations = 100
+        print(
+            f"\nSampling same tree {n_iterations} times to show point count distribution..."
+        )
+        point_counts = []
+        for _ in range(n_iterations):
+            sample = val_ds[idx]
+            point_counts.append(sample["num_points"])
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.hist(point_counts, bins=20, edgecolor="black", alpha=0.7)
+        ax.axvline(
+            np.mean(point_counts),
+            color="red",
+            linestyle="--",
+            label=f"Mean: {np.mean(point_counts):.0f}",
+        )
+        ax.axvline(
+            np.median(point_counts),
+            color="orange",
+            linestyle="--",
+            label=f"Median: {np.median(point_counts):.0f}",
+        )
+        ax.set_xlabel("Number of Points")
+        ax.set_ylabel("Frequency")
+        ax.set_title(
+            f"Point Count Distribution (sample_exponent={sample_exp}, n={n_iterations})"
+        )
+        ax.legend()
+        plt.tight_layout()
+        plt.show()
+
+        print(f"  Min: {min(point_counts)}, Max: {max(point_counts)}")
+        print(f"  Mean: {np.mean(point_counts):.1f}, Std: {np.std(point_counts):.1f}")
 
     except Exception as e:
         print(f"Skipping visualization (setup required): {e}")

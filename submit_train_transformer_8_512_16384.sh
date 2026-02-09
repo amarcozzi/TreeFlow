@@ -2,11 +2,11 @@
 #SBATCH --account=umontana_fire_modeling
 #SBATCH --partition=gpu-l40s
 #SBATCH --gres=gpu:l40s:4
-#SBATCH --job-name="tf_8_256_4096"
+#SBATCH --job-name="tf_8_512_16384"
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=512G
 #SBATCH --time=2-0
-#SBATCH --output=log_train_transformer_8_256_4096.out
+#SBATCH --output=log_train_transformer_8_512_16384.out
 
 module load cuda
 
@@ -16,19 +16,19 @@ conda activate treeflow
 accelerate launch --num_processes=4 train.py \
     --output_dir experiments \
     --model_type transformer \
-    --experiment_name "transformer-8-256-4096" \
-    --data_path ./data/preprocessed-4096 \
-    --model_dim 256 \
+    --experiment_name "transformer-8-512-16384" \
+    --data_path ./data/preprocessed-16384 \
+    --model_dim 512 \
     --num_heads 8 \
     --num_layers 8 \
     --dropout 0.1 \
-    --batch_size 64 \
+    --batch_size 8 \
     --visualize_every 10 \
     --save_every 100 \
     --rotation_augment \
     --shuffle_augment \
     --num_workers 4 \
-    --num_epochs 10000 \
+    --num_epochs 5000 \
     --resume \
     --lr 1e-4 \
     --min_lr 1e-5 \
@@ -36,5 +36,5 @@ accelerate launch --num_processes=4 train.py \
     --grad_clip_norm 1.0 \
     --mixed_precision bf16 \
     --cfg_dropout_prob 0.15 \
-    --max_points 4096 \
+    --max_points 16384 \
     --sample_exponent 0.3
