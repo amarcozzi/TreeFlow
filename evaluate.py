@@ -112,9 +112,11 @@ def load_real_metadata(data_path: Path) -> pd.DataFrame:
     df["file_id"] = df["filename"].apply(lambda x: Path(x).stem)
     df["file_path"] = df["file_id"].apply(lambda x: str(data_path / f"{x}.zarr"))
 
-    # Filter to test split
+    # Filter to test split and existing zarr files
     test_df = df[df["split"] == "test"].copy()
-    print(f"Loaded real metadata: {len(test_df)} test trees (of {len(df)} total)")
+    exists_mask = test_df["file_path"].apply(lambda x: Path(x).exists())
+    test_df = test_df[exists_mask]
+    print(f"Loaded real metadata: {len(test_df)} test trees with zarr files (of {len(df)} total)")
     return test_df
 
 
