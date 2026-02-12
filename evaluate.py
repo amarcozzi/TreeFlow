@@ -118,9 +118,15 @@ def load_real_metadata(data_path: Path) -> pd.DataFrame:
     return test_df
 
 
-def load_point_cloud(path: str) -> np.ndarray:
-    """Load a point cloud from a zarr file."""
-    return zarr.load(path).astype(np.float32)
+def load_point_cloud(path: str, max_points: int | None = None, rng: np.random.Generator | None = None) -> np.ndarray:
+    """Load a point cloud from a zarr file, optionally downsampling."""
+    points = zarr.load(path).astype(np.float32)
+    if max_points is not None and len(points) > max_points:
+        if rng is None:
+            rng = np.random.default_rng(42)
+        indices = rng.choice(len(points), size=max_points, replace=False)
+        points = points[indices]
+    return points
 
 
 # =============================================================================
@@ -134,6 +140,7 @@ def build_tree_tasks(
     zarr_dir: Path,
     seed: int,
     skip_emd: bool = False,
+    max_points: int | None = None,
 ) -> list[dict]:
     """
     Build task dicts for parallel per-tree evaluation.
@@ -185,6 +192,7 @@ def build_tree_tasks(
             "gen_samples": gen_samples,
             "seed": seed,
             "skip_emd": skip_emd,
+            "max_points": max_points,
         })
 
     if skipped_trees > 0:
@@ -202,7 +210,10 @@ def evaluate_tree_worker(task: dict) -> dict:
         - 'real_cloud': the loaded real point cloud (for global metrics reuse)
         - 'source_tree_id': tree identifier
     """
-    real_cloud = load_point_cloud(task["real_path"])
+    max_points = task.get("max_points")
+    seed = task.get("seed", 42)
+    rng = np.random.default_rng(seed)
+    real_cloud = load_point_cloud(task["real_path"], max_points=max_points, rng=rng)
     skip_emd = task.get("skip_emd", False)
     pairs = []
 
@@ -302,8 +313,10 @@ def baseline_worker(task: dict) -> dict:
 
     Task dict must have 'path_a', 'path_b', 'label' (intra/inter), and 'species_a'/'species_b'.
     """
-    cloud_a = load_point_cloud(task["path_a"])
-    cloud_b = load_point_cloud(task["path_b"])
+    max_points = task.get("max_points")
+    rng = np.random.default_rng(task.get("seed", 42))
+    cloud_a = load_point_cloud(task["path_a"], max_points=max_points, rng=rng)
+    cloud_b = load_point_cloud(task["path_b"], max_points=max_points, rng=rng)
     cd, emd = compute_distances(cloud_a, cloud_b, skip_emd=task.get("skip_emd", False))
     return {
         "species_a": task["species_a"],
@@ -320,6 +333,7 @@ def build_baseline_tasks(
     interclass_pairs: int,
     seed: int,
     skip_emd: bool = False,
+    max_points: int | None = None,
 ) -> list[dict]:
     """Build task dicts for intra-class and inter-class baselines."""
     rng = np.random.default_rng(seed)
@@ -346,6 +360,8 @@ def build_baseline_tasks(
                 "species_b": species,
                 "label": "intra",
                 "skip_emd": skip_emd,
+                "max_points": max_points,
+                "seed": seed,
             })
 
     # Inter-class: pairs of trees from different species
@@ -366,6 +382,8 @@ def build_baseline_tasks(
             "species_b": all_rows[j].species,
             "label": "inter",
             "skip_emd": skip_emd,
+            "max_points": max_points,
+            "seed": seed,
         })
 
     intra_count = sum(1 for t in tasks if t["label"] == "intra")
@@ -832,6 +850,12 @@ def main():
         help="Base directory containing experiments",
     )
     parser.add_argument(
+        "--max_points",
+        type=int,
+        default=4096,
+        help="Downsample real point clouds to this many points (should match training)",
+    )
+    parser.add_argument(
         "--num_workers",
         type=int,
         default=40,
@@ -908,7 +932,7 @@ def main():
     print(f"PER-TREE EVALUATION ({metrics_label})")
     print("=" * 60)
 
-    tasks = build_tree_tasks(gen_metadata, real_metadata, zarr_dir, args.seed, skip_emd=args.skip_emd)
+    tasks = build_tree_tasks(gen_metadata, real_metadata, zarr_dir, args.seed, skip_emd=args.skip_emd, max_points=args.max_points)
     pair_df, real_clouds = evaluate_all_trees(tasks, args.num_workers)
 
     if pair_df.empty:
@@ -932,6 +956,7 @@ def main():
         interclass_pairs=args.interclass_pairs,
         seed=args.seed + 1000,
         skip_emd=args.skip_emd,
+        max_points=args.max_points,
     )
     baseline_df = compute_baselines(baseline_tasks, args.num_workers)
 
