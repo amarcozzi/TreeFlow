@@ -17,7 +17,6 @@ from pathlib import Path
 from collections import defaultdict
 from scipy.spatial.distance import cdist
 from scipy.optimize import linear_sum_assignment
-from scipy.spatial import cKDTree
 from tqdm import tqdm
 import multiprocessing as mp
 import time
@@ -369,10 +368,14 @@ def build_baseline_tasks(
     return tasks
 
 
-def compute_baselines(tasks: list[dict], num_workers: int) -> dict:
-    """Compute baseline distances in parallel and return summary stats."""
+def compute_baselines(tasks: list[dict], num_workers: int) -> pd.DataFrame:
+    """
+    Compute baseline distances in parallel.
+
+    Returns DataFrame with columns: species_a, species_b, label, cd, emd.
+    """
     if not tasks:
-        return {"intra": {}, "inter": {}}
+        return pd.DataFrame(columns=["species_a", "species_b", "label", "cd", "emd"])
 
     print(f"Computing baselines with {num_workers} workers...")
     start = time.time()
@@ -387,52 +390,7 @@ def compute_baselines(tasks: list[dict], num_workers: int) -> dict:
     elapsed = time.time() - start
     print(f"  Completed {len(results)} baseline pairs in {elapsed:.0f}s")
 
-    # Split by label
-    intra_results = [r for r in results if r["label"] == "intra"]
-    inter_results = [r for r in results if r["label"] == "inter"]
-
-    def summarize(result_list):
-        if not result_list:
-            return {"cd": {}, "emd": {}}
-        cds = [r["cd"] for r in result_list]
-        emds = [r["emd"] for r in result_list]
-        return {
-            "cd": {
-                "mean": float(np.mean(cds)),
-                "std": float(np.std(cds)),
-                "median": float(np.median(cds)),
-                "n_pairs": len(cds),
-            },
-            "emd": {
-                "mean": float(np.mean(emds)),
-                "std": float(np.std(emds)),
-                "median": float(np.median(emds)),
-                "n_pairs": len(emds),
-            },
-        }
-
-    # Per-species intra-class breakdown
-    intra_by_species = defaultdict(list)
-    for r in intra_results:
-        intra_by_species[r["species_a"]].append(r)
-
-    per_species_intra = {}
-    for species, res_list in intra_by_species.items():
-        cds = [r["cd"] for r in res_list]
-        emds = [r["emd"] for r in res_list]
-        per_species_intra[species] = {
-            "cd_mean": float(np.mean(cds)),
-            "cd_std": float(np.std(cds)),
-            "emd_mean": float(np.mean(emds)),
-            "emd_std": float(np.std(emds)),
-            "n_pairs": len(cds),
-        }
-
-    return {
-        "intra": summarize(intra_results),
-        "inter": summarize(inter_results),
-        "intra_per_species": per_species_intra,
-    }
+    return pd.DataFrame(results)
 
 
 # =============================================================================
@@ -520,65 +478,6 @@ def compute_jsd(real_clouds: list[np.ndarray], gen_clouds: list[np.ndarray], bin
     jsd = 0.5 * kl_pm + 0.5 * kl_qm
     return float(jsd)
 
-
-def compute_global_metrics(
-    real_clouds: dict[str, np.ndarray],
-    pair_df: pd.DataFrame,
-    num_workers: int,
-    seed: int,
-) -> dict:
-    """
-    Compute global distributional metrics (PointFlow paper):
-    - JSD: Jensen-Shannon Divergence on voxelized point distributions
-    - MMD-CD: Minimum Matching Distance (mean min-CD from real to gen)
-    - COV-CD: Coverage (fraction of real matched as NN by at least one gen)
-    - 1-NNA-CD: 1-Nearest-Neighbor Accuracy (should be ~50% if good)
-
-    Selects one representative generated sample per tree (random, seeded).
-    """
-    rng = np.random.default_rng(seed)
-
-    # Sort tree IDs for deterministic ordering
-    tree_ids = sorted(real_clouds.keys())
-    n_trees = len(tree_ids)
-
-    # Build S_r (real set) and S_g (one random generated per tree)
-    zarr_dir = None  # We'll load from pair_df paths
-
-    # For each tree, pick one random generated sample
-    real_list = []
-    gen_list = []
-    gen_tree_ids = []
-
-    for tree_id in tree_ids:
-        # Real cloud
-        real_list.append(real_clouds[tree_id])
-
-        # Pick one random generated sample for this tree
-        tree_pairs = pair_df[pair_df["source_tree_id"] == tree_id]
-        if len(tree_pairs) == 0:
-            # Use real cloud as fallback (shouldn't happen)
-            gen_list.append(real_clouds[tree_id])
-            gen_tree_ids.append(tree_id)
-            continue
-
-        chosen_idx = rng.integers(len(tree_pairs))
-        chosen_row = tree_pairs.iloc[chosen_idx]
-        gen_tree_ids.append(tree_id)
-
-        # We need to load the generated cloud - get path from sample_id
-        # The sample_file is {sample_id}.zarr in the zarr dir
-        # We stored it in the pair data, but we need the actual cloud
-        # Since we already computed CD/EMD, we need to reload for global metrics
-        # Store the sample_id so we can load later
-        gen_list.append(chosen_row["sample_id"])
-
-    print(f"\nGlobal metrics: {n_trees} real clouds, {len(gen_list)} generated representatives")
-
-    # We need actual point cloud data for gen_list
-    # But we don't have the zarr_dir in this function scope
-    # Return the selection and let the caller handle loading
-    return real_list, gen_list, gen_tree_ids
 
 
 def compute_global_metrics_from_clouds(
@@ -754,10 +653,20 @@ def compute_breakdowns(pair_df: pd.DataFrame, tree_df: pd.DataFrame) -> dict:
 # =============================================================================
 
 
+def _summarize_metric(series: pd.Series) -> dict:
+    """Compute summary stats for a single metric column."""
+    return {
+        "mean": float(series.mean()),
+        "std": float(series.std()),
+        "median": float(series.median()),
+        "n": len(series),
+    }
+
+
 def save_results(
     pair_df: pd.DataFrame,
     tree_df: pd.DataFrame,
-    baselines: dict,
+    baseline_df: pd.DataFrame,
     global_metrics: dict | None,
     breakdowns: dict,
     output_dir: Path,
@@ -778,10 +687,24 @@ def save_results(
     tree_df.to_csv(tree_csv, index=False)
     print(f"  Saved {len(tree_df)} trees to {tree_csv}")
 
-    # Baselines JSON
+    # Baselines — derive summary from the raw DataFrame
+    intra_df = baseline_df[baseline_df["label"] == "intra"]
+    inter_df = baseline_df[baseline_df["label"] == "inter"]
+
+    baselines_summary = {
+        "intra": {
+            "cd": _summarize_metric(intra_df["cd"]) if len(intra_df) else {},
+            "emd": _summarize_metric(intra_df["emd"]) if len(intra_df) else {},
+        },
+        "inter": {
+            "cd": _summarize_metric(inter_df["cd"]) if len(inter_df) else {},
+            "emd": _summarize_metric(inter_df["emd"]) if len(inter_df) else {},
+        },
+    }
+
     baselines_path = output_dir / "baselines.json"
     with open(baselines_path, "w") as f:
-        json.dump(baselines, f, indent=2)
+        json.dump(baselines_summary, f, indent=2)
     print(f"  Saved baselines to {baselines_path}")
 
     # Global metrics JSON
@@ -801,12 +724,8 @@ def save_results(
     summary = {
         "per_pair": {
             "n_pairs": len(pair_df),
-            "cd_mean": float(pair_df["cd"].mean()),
-            "cd_std": float(pair_df["cd"].std()),
-            "cd_median": float(pair_df["cd"].median()),
-            "emd_mean": float(pair_df["emd"].mean()),
-            "emd_std": float(pair_df["emd"].std()),
-            "emd_median": float(pair_df["emd"].median()),
+            "cd": _summarize_metric(pair_df["cd"]),
+            "emd": _summarize_metric(pair_df["emd"]),
         },
         "per_tree": {
             "n_trees": len(tree_df),
@@ -815,10 +734,7 @@ def save_results(
             "emd_mean_of_means": float(tree_df["emd_mean"].mean()),
             "emd_std_of_means": float(tree_df["emd_mean"].std()),
         },
-        "baselines": {
-            "intra_class": baselines.get("intra", {}),
-            "inter_class": baselines.get("inter", {}),
-        },
+        "baselines": baselines_summary,
     }
     if global_metrics is not None:
         summary["global_metrics"] = global_metrics
@@ -832,7 +748,7 @@ def save_results(
 def print_results(
     pair_df: pd.DataFrame,
     tree_df: pd.DataFrame,
-    baselines: dict,
+    baseline_df: pd.DataFrame,
     global_metrics: dict | None,
 ):
     """Print formatted evaluation results."""
@@ -851,23 +767,24 @@ def print_results(
     print(f"  EMD: mean={tree_df['emd_mean'].mean():.6f}  std={tree_df['emd_mean'].std():.6f}")
 
     # Baselines
-    intra = baselines.get("intra", {})
-    inter = baselines.get("inter", {})
-    if intra.get("cd"):
+    intra_df = baseline_df[baseline_df["label"] == "intra"]
+    inter_df = baseline_df[baseline_df["label"] == "inter"]
+
+    if len(intra_df) > 0:
         print(f"\nBaselines:")
-        print(f"  Intra-class CD:  mean={intra['cd']['mean']:.6f}  std={intra['cd']['std']:.6f}  (n={intra['cd']['n_pairs']})")
-        print(f"  Intra-class EMD: mean={intra['emd']['mean']:.6f}  std={intra['emd']['std']:.6f}")
-    if inter.get("cd"):
-        print(f"  Inter-class CD:  mean={inter['cd']['mean']:.6f}  std={inter['cd']['std']:.6f}  (n={inter['cd']['n_pairs']})")
-        print(f"  Inter-class EMD: mean={inter['emd']['mean']:.6f}  std={inter['emd']['std']:.6f}")
+        print(f"  Intra-class CD:  mean={intra_df['cd'].mean():.6f}  std={intra_df['cd'].std():.6f}  (n={len(intra_df)})")
+        print(f"  Intra-class EMD: mean={intra_df['emd'].mean():.6f}  std={intra_df['emd'].std():.6f}")
+    if len(inter_df) > 0:
+        print(f"  Inter-class CD:  mean={inter_df['cd'].mean():.6f}  std={inter_df['cd'].std():.6f}  (n={len(inter_df)})")
+        print(f"  Inter-class EMD: mean={inter_df['emd'].mean():.6f}  std={inter_df['emd'].std():.6f}")
 
     # Interpretation
     gen_cd = pair_df["cd"].mean()
-    if intra.get("cd") and intra["cd"]["mean"] > 0:
-        ratio = gen_cd / intra["cd"]["mean"]
+    if len(intra_df) > 0 and intra_df["cd"].mean() > 0:
+        ratio = gen_cd / intra_df["cd"].mean()
         print(f"\n  Gen/Intra ratio: {ratio:.2f} (< 1.5 is good)")
-    if inter.get("cd") and inter["cd"]["mean"] > 0:
-        print(f"  Gen < Inter: {gen_cd < inter['cd']['mean']} (conditioning works if True)")
+    if len(inter_df) > 0 and inter_df["cd"].mean() > 0:
+        print(f"  Gen < Inter: {gen_cd < inter_df['cd'].mean()} (conditioning works if True)")
 
     # Global metrics
     if global_metrics is not None:
@@ -1003,7 +920,7 @@ def main():
         interclass_pairs=args.interclass_pairs,
         seed=args.seed + 1000,
     )
-    baselines = compute_baselines(baseline_tasks, args.num_workers)
+    baseline_df = compute_baselines(baseline_tasks, args.num_workers)
 
     # =========================================================================
     # 4. Global Distributional Metrics
@@ -1059,8 +976,8 @@ def main():
     print("SAVING RESULTS")
     print("=" * 60)
 
-    save_results(pair_df, tree_df, baselines, global_metrics, breakdowns, output_dir)
-    print_results(pair_df, tree_df, baselines, global_metrics)
+    save_results(pair_df, tree_df, baseline_df, global_metrics, breakdowns, output_dir)
+    print_results(pair_df, tree_df, baseline_df, global_metrics)
 
     print("Evaluation complete!")
 
