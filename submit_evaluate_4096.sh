@@ -13,4 +13,5 @@ python evaluate.py \
     --experiment_name transformer-8-512-4096 \
     --data_path data/preprocessed-4096 \
     --num_workers 40 \
+    --skip_emd \
     --seed 42

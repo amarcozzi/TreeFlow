@@ -52,10 +52,10 @@ def earth_movers_distance(p1: np.ndarray, p2: np.ndarray) -> float:
     return float(dist_matrix[row_ind, col_ind].mean())
 
 
-def compute_distances(real: np.ndarray, gen: np.ndarray) -> tuple[float, float]:
-    """Compute both CD and EMD between real and generated point clouds."""
+def compute_distances(real: np.ndarray, gen: np.ndarray, skip_emd: bool = False) -> tuple[float, float]:
+    """Compute CD and optionally EMD between real and generated point clouds."""
     cd = chamfer_distance(real, gen)
-    emd = earth_movers_distance(real, gen)
+    emd = float("nan") if skip_emd else earth_movers_distance(real, gen)
     return cd, emd
 
 
@@ -133,6 +133,7 @@ def build_tree_tasks(
     real_metadata: pd.DataFrame,
     zarr_dir: Path,
     seed: int,
+    skip_emd: bool = False,
 ) -> list[dict]:
     """
     Build task dicts for parallel per-tree evaluation.
@@ -183,6 +184,7 @@ def build_tree_tasks(
             "real_height": float(real_info["tree_H"]),
             "gen_samples": gen_samples,
             "seed": seed,
+            "skip_emd": skip_emd,
         })
 
     if skipped_trees > 0:
@@ -201,6 +203,7 @@ def evaluate_tree_worker(task: dict) -> dict:
         - 'source_tree_id': tree identifier
     """
     real_cloud = load_point_cloud(task["real_path"])
+    skip_emd = task.get("skip_emd", False)
     pairs = []
 
     for gen_info in task["gen_samples"]:
@@ -209,7 +212,7 @@ def evaluate_tree_worker(task: dict) -> dict:
         except Exception:
             continue
 
-        cd, emd = compute_distances(real_cloud, gen_cloud)
+        cd, emd = compute_distances(real_cloud, gen_cloud, skip_emd=skip_emd)
 
         pairs.append({
             "source_tree_id": task["source_tree_id"],
@@ -301,7 +304,7 @@ def baseline_worker(task: dict) -> dict:
     """
     cloud_a = load_point_cloud(task["path_a"])
     cloud_b = load_point_cloud(task["path_b"])
-    cd, emd = compute_distances(cloud_a, cloud_b)
+    cd, emd = compute_distances(cloud_a, cloud_b, skip_emd=task.get("skip_emd", False))
     return {
         "species_a": task["species_a"],
         "species_b": task["species_b"],
@@ -316,6 +319,7 @@ def build_baseline_tasks(
     pairs_per_species: int,
     interclass_pairs: int,
     seed: int,
+    skip_emd: bool = False,
 ) -> list[dict]:
     """Build task dicts for intra-class and inter-class baselines."""
     rng = np.random.default_rng(seed)
@@ -341,6 +345,7 @@ def build_baseline_tasks(
                 "species_a": species,
                 "species_b": species,
                 "label": "intra",
+                "skip_emd": skip_emd,
             })
 
     # Inter-class: pairs of trees from different species
@@ -360,6 +365,7 @@ def build_baseline_tasks(
             "species_a": all_rows[i].species,
             "species_b": all_rows[j].species,
             "label": "inter",
+            "skip_emd": skip_emd,
         })
 
     intra_count = sum(1 for t in tasks if t["label"] == "intra")
@@ -838,6 +844,11 @@ def main():
         help="Random seed for reproducibility",
     )
     parser.add_argument(
+        "--skip_emd",
+        action="store_true",
+        help="Skip Earth Mover's Distance (EMD is O(n^3), very slow at 4096 points)",
+    )
+    parser.add_argument(
         "--skip_global",
         action="store_true",
         help="Skip global distributional metrics (saves ~1h)",
@@ -892,11 +903,12 @@ def main():
     # 2. Per-Tree Evaluation
     # =========================================================================
 
+    metrics_label = "CD" if args.skip_emd else "CD + EMD"
     print("\n" + "=" * 60)
-    print("PER-TREE EVALUATION (CD + EMD)")
+    print(f"PER-TREE EVALUATION ({metrics_label})")
     print("=" * 60)
 
-    tasks = build_tree_tasks(gen_metadata, real_metadata, zarr_dir, args.seed)
+    tasks = build_tree_tasks(gen_metadata, real_metadata, zarr_dir, args.seed, skip_emd=args.skip_emd)
     pair_df, real_clouds = evaluate_all_trees(tasks, args.num_workers)
 
     if pair_df.empty:
@@ -919,6 +931,7 @@ def main():
         pairs_per_species=args.baseline_pairs_per_species,
         interclass_pairs=args.interclass_pairs,
         seed=args.seed + 1000,
+        skip_emd=args.skip_emd,
     )
     baseline_df = compute_baselines(baseline_tasks, args.num_workers)
 
