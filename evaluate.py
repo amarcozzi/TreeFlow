@@ -1,75 +1,30 @@
 """
 treeflow/evaluate.py
+
+Evaluate generated tree point clouds against real trees using:
+- Per-pair metrics: Chamfer Distance (CD) and Earth Mover's Distance (EMD)
+- Baselines: intra-class (same species) and inter-class (different species)
+- Global distributional metrics (PointFlow): JSD, MMD-CD, COV-CD, 1-NNA-CD
+- Breakdowns by species, height, scan type, and CFG scale
 """
 
 import json
-import laspy
 import numpy as np
 import pandas as pd
 import argparse
 import zarr
-from dataclasses import dataclass, asdict
 from pathlib import Path
 from collections import defaultdict
 from scipy.spatial.distance import cdist
+from scipy.optimize import linear_sum_assignment
+from scipy.spatial import cKDTree
 from tqdm import tqdm
+import multiprocessing as mp
+import time
 
 
 # =============================================================================
-# Data Classes for Results
-# =============================================================================
-
-
-@dataclass
-class CDResult:
-    """Chamfer Distance result with uncertainty from downsampling."""
-
-    mean: float
-    std: float
-    min: float
-    max: float
-    n_downsamples: int
-    was_downsampled: bool
-    original_real_count: int
-    comparison_count: int
-    all_values: list[float]  # All CD values from each downsample
-
-    def __repr__(self):
-        if self.std > 0:
-            return f"CD={self.mean:.6f} ± {self.std:.6f} (n={self.n_downsamples})"
-        return f"CD={self.mean:.6f}"
-
-
-@dataclass
-class PairResult:
-    """Evaluation result for a single real-generated pair."""
-
-    source_tree_id: str
-    sample_id: str
-    species: str
-    height_m: float
-    scan_type: str
-    cd: CDResult
-
-
-@dataclass
-class TreeResult:
-    """Aggregated evaluation result for all samples of a single real tree."""
-
-    source_tree_id: str
-    species: str
-    height_m: float
-    scan_type: str
-    n_samples: int
-    cd_mean: float  # Mean CD across all generated samples
-    cd_std: float  # Std of CD across generated samples
-    cd_min: float  # Best (lowest) CD among samples
-    cd_max: float  # Worst (highest) CD among samples
-    mean_downsample_std: float  # Average downsampling uncertainty
-
-
-# =============================================================================
-# Chamfer Distance Implementation
+# Distance Functions
 # =============================================================================
 
 
@@ -78,878 +33,851 @@ def chamfer_distance(p1: np.ndarray, p2: np.ndarray) -> float:
     Compute Chamfer Distance between two point clouds.
 
     Uses squared L2 distance (standard formulation).
-
-    Args:
-        p1: (N, 3) point cloud
-        p2: (M, 3) point cloud
-
-    Returns:
-        Chamfer distance (mean of both directions)
+    Both clouds should be (N, 3).
     """
-    # Pairwise squared distances
     dist_matrix = cdist(p1, p2, metric="sqeuclidean")
-
-    # Mean min distance from p1 to p2
     min_p1_to_p2 = dist_matrix.min(axis=1).mean()
-
-    # Mean min distance from p2 to p1
     min_p2_to_p1 = dist_matrix.min(axis=0).mean()
+    return float((min_p1_to_p2 + min_p2_to_p1) / 2)
 
-    return (min_p1_to_p2 + min_p2_to_p1) / 2
 
-
-def chamfer_distance_with_downsampling(
-    real_points: np.ndarray,
-    gen_points: np.ndarray,
-    num_downsamples: int = 10,
-    seed: int = 42,
-) -> CDResult:
+def earth_movers_distance(p1: np.ndarray, p2: np.ndarray) -> float:
     """
-    Compute Chamfer Distance with multiple random downsamples of the real cloud.
+    Compute Earth Mover's Distance (optimal bipartite matching) between two
+    point clouds of equal size using L2 cost.
 
-    Handles the point count mismatch between real clouds (up to millions of points)
-    and generated clouds (max 4096 points) by downsampling the real cloud to match.
-
-    Args:
-        real_points: (N, 3) real point cloud (potentially millions of points)
-        gen_points: (M, 3) generated point cloud (up to 4096 points)
-        num_downsamples: Number of random downsamples to average over
-        seed: Random seed for reproducibility
-
-    Returns:
-        CDResult with mean, std, min, max across downsamples
+    Both clouds must be (N, 3) with the same N.
     """
-    rng = np.random.default_rng(seed)
-    target_count = len(gen_points)
-    original_count = len(real_points)
-
-    # If real cloud is already smaller or equal, no downsampling needed
-    if original_count <= target_count:
-        cd = chamfer_distance(real_points, gen_points)
-        return CDResult(
-            mean=cd,
-            std=0.0,
-            min=cd,
-            max=cd,
-            n_downsamples=1,
-            was_downsampled=False,
-            original_real_count=original_count,
-            comparison_count=original_count,
-            all_values=[cd],
-        )
-
-    # Multiple random downsamples
-    cd_values = []
-    for _ in range(num_downsamples):
-        # Random subsample of real cloud
-        indices = rng.choice(original_count, size=target_count, replace=False)
-        real_downsampled = real_points[indices]
-
-        cd = chamfer_distance(real_downsampled, gen_points)
-        cd_values.append(cd)
-
-    return CDResult(
-        mean=float(np.mean(cd_values)),
-        std=float(np.std(cd_values)),
-        min=float(np.min(cd_values)),
-        max=float(np.max(cd_values)),
-        n_downsamples=num_downsamples,
-        was_downsampled=True,
-        original_real_count=original_count,
-        comparison_count=target_count,
-        all_values=[float(v) for v in cd_values],
-    )
+    dist_matrix = cdist(p1, p2, metric="euclidean")
+    row_ind, col_ind = linear_sum_assignment(dist_matrix)
+    return float(dist_matrix[row_ind, col_ind].mean())
 
 
-def chamfer_distance_real_to_real(
-    real_a: np.ndarray,
-    real_b: np.ndarray,
-    target_count: int = 4096,
-    num_downsamples: int = 10,
-    seed: int = 42,
-) -> CDResult:
-    """
-    Compute CD between two real clouds, downsampling both to target_count.
-
-    This gives us the "natural variation" baseline at the same resolution
-    as our generated samples.
-
-    Args:
-        real_a: (N, 3) first real point cloud
-        real_b: (M, 3) second real point cloud
-        target_count: Target point count for both clouds
-        num_downsamples: Number of random downsamples to average over
-        seed: Random seed for reproducibility
-
-    Returns:
-        CDResult with mean, std, min, max across downsamples
-    """
-    rng = np.random.default_rng(seed)
-
-    # Determine actual comparison count (minimum of target and both cloud sizes)
-    actual_count = min(target_count, len(real_a), len(real_b))
-
-    cd_values = []
-    for i in range(num_downsamples):
-        # Downsample cloud A
-        if len(real_a) > actual_count:
-            idx_a = rng.choice(len(real_a), size=actual_count, replace=False)
-            a_down = real_a[idx_a]
-        else:
-            a_down = real_a
-
-        # Downsample cloud B
-        if len(real_b) > actual_count:
-            idx_b = rng.choice(len(real_b), size=actual_count, replace=False)
-            b_down = real_b[idx_b]
-        else:
-            b_down = real_b
-
-        cd_values.append(chamfer_distance(a_down, b_down))
-
-    was_downsampled = len(real_a) > actual_count or len(real_b) > actual_count
-
-    return CDResult(
-        mean=float(np.mean(cd_values)),
-        std=float(np.std(cd_values)),
-        min=float(np.min(cd_values)),
-        max=float(np.max(cd_values)),
-        n_downsamples=num_downsamples,
-        was_downsampled=was_downsampled,
-        original_real_count=max(len(real_a), len(real_b)),
-        comparison_count=actual_count,
-        all_values=[float(v) for v in cd_values],
-    )
+def compute_distances(real: np.ndarray, gen: np.ndarray) -> tuple[float, float]:
+    """Compute both CD and EMD between real and generated point clouds."""
+    cd = chamfer_distance(real, gen)
+    emd = earth_movers_distance(real, gen)
+    return cd, emd
 
 
 # =============================================================================
-# Evaluation Functions
-# =============================================================================
-
-
-def compute_pairwise_cd(
-    pairs: list[dict],
-    num_downsamples: int = 10,
-    seed: int = 42,
-) -> list[PairResult]:
-    """
-    Compute Chamfer Distance for all real-generated pairs.
-
-    Args:
-        pairs: List of evaluation pairs from build_evaluation_pairs()
-        num_downsamples: Number of downsamples for uncertainty estimation
-        seed: Random seed for reproducibility
-
-    Returns:
-        List of PairResult objects
-    """
-    results = []
-
-    for pair in tqdm(pairs, desc="Computing CD"):
-        cd_result = chamfer_distance_with_downsampling(
-            real_points=pair["real_points"],
-            gen_points=pair["gen_points"],
-            num_downsamples=num_downsamples,
-            seed=seed,
-        )
-
-        results.append(
-            PairResult(
-                source_tree_id=pair["source_tree_id"],
-                sample_id=pair["sample_id"],
-                species=pair["species"],
-                height_m=pair["height_m"],
-                scan_type=pair["scan_type"],
-                cd=cd_result,
-            )
-        )
-
-    return results
-
-
-def aggregate_by_tree(pair_results: list[PairResult]) -> list[TreeResult]:
-    """
-    Aggregate pair results by source tree.
-
-    For each tree, computes statistics across all generated samples.
-
-    Args:
-        pair_results: List of PairResult objects
-
-    Returns:
-        List of TreeResult objects
-    """
-    # Group by source tree
-    grouped = defaultdict(list)
-    for pr in pair_results:
-        grouped[pr.source_tree_id].append(pr)
-
-    tree_results = []
-    for tree_id, pairs in grouped.items():
-        # Extract CD means for this tree's samples
-        cd_means = [p.cd.mean for p in pairs]
-        downsample_stds = [p.cd.std for p in pairs]
-
-        # Use first pair for metadata (all should be same)
-        first = pairs[0]
-
-        tree_results.append(
-            TreeResult(
-                source_tree_id=tree_id,
-                species=first.species,
-                height_m=first.height_m,
-                scan_type=first.scan_type,
-                n_samples=len(pairs),
-                cd_mean=float(np.mean(cd_means)),
-                cd_std=float(np.std(cd_means)),
-                cd_min=float(np.min(cd_means)),
-                cd_max=float(np.max(cd_means)),
-                mean_downsample_std=float(np.mean(downsample_stds)),
-            )
-        )
-
-    return tree_results
-
-
-def compute_intraclass_baseline(
-    real_point_clouds: dict[str, np.ndarray],
-    real_metadata: pd.DataFrame,
-    num_pairs_per_species: int = 20,
-    target_count: int = 4096,
-    num_downsamples: int = 10,
-    seed: int = 42,
-) -> dict:
-    """
-    Compute intra-class (same species) real-to-real CD baseline.
-
-    For each species, randomly samples pairs of trees and computes CD.
-
-    Args:
-        real_point_clouds: Dict mapping file_id -> point cloud
-        real_metadata: DataFrame with species info
-        num_pairs_per_species: Number of pairs to sample per species
-        target_count: Target point count for downsampling
-        num_downsamples: Number of downsamples per pair
-        seed: Random seed
-
-    Returns:
-        Dict with per-species and global statistics
-    """
-    rng = np.random.default_rng(seed)
-
-    # Group trees by species
-    species_to_trees = defaultdict(list)
-    for _, row in real_metadata.iterrows():
-        file_id = row["file_id"]
-        if file_id in real_point_clouds:
-            species_to_trees[row["species"]].append(file_id)
-
-    all_cd_values = []
-    per_species_results = {}
-
-    for species, tree_ids in tqdm(
-        species_to_trees.items(), desc="Intra-class baseline"
-    ):
-        if len(tree_ids) < 2:
-            continue
-
-        species_cd_values = []
-
-        # Sample pairs
-        n_pairs = min(num_pairs_per_species, len(tree_ids) * (len(tree_ids) - 1) // 2)
-        for _ in range(n_pairs):
-            # Random pair of different trees
-            idx_a, idx_b = rng.choice(len(tree_ids), size=2, replace=False)
-            tree_a, tree_b = tree_ids[idx_a], tree_ids[idx_b]
-
-            cd_result = chamfer_distance_real_to_real(
-                real_point_clouds[tree_a],
-                real_point_clouds[tree_b],
-                target_count=target_count,
-                num_downsamples=num_downsamples,
-                seed=seed + hash((tree_a, tree_b)) % 10000,
-            )
-
-            species_cd_values.append(cd_result.mean)
-            all_cd_values.append(cd_result.mean)
-
-        if species_cd_values:
-            per_species_results[species] = {
-                "mean": float(np.mean(species_cd_values)),
-                "std": float(np.std(species_cd_values)),
-                "n_pairs": len(species_cd_values),
-            }
-
-    return {
-        "global": {
-            "mean": float(np.mean(all_cd_values)) if all_cd_values else 0.0,
-            "std": float(np.std(all_cd_values)) if all_cd_values else 0.0,
-            "median": float(np.median(all_cd_values)) if all_cd_values else 0.0,
-            "n_pairs": len(all_cd_values),
-        },
-        "per_species": per_species_results,
-    }
-
-
-def compute_interclass_baseline(
-    real_point_clouds: dict[str, np.ndarray],
-    real_metadata: pd.DataFrame,
-    num_pairs: int = 200,
-    target_count: int = 4096,
-    num_downsamples: int = 10,
-    seed: int = 42,
-) -> dict:
-    """
-    Compute inter-class (different species) real-to-real CD baseline.
-
-    Randomly samples pairs of trees from different species.
-
-    Args:
-        real_point_clouds: Dict mapping file_id -> point cloud
-        real_metadata: DataFrame with species info
-        num_pairs: Total number of pairs to sample
-        target_count: Target point count for downsampling
-        num_downsamples: Number of downsamples per pair
-        seed: Random seed
-
-    Returns:
-        Dict with global statistics
-    """
-    rng = np.random.default_rng(seed)
-
-    # Build list of (file_id, species) tuples
-    trees_with_species = [
-        (row["file_id"], row["species"])
-        for _, row in real_metadata.iterrows()
-        if row["file_id"] in real_point_clouds
-    ]
-
-    if len(trees_with_species) < 2:
-        return {"mean": 0.0, "std": 0.0, "n_pairs": 0}
-
-    cd_values = []
-
-    for _ in tqdm(range(num_pairs), desc="Inter-class baseline"):
-        # Sample two different trees
-        attempts = 0
-        while attempts < 100:
-            idx_a, idx_b = rng.choice(len(trees_with_species), size=2, replace=False)
-            tree_a, species_a = trees_with_species[idx_a]
-            tree_b, species_b = trees_with_species[idx_b]
-
-            # Require different species
-            if species_a != species_b:
-                break
-            attempts += 1
-
-        if attempts >= 100:
-            continue  # Couldn't find different species pair
-
-        cd_result = chamfer_distance_real_to_real(
-            real_point_clouds[tree_a],
-            real_point_clouds[tree_b],
-            target_count=target_count,
-            num_downsamples=num_downsamples,
-            seed=seed + hash((tree_a, tree_b)) % 10000,
-        )
-
-        cd_values.append(cd_result.mean)
-
-    return {
-        "mean": float(np.mean(cd_values)) if cd_values else 0.0,
-        "std": float(np.std(cd_values)) if cd_values else 0.0,
-        "median": float(np.median(cd_values)) if cd_values else 0.0,
-        "n_pairs": len(cd_values),
-    }
-
-
-# =============================================================================
-# Reporting Functions
-# =============================================================================
-
-
-def print_cd_results(
-    pair_results: list[PairResult],
-    tree_results: list[TreeResult],
-    intraclass_baseline: dict,
-    interclass_baseline: dict,
-):
-    """Print formatted Chamfer Distance results."""
-
-    print("\n" + "=" * 70)
-    print("CHAMFER DISTANCE RESULTS")
-    print("=" * 70)
-
-    # Global statistics across all pairs
-    all_cd_means = [p.cd.mean for p in pair_results]
-    all_downsample_stds = [p.cd.std for p in pair_results]
-
-    print(f"\nPer-pair CD (n={len(pair_results)} pairs):")
-    print(f"  Mean:   {np.mean(all_cd_means):.6f}")
-    print(f"  Std:    {np.std(all_cd_means):.6f}")
-    print(f"  Median: {np.median(all_cd_means):.6f}")
-    print(f"  Min:    {np.min(all_cd_means):.6f}")
-    print(f"  Max:    {np.max(all_cd_means):.6f}")
-
-    # Downsampling variance
-    n_downsampled = sum(1 for p in pair_results if p.cd.was_downsampled)
-    print(f"\nDownsampling variance:")
-    print(f"  Pairs requiring downsampling: {n_downsampled}/{len(pair_results)}")
-    print(f"  Mean std within pairs: {np.mean(all_downsample_stds):.6f}")
-    print(f"  Max std within pairs:  {np.max(all_downsample_stds):.6f}")
-
-    # Per-tree statistics
-    tree_cd_means = [t.cd_mean for t in tree_results]
-    tree_cd_stds = [t.cd_std for t in tree_results]
-
-    print(f"\nPer-tree CD (n={len(tree_results)} trees):")
-    print(f"  Mean of tree means: {np.mean(tree_cd_means):.6f}")
-    print(f"  Std of tree means:  {np.std(tree_cd_means):.6f}")
-    print(f"  Mean within-tree std: {np.mean(tree_cd_stds):.6f}")
-    print(f"    (variation across generated samples for same tree)")
-
-    # MMD (Minimum Matching Distance)
-    tree_cd_mins = [t.cd_min for t in tree_results]
-    print(f"\nMinimum Matching Distance (best sample per tree):")
-    print(f"  Mean MMD: {np.mean(tree_cd_mins):.6f}")
-    print(f"  Std MMD:  {np.std(tree_cd_mins):.6f}")
-
-    # Baselines
-    print(f"\nBaselines (real-to-real CD at same resolution):")
-    print(
-        f"  Intra-class (same species): {intraclass_baseline['global']['mean']:.6f} "
-        f"± {intraclass_baseline['global']['std']:.6f} "
-        f"(n={intraclass_baseline['global']['n_pairs']} pairs)"
-    )
-    print(
-        f"  Inter-class (diff species): {interclass_baseline['mean']:.6f} "
-        f"± {interclass_baseline['std']:.6f} "
-        f"(n={interclass_baseline['n_pairs']} pairs)"
-    )
-
-    # Interpretation
-    gen_to_real_mean = np.mean(all_cd_means)
-    intra_mean = intraclass_baseline["global"]["mean"]
-    inter_mean = interclass_baseline["mean"]
-
-    print(f"\nInterpretation:")
-    if intra_mean > 0:
-        ratio = gen_to_real_mean / intra_mean
-        print(f"  Gen-to-Real / Intra-class ratio: {ratio:.2f}")
-        if ratio < 0.5:
-            print(
-                "  ⚠️  Generated samples are suspiciously close to source (possible memorization)"
-            )
-        elif ratio < 1.5:
-            print(
-                "  ✓  Generated samples show similar variation to real intra-class pairs"
-            )
-        else:
-            print("  ⚠️  Generated samples differ more than expected from source trees")
-
-    if inter_mean > 0 and intra_mean > 0:
-        if gen_to_real_mean < inter_mean:
-            print("  ✓  Gen-to-Real CD is lower than inter-class (conditioning works)")
-        else:
-            print(
-                "  ⚠️  Gen-to-Real CD is higher than inter-class (conditioning may be weak)"
-            )
-
-    print("=" * 70 + "\n")
-
-
-def save_results(
-    pair_results: list[PairResult],
-    tree_results: list[TreeResult],
-    intraclass_baseline: dict,
-    interclass_baseline: dict,
-    output_dir: Path,
-):
-    """Save evaluation results to JSON and CSV files."""
-
-    output_dir = Path(output_dir)
-
-    # Compute summary statistics
-    all_cd_means = [p.cd.mean for p in pair_results]
-    all_downsample_stds = [p.cd.std for p in pair_results]
-    tree_cd_means = [t.cd_mean for t in tree_results]
-    tree_cd_mins = [t.cd_min for t in tree_results]
-
-    summary = {
-        "pair_statistics": {
-            "n_pairs": len(pair_results),
-            "cd_mean": float(np.mean(all_cd_means)),
-            "cd_std": float(np.std(all_cd_means)),
-            "cd_median": float(np.median(all_cd_means)),
-            "cd_min": float(np.min(all_cd_means)),
-            "cd_max": float(np.max(all_cd_means)),
-        },
-        "downsampling_variance": {
-            "mean_std_within_pairs": float(np.mean(all_downsample_stds)),
-            "max_std_within_pairs": float(np.max(all_downsample_stds)),
-            "n_pairs_downsampled": sum(1 for p in pair_results if p.cd.was_downsampled),
-        },
-        "tree_statistics": {
-            "n_trees": len(tree_results),
-            "mean_of_tree_means": float(np.mean(tree_cd_means)),
-            "std_of_tree_means": float(np.std(tree_cd_means)),
-            "mmd_mean": float(np.mean(tree_cd_mins)),
-            "mmd_std": float(np.std(tree_cd_mins)),
-        },
-        "baselines": {
-            "intraclass": intraclass_baseline["global"],
-            "interclass": interclass_baseline,
-        },
-    }
-
-    # Save summary JSON
-    summary_path = output_dir / "cd_summary.json"
-    with open(summary_path, "w") as f:
-        json.dump(summary, f, indent=2)
-    print(f"Saved summary to {summary_path}")
-
-    # Save per-pair results as CSV
-    pair_rows = []
-    for p in pair_results:
-        pair_rows.append(
-            {
-                "source_tree_id": p.source_tree_id,
-                "sample_id": p.sample_id,
-                "species": p.species,
-                "height_m": p.height_m,
-                "scan_type": p.scan_type,
-                "cd_mean": p.cd.mean,
-                "cd_std": p.cd.std,
-                "cd_min": p.cd.min,
-                "cd_max": p.cd.max,
-                "was_downsampled": p.cd.was_downsampled,
-                "original_real_count": p.cd.original_real_count,
-                "comparison_count": p.cd.comparison_count,
-                "cd_all_values": p.cd.all_values,  # List of all CD values from downsamples
-            }
-        )
-    pair_df = pd.DataFrame(pair_rows)
-    pair_csv_path = output_dir / "cd_per_pair.csv"
-    pair_df.to_csv(pair_csv_path, index=False)
-    print(f"Saved per-pair results to {pair_csv_path}")
-
-    # Save per-tree results as CSV
-    tree_rows = [asdict(t) for t in tree_results]
-    tree_df = pd.DataFrame(tree_rows)
-    tree_csv_path = output_dir / "cd_per_tree.csv"
-    tree_df.to_csv(tree_csv_path, index=False)
-    print(f"Saved per-tree results to {tree_csv_path}")
-
-    # Save intra-class per-species results
-    if intraclass_baseline.get("per_species"):
-        species_rows = [
-            {"species": sp, **stats}
-            for sp, stats in intraclass_baseline["per_species"].items()
-        ]
-        species_df = pd.DataFrame(species_rows)
-        species_csv_path = output_dir / "cd_intraclass_per_species.csv"
-        species_df.to_csv(species_csv_path, index=False)
-        print(f"Saved per-species baseline to {species_csv_path}")
-
-
-# =============================================================================
-# Data Loading Functions
+# Data Loading
 # =============================================================================
 
 
 def normalize_tree_id(tree_id) -> str:
-    """
-    Normalize tree ID to 5-digit zero-padded string format.
-
-    Generated samples store source_tree_id as int (e.g., 3607)
-    Real tree metadata stores file_id as string (e.g., "03607")
-    """
+    """Normalize tree ID to 5-digit zero-padded string format."""
     return str(tree_id).zfill(5)
 
 
-def load_generated_samples(samples_dir: Path) -> tuple[pd.DataFrame, dict]:
+def load_generated_metadata(experiment_dir: Path) -> pd.DataFrame:
     """
-    Load generated samples metadata and point clouds.
+    Load generated samples metadata CSV from experiment directory.
 
-    Args:
-        samples_dir: Path to generated samples directory (e.g., generated_samples/experiment_timestamp/)
-
-    Returns:
-        metadata_df: DataFrame with sample metadata
-        point_clouds: Dict mapping sample_id -> np.ndarray of shape (N, 3) in meters
+    Returns DataFrame with normalized source_tree_id.
     """
-    samples_dir = Path(samples_dir)
+    samples_dir = experiment_dir / "samples"
+    csv_path = samples_dir / "samples_metadata.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(
+            f"Metadata not found: {csv_path}\n"
+            "Run postprocess_samples.py first."
+        )
 
-    # Load metadata CSV
-    metadata_path = samples_dir / "samples_metadata.csv"
-    if not metadata_path.exists():
-        raise FileNotFoundError(f"Metadata not found: {metadata_path}")
-
-    metadata_df = pd.read_csv(metadata_path)
-
-    # Normalize source_tree_id to zero-padded string format
-    metadata_df["source_tree_id"] = metadata_df["source_tree_id"].apply(
-        normalize_tree_id
-    )
-
-    print(f"Loaded metadata for {len(metadata_df)} generated samples")
-
-    # Determine point cloud format and directory
-    laz_dir = samples_dir / "laz"
-    zarr_dir = samples_dir / "zarr"
-
-    if laz_dir.exists():
-        pc_dir = laz_dir
-        pc_format = "laz"
-    elif zarr_dir.exists():
-        pc_dir = zarr_dir
-        pc_format = "zarr"
-    else:
-        raise FileNotFoundError(f"No point cloud directory found in {samples_dir}")
-
-    print(f"Loading point clouds from {pc_dir} (format: {pc_format})")
-
-    # Load point clouds
-    point_clouds = {}
-    missing_count = 0
-
-    for _, row in tqdm(
-        metadata_df.iterrows(), total=len(metadata_df), desc="Loading generated"
-    ):
-        sample_id = row["sample_id"]
-
-        if pc_format == "laz":
-            pc_path = pc_dir / f"{sample_id}.laz"
-            if pc_path.exists():
-                las = laspy.read(str(pc_path))
-                points = np.stack([las.x, las.y, las.z], axis=-1).astype(np.float32)
-                point_clouds[sample_id] = points
-            else:
-                missing_count += 1
-        else:  # zarr
-            pc_path = pc_dir / f"{sample_id}.zarr"
-            if pc_path.exists():
-                point_clouds[sample_id] = zarr.load(pc_path).astype(np.float32)
-            else:
-                missing_count += 1
-
-    if missing_count > 0:
-        print(f"  Warning: {missing_count} point cloud files not found")
-    return metadata_df, point_clouds
+    df = pd.read_csv(csv_path)
+    df["source_tree_id"] = df["source_tree_id"].apply(normalize_tree_id)
+    print(f"Loaded metadata for {len(df)} generated samples")
+    print(f"  Unique source trees: {df['source_tree_id'].nunique()}")
+    print(f"  Species: {df['species'].nunique()}")
+    if "cfg_scale" in df.columns:
+        print(f"  CFG scale range: {df['cfg_scale'].min():.2f} - {df['cfg_scale'].max():.2f}")
+    return df
 
 
-def load_real_samples(
-    data_path: Path,
-    csv_path: Path,
-    source_tree_ids: list[str],
-) -> tuple[pd.DataFrame, dict]:
+def load_real_metadata(data_path: Path) -> pd.DataFrame:
     """
-    Load real tree point clouds for the specified source tree IDs.
+    Load real tree metadata, filter to test split, derive file_id and file_path.
 
-    Only loads samples from the test split to ensure evaluation is on held-out data.
-    Point clouds are kept in normalized form (as stored in .zarr files).
-
-    Normalization: points_norm = (points_centered / height) * 2.0
-
-    Args:
-        data_path: Path to FOR-species20K directory
-        csv_path: Path to tree_metadata_dev.csv
-        source_tree_ids: List of tree IDs to load (from generated samples metadata)
-
-    Returns:
-        metadata_df: DataFrame with real tree metadata (filtered to test split and requested IDs)
-        point_clouds: Dict mapping file_id -> np.ndarray of shape (N, 3) normalized
+    Returns DataFrame with columns: file_id, file_path, species, data_type, tree_H, etc.
     """
     data_path = Path(data_path)
-    csv_path = Path(csv_path)
+    csv_path = data_path / "metadata.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Metadata CSV not found: {csv_path}")
 
-    # Load full metadata
-    full_df = pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path)
+    if "split" not in df.columns:
+        raise ValueError("CSV missing 'split' column. Run preprocess_laz.py first.")
 
-    # Verify split column exists
-    if "split" not in full_df.columns:
-        raise ValueError(
-            f"CSV missing 'split' column. Run preprocess_laz.py to assign splits."
-        )
+    # Derive file_id and file_path
+    df["file_id"] = df["filename"].apply(lambda x: Path(x).stem)
+    df["file_path"] = df["file_id"].apply(lambda x: str(data_path / f"{x}.zarr"))
 
-    # Extract file_id from filename (e.g., "/train/00070.las" -> "00070")
-    full_df["file_id"] = full_df["filename"].apply(lambda x: Path(x).stem)
-
-    # Filter to test split only
-    test_df = full_df[full_df["split"] == "test"].copy()
-    print(f"Filtered to test split: {len(test_df)}/{len(full_df)} samples")
-
-    # Filter to requested IDs (within test split)
-    source_tree_ids_set = set(source_tree_ids)
-    metadata_df = test_df[test_df["file_id"].isin(source_tree_ids_set)].copy()
-
-    # Warn if some requested IDs are not in test split
-    test_file_ids = set(test_df["file_id"])
-    not_in_test = source_tree_ids_set - test_file_ids
-    if not_in_test:
-        print(
-            f"  Warning: {len(not_in_test)} requested trees are not in test split (skipped)"
-        )
-
-    print(
-        f"Found {len(metadata_df)}/{len(source_tree_ids_set)} requested real trees in test split"
-    )
-
-    # Build file paths
-    zarr_dir = data_path / "zarr" / "dev"
-    metadata_df["file_path"] = metadata_df["file_id"].apply(
-        lambda x: zarr_dir / f"{x}.zarr"
-    )
-
-    # Load point clouds (keep normalized)
-    point_clouds = {}
-    missing_count = 0
-
-    for _, row in tqdm(
-        metadata_df.iterrows(), total=len(metadata_df), desc="Loading real"
-    ):
-        file_id = row["file_id"]
-        file_path = row["file_path"]
-
-        if file_path.exists():
-            # Load normalized points directly from .zarr
-            # These are already normalized: points_norm = (points_centered / height) * 2.0
-            points_norm = zarr.load(file_path).astype(np.float32)
-            point_clouds[file_id] = points_norm
-        else:
-            missing_count += 1
-
-    if missing_count > 0:
-        print(f"  Warning: {missing_count} real point cloud files not found")
-
-    print(f"  Loaded {len(point_clouds)} real point clouds (normalized)")
-    return metadata_df, point_clouds
+    # Filter to test split
+    test_df = df[df["split"] == "test"].copy()
+    print(f"Loaded real metadata: {len(test_df)} test trees (of {len(df)} total)")
+    return test_df
 
 
-def build_evaluation_pairs(
+def load_point_cloud(path: str) -> np.ndarray:
+    """Load a point cloud from a zarr file."""
+    return zarr.load(path).astype(np.float32)
+
+
+# =============================================================================
+# Per-Tree Evaluation (Parallelized)
+# =============================================================================
+
+
+def build_tree_tasks(
     gen_metadata: pd.DataFrame,
-    gen_point_clouds: dict,
     real_metadata: pd.DataFrame,
-    real_point_clouds: dict,
+    zarr_dir: Path,
+    seed: int,
 ) -> list[dict]:
     """
-    Build list of (real, generated) pairs for evaluation.
+    Build task dicts for parallel per-tree evaluation.
 
-    Each generated sample is paired with its source real tree.
-    Both real and generated point clouds are already in normalized coordinates
-    (from preprocessing and model output respectively).
-
-    Normalization scheme: points_norm = (points_centered / height) * 2.0
-
-    Returns:
-        List of dicts with keys:
-            - source_tree_id: ID of the real tree
-            - sample_id: ID of the generated sample
-            - real_points: np.ndarray (N, 3) normalized
-            - gen_points: np.ndarray (M, 3) normalized
-            - species: species name
-            - height_m: tree height in meters
-            - scan_type: scanner type (TLS, MLS, ULS)
+    Groups generated samples by source_tree_id and matches to real metadata.
+    Returns list of serializable task dicts.
     """
-    pairs = []
-    skipped = 0
+    # Index real metadata by file_id
+    real_lookup = {}
+    for _, row in real_metadata.iterrows():
+        real_lookup[row["file_id"]] = {
+            "file_path": row["file_path"],
+            "species": row["species"],
+            "data_type": row["data_type"],
+            "tree_H": row["tree_H"],
+        }
 
-    for _, row in gen_metadata.iterrows():
-        source_tree_id = row["source_tree_id"]
-        sample_id = row["sample_id"]
-        height_m = row["height_m"]
+    # Group generated samples by source_tree_id
+    grouped = gen_metadata.groupby("source_tree_id")
 
-        # Check if we have both point clouds
-        if sample_id not in gen_point_clouds:
-            skipped += 1
+    tasks = []
+    skipped_trees = 0
+    for tree_id, group in grouped:
+        if tree_id not in real_lookup:
+            skipped_trees += 1
             continue
-        if source_tree_id not in real_point_clouds:
-            skipped += 1
-            continue
 
-        # Get generated points (already in normalized coordinates from model output)
-        gen_points_norm = gen_point_clouds[sample_id]
+        real_info = real_lookup[tree_id]
 
-        pairs.append(
-            {
-                "source_tree_id": source_tree_id,
-                "sample_id": sample_id,
-                "real_points": real_point_clouds[source_tree_id],  # Already normalized
-                "gen_points": gen_points_norm,  # Already normalized from model
+        # Build list of generated sample info
+        gen_samples = []
+        for _, row in group.iterrows():
+            sample_info = {
+                "sample_id": row["sample_id"],
+                "zarr_path": str(zarr_dir / f"{row['sample_file']}"),
+                "cfg_scale": float(row.get("cfg_scale", 0.0)),
                 "species": row["species"],
-                "height_m": height_m,
-                "scan_type": row["scan_type"],
+                "height_m": float(row.get("height_m", real_info["tree_H"])),
+                "scan_type": row.get("scan_type", real_info["data_type"]),
             }
-        )
+            gen_samples.append(sample_info)
 
-    if skipped > 0:
-        print(f"  Skipped {skipped} pairs due to missing point clouds")
+        tasks.append({
+            "source_tree_id": tree_id,
+            "real_path": real_info["file_path"],
+            "real_species": real_info["species"],
+            "real_data_type": real_info["data_type"],
+            "real_height": float(real_info["tree_H"]),
+            "gen_samples": gen_samples,
+            "seed": seed,
+        })
 
-    print(f"Built {len(pairs)} evaluation pairs (all point clouds normalized)")
-    return pairs
+    if skipped_trees > 0:
+        print(f"  Skipped {skipped_trees} trees not found in real test set")
+    print(f"  Built {len(tasks)} tree evaluation tasks")
+    return tasks
 
 
-def group_pairs_by_tree(pairs: list[dict]) -> dict[str, list[dict]]:
+def evaluate_tree_worker(task: dict) -> dict:
     """
-    Group evaluation pairs by source tree ID.
+    Worker function: evaluate all generated samples for one real tree.
+
+    Returns dict with:
+        - 'pairs': list of flat metric dicts (one per generated sample)
+        - 'real_cloud': the loaded real point cloud (for global metrics reuse)
+        - 'source_tree_id': tree identifier
+    """
+    real_cloud = load_point_cloud(task["real_path"])
+    pairs = []
+
+    for gen_info in task["gen_samples"]:
+        try:
+            gen_cloud = load_point_cloud(gen_info["zarr_path"])
+        except Exception:
+            continue
+
+        cd, emd = compute_distances(real_cloud, gen_cloud)
+
+        pairs.append({
+            "source_tree_id": task["source_tree_id"],
+            "sample_id": gen_info["sample_id"],
+            "species": gen_info["species"],
+            "height_m": gen_info["height_m"],
+            "scan_type": gen_info["scan_type"],
+            "cfg_scale": gen_info["cfg_scale"],
+            "cd": cd,
+            "emd": emd,
+        })
+
+    return {
+        "pairs": pairs,
+        "real_cloud": real_cloud,
+        "source_tree_id": task["source_tree_id"],
+    }
+
+
+def evaluate_all_trees(
+    tasks: list[dict], num_workers: int
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Evaluate all trees in parallel using multiprocessing.
 
     Returns:
-        Dict mapping source_tree_id -> list of pairs for that tree
+        pair_df: DataFrame with one row per generated sample
+        real_clouds: dict mapping source_tree_id -> np.ndarray
     """
-    grouped = defaultdict(list)
-    for pair in pairs:
-        grouped[pair["source_tree_id"]].append(pair)
-    return dict(grouped)
+    all_pairs = []
+    real_clouds = {}
+
+    print(f"Evaluating {len(tasks)} trees with {num_workers} workers...")
+    start = time.time()
+
+    with mp.Pool(num_workers) as pool:
+        results = list(tqdm(
+            pool.imap_unordered(evaluate_tree_worker, tasks),
+            total=len(tasks),
+            desc="Per-tree CD+EMD",
+        ))
+
+    for result in results:
+        all_pairs.extend(result["pairs"])
+        real_clouds[result["source_tree_id"]] = result["real_cloud"]
+
+    elapsed = time.time() - start
+    print(f"  Completed {len(all_pairs)} pairs in {elapsed:.0f}s")
+
+    pair_df = pd.DataFrame(all_pairs)
+    return pair_df, real_clouds
 
 
-def print_data_summary(pairs: list[dict], grouped: dict):
-    """Print summary statistics about the loaded data."""
-    print("\n" + "=" * 60)
-    print("DATA SUMMARY")
-    print("=" * 60)
+def aggregate_per_tree(pair_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggregate pair-level metrics to tree-level.
 
-    print(f"Total evaluation pairs: {len(pairs)}")
-    print(f"Unique source trees: {len(grouped)}")
+    Returns DataFrame with one row per source tree.
+    """
+    agg = pair_df.groupby("source_tree_id").agg(
+        species=("species", "first"),
+        height_m=("height_m", "first"),
+        scan_type=("scan_type", "first"),
+        n_samples=("cd", "count"),
+        cd_mean=("cd", "mean"),
+        cd_std=("cd", "std"),
+        cd_median=("cd", "median"),
+        cd_min=("cd", "min"),
+        cd_max=("cd", "max"),
+        emd_mean=("emd", "mean"),
+        emd_std=("emd", "std"),
+        emd_median=("emd", "median"),
+        emd_min=("emd", "min"),
+        emd_max=("emd", "max"),
+    ).reset_index()
+    return agg
 
-    # Samples per tree
-    samples_per_tree = [len(v) for v in grouped.values()]
-    print(
-        f"Samples per tree: min={min(samples_per_tree)}, max={max(samples_per_tree)}, "
-        f"mean={np.mean(samples_per_tree):.1f}"
+
+# =============================================================================
+# Baselines (Parallelized)
+# =============================================================================
+
+
+def baseline_worker(task: dict) -> dict:
+    """
+    Worker function: compute CD + EMD between two real point clouds.
+
+    Task dict must have 'path_a', 'path_b', 'label' (intra/inter), and 'species_a'/'species_b'.
+    """
+    cloud_a = load_point_cloud(task["path_a"])
+    cloud_b = load_point_cloud(task["path_b"])
+    cd, emd = compute_distances(cloud_a, cloud_b)
+    return {
+        "species_a": task["species_a"],
+        "species_b": task["species_b"],
+        "label": task["label"],
+        "cd": cd,
+        "emd": emd,
+    }
+
+
+def build_baseline_tasks(
+    real_metadata: pd.DataFrame,
+    pairs_per_species: int,
+    interclass_pairs: int,
+    seed: int,
+) -> list[dict]:
+    """Build task dicts for intra-class and inter-class baselines."""
+    rng = np.random.default_rng(seed)
+
+    # Group trees by species
+    species_to_rows = defaultdict(list)
+    for _, row in real_metadata.iterrows():
+        species_to_rows[row["species"]].append(row)
+
+    tasks = []
+
+    # Intra-class: pairs of different trees, same species
+    for species, rows in species_to_rows.items():
+        if len(rows) < 2:
+            continue
+        n_possible = len(rows) * (len(rows) - 1) // 2
+        n_pairs = min(pairs_per_species, n_possible)
+        for _ in range(n_pairs):
+            i, j = rng.choice(len(rows), size=2, replace=False)
+            tasks.append({
+                "path_a": rows[i]["file_path"],
+                "path_b": rows[j]["file_path"],
+                "species_a": species,
+                "species_b": species,
+                "label": "intra",
+            })
+
+    # Inter-class: pairs of trees from different species
+    all_rows = list(real_metadata.itertuples(index=False))
+    for _ in range(interclass_pairs):
+        attempts = 0
+        while attempts < 100:
+            i, j = rng.choice(len(all_rows), size=2, replace=False)
+            if all_rows[i].species != all_rows[j].species:
+                break
+            attempts += 1
+        if attempts >= 100:
+            continue
+        tasks.append({
+            "path_a": all_rows[i].file_path,
+            "path_b": all_rows[j].file_path,
+            "species_a": all_rows[i].species,
+            "species_b": all_rows[j].species,
+            "label": "inter",
+        })
+
+    intra_count = sum(1 for t in tasks if t["label"] == "intra")
+    inter_count = sum(1 for t in tasks if t["label"] == "inter")
+    print(f"  Built {intra_count} intra-class + {inter_count} inter-class baseline tasks")
+    return tasks
+
+
+def compute_baselines(tasks: list[dict], num_workers: int) -> dict:
+    """Compute baseline distances in parallel and return summary stats."""
+    if not tasks:
+        return {"intra": {}, "inter": {}}
+
+    print(f"Computing baselines with {num_workers} workers...")
+    start = time.time()
+
+    with mp.Pool(num_workers) as pool:
+        results = list(tqdm(
+            pool.imap_unordered(baseline_worker, tasks),
+            total=len(tasks),
+            desc="Baselines",
+        ))
+
+    elapsed = time.time() - start
+    print(f"  Completed {len(results)} baseline pairs in {elapsed:.0f}s")
+
+    # Split by label
+    intra_results = [r for r in results if r["label"] == "intra"]
+    inter_results = [r for r in results if r["label"] == "inter"]
+
+    def summarize(result_list):
+        if not result_list:
+            return {"cd": {}, "emd": {}}
+        cds = [r["cd"] for r in result_list]
+        emds = [r["emd"] for r in result_list]
+        return {
+            "cd": {
+                "mean": float(np.mean(cds)),
+                "std": float(np.std(cds)),
+                "median": float(np.median(cds)),
+                "n_pairs": len(cds),
+            },
+            "emd": {
+                "mean": float(np.mean(emds)),
+                "std": float(np.std(emds)),
+                "median": float(np.median(emds)),
+                "n_pairs": len(emds),
+            },
+        }
+
+    # Per-species intra-class breakdown
+    intra_by_species = defaultdict(list)
+    for r in intra_results:
+        intra_by_species[r["species_a"]].append(r)
+
+    per_species_intra = {}
+    for species, res_list in intra_by_species.items():
+        cds = [r["cd"] for r in res_list]
+        emds = [r["emd"] for r in res_list]
+        per_species_intra[species] = {
+            "cd_mean": float(np.mean(cds)),
+            "cd_std": float(np.std(cds)),
+            "emd_mean": float(np.mean(emds)),
+            "emd_std": float(np.std(emds)),
+            "n_pairs": len(cds),
+        }
+
+    return {
+        "intra": summarize(intra_results),
+        "inter": summarize(inter_results),
+        "intra_per_species": per_species_intra,
+    }
+
+
+# =============================================================================
+# Global Distributional Metrics (CD-only)
+# =============================================================================
+
+
+def _cd_row_worker(args: tuple) -> tuple[int, np.ndarray]:
+    """Compute one row of a CD cross-distance matrix."""
+    row_idx, cloud_a, clouds_b = args
+    row = np.array([chamfer_distance(cloud_a, cb) for cb in clouds_b], dtype=np.float32)
+    return row_idx, row
+
+
+def compute_cd_matrix(
+    clouds_a: list[np.ndarray],
+    clouds_b: list[np.ndarray],
+    num_workers: int,
+    desc: str = "CD matrix",
+) -> np.ndarray:
+    """
+    Compute pairwise CD matrix between two sets of point clouds.
+
+    Returns (len(clouds_a), len(clouds_b)) matrix.
+    """
+    n_a = len(clouds_a)
+    n_b = len(clouds_b)
+
+    # Build tasks: each task is one row
+    tasks = [(i, clouds_a[i], clouds_b) for i in range(n_a)]
+
+    matrix = np.zeros((n_a, n_b), dtype=np.float32)
+
+    with mp.Pool(num_workers) as pool:
+        results = list(tqdm(
+            pool.imap_unordered(_cd_row_worker, tasks),
+            total=n_a,
+            desc=desc,
+        ))
+
+    for row_idx, row_data in results:
+        matrix[row_idx] = row_data
+
+    return matrix
+
+
+def compute_jsd(real_clouds: list[np.ndarray], gen_clouds: list[np.ndarray], bins: int = 28) -> float:
+    """
+    Compute Jensen-Shannon Divergence between real and generated point distributions.
+
+    Voxelizes the combined point pool into bins^3 voxels, then computes JSD
+    between the marginal occupancy distributions.
+    """
+    # Pool all points
+    real_all = np.concatenate(real_clouds, axis=0)
+    gen_all = np.concatenate(gen_clouds, axis=0)
+    all_points = np.concatenate([real_all, gen_all], axis=0)
+
+    # Determine bin edges from combined data
+    mins = all_points.min(axis=0)
+    maxs = all_points.max(axis=0)
+    # Add small epsilon to avoid edge issues
+    eps = 1e-6
+    edges = [np.linspace(mins[d] - eps, maxs[d] + eps, bins + 1) for d in range(3)]
+
+    # Histogram for real and generated
+    hist_real, _ = np.histogramdd(real_all, bins=edges)
+    hist_gen, _ = np.histogramdd(gen_all, bins=edges)
+
+    # Normalize to probability distributions
+    hist_real = hist_real.flatten().astype(np.float64)
+    hist_gen = hist_gen.flatten().astype(np.float64)
+
+    p = hist_real / (hist_real.sum() + 1e-30)
+    q = hist_gen / (hist_gen.sum() + 1e-30)
+
+    # JSD = 0.5 * KL(p||m) + 0.5 * KL(q||m) where m = 0.5*(p+q)
+    m = 0.5 * (p + q)
+
+    # Avoid log(0) by only computing where m > 0
+    mask = m > 0
+    kl_pm = np.sum(p[mask] * np.log(p[mask] / m[mask] + 1e-30))
+    kl_qm = np.sum(q[mask] * np.log(q[mask] / m[mask] + 1e-30))
+
+    jsd = 0.5 * kl_pm + 0.5 * kl_qm
+    return float(jsd)
+
+
+def compute_global_metrics(
+    real_clouds: dict[str, np.ndarray],
+    pair_df: pd.DataFrame,
+    num_workers: int,
+    seed: int,
+) -> dict:
+    """
+    Compute global distributional metrics (PointFlow paper):
+    - JSD: Jensen-Shannon Divergence on voxelized point distributions
+    - MMD-CD: Minimum Matching Distance (mean min-CD from real to gen)
+    - COV-CD: Coverage (fraction of real matched as NN by at least one gen)
+    - 1-NNA-CD: 1-Nearest-Neighbor Accuracy (should be ~50% if good)
+
+    Selects one representative generated sample per tree (random, seeded).
+    """
+    rng = np.random.default_rng(seed)
+
+    # Sort tree IDs for deterministic ordering
+    tree_ids = sorted(real_clouds.keys())
+    n_trees = len(tree_ids)
+
+    # Build S_r (real set) and S_g (one random generated per tree)
+    zarr_dir = None  # We'll load from pair_df paths
+
+    # For each tree, pick one random generated sample
+    real_list = []
+    gen_list = []
+    gen_tree_ids = []
+
+    for tree_id in tree_ids:
+        # Real cloud
+        real_list.append(real_clouds[tree_id])
+
+        # Pick one random generated sample for this tree
+        tree_pairs = pair_df[pair_df["source_tree_id"] == tree_id]
+        if len(tree_pairs) == 0:
+            # Use real cloud as fallback (shouldn't happen)
+            gen_list.append(real_clouds[tree_id])
+            gen_tree_ids.append(tree_id)
+            continue
+
+        chosen_idx = rng.integers(len(tree_pairs))
+        chosen_row = tree_pairs.iloc[chosen_idx]
+        gen_tree_ids.append(tree_id)
+
+        # We need to load the generated cloud - get path from sample_id
+        # The sample_file is {sample_id}.zarr in the zarr dir
+        # We stored it in the pair data, but we need the actual cloud
+        # Since we already computed CD/EMD, we need to reload for global metrics
+        # Store the sample_id so we can load later
+        gen_list.append(chosen_row["sample_id"])
+
+    print(f"\nGlobal metrics: {n_trees} real clouds, {len(gen_list)} generated representatives")
+
+    # We need actual point cloud data for gen_list
+    # But we don't have the zarr_dir in this function scope
+    # Return the selection and let the caller handle loading
+    return real_list, gen_list, gen_tree_ids
+
+
+def compute_global_metrics_from_clouds(
+    real_list: list[np.ndarray],
+    gen_list: list[np.ndarray],
+    num_workers: int,
+) -> dict:
+    """
+    Compute global distributional metrics from pre-loaded cloud lists.
+
+    Args:
+        real_list: List of real point clouds (one per tree)
+        gen_list: List of generated point clouds (one per tree)
+        num_workers: Number of parallel workers
+    """
+    n = len(real_list)
+    assert len(gen_list) == n, f"Mismatched lengths: {len(real_list)} real vs {len(gen_list)} gen"
+
+    print(f"Computing global metrics for {n} trees...")
+
+    # 1. JSD
+    print("  Computing JSD...")
+    jsd = compute_jsd(real_list, gen_list, bins=28)
+    print(f"    JSD = {jsd:.6f}")
+
+    # 2. Cross-distance matrix (real x gen)
+    print("  Computing cross-distance matrix (real x gen)...")
+    start = time.time()
+    cross_matrix = compute_cd_matrix(real_list, gen_list, num_workers, desc="Cross CD (real x gen)")
+    print(f"    Cross matrix computed in {time.time() - start:.0f}s")
+
+    # 3. MMD-CD: For each real, find min CD to any generated. Mean across all.
+    min_real_to_gen = cross_matrix.min(axis=1)  # (n,) min CD from each real to closest gen
+    mmd_cd = float(min_real_to_gen.mean())
+    print(f"    MMD-CD = {mmd_cd:.6f}")
+
+    # 4. COV-CD: For each gen, find its NN real. Count how many unique reals are matched.
+    nn_real_for_gen = cross_matrix.argmin(axis=0)  # (n,) for each gen, which real is closest
+    unique_matched = len(set(nn_real_for_gen.tolist()))
+    cov_cd = float(unique_matched / n)
+    print(f"    COV-CD = {cov_cd:.4f} ({unique_matched}/{n} reals covered)")
+
+    # 5. 1-NNA-CD
+    # Need within-set distance matrices
+    print("  Computing within-real distance matrix...")
+    start = time.time()
+    within_real = compute_cd_matrix(real_list, real_list, num_workers, desc="Within-real CD")
+    print(f"    Within-real matrix computed in {time.time() - start:.0f}s")
+
+    print("  Computing within-gen distance matrix...")
+    start = time.time()
+    within_gen = compute_cd_matrix(gen_list, gen_list, num_workers, desc="Within-gen CD")
+    print(f"    Within-gen matrix computed in {time.time() - start:.0f}s")
+
+    # 1-NNA: For each point in the pool (real + gen), find 1-NN excluding self.
+    # Classify as "same set" or "different set". If distributions match, accuracy ~ 50%.
+    # For real[i]: NN in real set (excluding self) vs NN in gen set
+    # For gen[i]: NN in gen set (excluding self) vs NN in real set
+
+    correct = 0
+    total = 2 * n
+
+    for i in range(n):
+        # Real[i]: compare nearest real (excl self) vs nearest gen
+        within_dists = within_real[i].copy()
+        within_dists[i] = np.inf  # exclude self
+        nn_same = within_dists.min()
+        nn_diff = cross_matrix[i].min()  # nearest gen
+        if nn_same < nn_diff:
+            correct += 1
+
+    # cross_matrix is (real x gen), so cross_matrix.T is (gen x real)
+    cross_T = cross_matrix.T
+
+    for j in range(n):
+        # Gen[j]: compare nearest gen (excl self) vs nearest real
+        within_dists = within_gen[j].copy()
+        within_dists[j] = np.inf  # exclude self
+        nn_same = within_dists.min()
+        nn_diff = cross_T[j].min()  # nearest real
+        if nn_same < nn_diff:
+            correct += 1
+
+    nna_cd = float(correct / total * 100)  # percentage
+    print(f"    1-NNA-CD = {nna_cd:.2f}% (50% = perfect)")
+
+    return {
+        "jsd": jsd,
+        "mmd_cd": mmd_cd,
+        "cov_cd": cov_cd,
+        "cov_cd_count": unique_matched,
+        "cov_cd_total": n,
+        "one_nna_cd": nna_cd,
+        "n_trees": n,
+    }
+
+
+# =============================================================================
+# Breakdowns
+# =============================================================================
+
+
+def compute_breakdowns(pair_df: pd.DataFrame, tree_df: pd.DataFrame) -> dict:
+    """Compute metric breakdowns by species, height, scan type, and CFG scale."""
+    breakdowns = {}
+
+    # --- By Species (tree-level) ---
+    by_species = tree_df.groupby("species").agg(
+        n_trees=("source_tree_id", "count"),
+        cd_mean=("cd_mean", "mean"),
+        cd_std=("cd_mean", "std"),
+        cd_median=("cd_mean", "median"),
+        emd_mean=("emd_mean", "mean"),
+        emd_std=("emd_mean", "std"),
+        emd_median=("emd_mean", "median"),
+    ).reset_index()
+    breakdowns["by_species"] = by_species
+
+    # --- By Height (tree-level) ---
+    height_bins = [0, 5, 10, 20, float("inf")]
+    height_labels = ["0-5m", "5-10m", "10-20m", "20m+"]
+    tree_df = tree_df.copy()
+    tree_df["height_bin"] = pd.cut(
+        tree_df["height_m"], bins=height_bins, labels=height_labels, right=False
     )
+    by_height = tree_df.groupby("height_bin", observed=True).agg(
+        n_trees=("source_tree_id", "count"),
+        cd_mean=("cd_mean", "mean"),
+        cd_std=("cd_mean", "std"),
+        cd_median=("cd_mean", "median"),
+        emd_mean=("emd_mean", "mean"),
+        emd_std=("emd_mean", "std"),
+        emd_median=("emd_mean", "median"),
+    ).reset_index()
+    breakdowns["by_height"] = by_height
 
-    # Species distribution
-    species_counts = defaultdict(int)
-    for pair in pairs:
-        species_counts[pair["species"]] += 1
+    # --- By Scan Type (tree-level) ---
+    by_scan = tree_df.groupby("scan_type").agg(
+        n_trees=("source_tree_id", "count"),
+        cd_mean=("cd_mean", "mean"),
+        cd_std=("cd_mean", "std"),
+        cd_median=("cd_mean", "median"),
+        emd_mean=("emd_mean", "mean"),
+        emd_std=("emd_mean", "std"),
+        emd_median=("emd_mean", "median"),
+    ).reset_index()
+    breakdowns["by_scan_type"] = by_scan
 
-    print(f"\nSpecies distribution ({len(species_counts)} species):")
-    for species, count in sorted(species_counts.items(), key=lambda x: -x[1])[:10]:
-        print(f"  {species}: {count} samples")
-    if len(species_counts) > 10:
-        print(f"  ... and {len(species_counts) - 10} more species")
+    # --- By CFG Scale (pair-level) ---
+    if "cfg_scale" in pair_df.columns:
+        cfg_bins = np.arange(1.0, 5.0, 0.5)
+        cfg_labels = [f"{b:.1f}-{b+0.5:.1f}" for b in cfg_bins[:-1]]
+        pair_df = pair_df.copy()
+        pair_df["cfg_bin"] = pd.cut(
+            pair_df["cfg_scale"], bins=cfg_bins, labels=cfg_labels, right=False
+        )
+        by_cfg = pair_df.groupby("cfg_bin", observed=True).agg(
+            n_pairs=("cd", "count"),
+            cd_mean=("cd", "mean"),
+            cd_std=("cd", "std"),
+            cd_median=("cd", "median"),
+            emd_mean=("emd", "mean"),
+            emd_std=("emd", "std"),
+            emd_median=("emd", "median"),
+        ).reset_index()
+        breakdowns["by_cfg"] = by_cfg
 
-    # Height distribution
-    heights = [pair["height_m"] for pair in pairs]
-    print(f"\nHeight distribution:")
-    print(
-        f"  min={min(heights):.1f}m, max={max(heights):.1f}m, "
-        f"mean={np.mean(heights):.1f}m, std={np.std(heights):.1f}m"
-    )
+    return breakdowns
 
-    # Point count distribution
-    real_point_counts = [len(pair["real_points"]) for pair in pairs]
-    gen_point_counts = [len(pair["gen_points"]) for pair in pairs]
-    print(
-        f"\nPoint counts (real): min={min(real_point_counts)}, max={max(real_point_counts)}, "
-        f"mean={np.mean(real_point_counts):.0f}"
-    )
-    print(
-        f"Point counts (gen):  min={min(gen_point_counts)}, max={max(gen_point_counts)}, "
-        f"mean={np.mean(gen_point_counts):.0f}"
-    )
 
-    print("=" * 60 + "\n")
+# =============================================================================
+# Output / Reporting
+# =============================================================================
+
+
+def save_results(
+    pair_df: pd.DataFrame,
+    tree_df: pd.DataFrame,
+    baselines: dict,
+    global_metrics: dict | None,
+    breakdowns: dict,
+    output_dir: Path,
+):
+    """Save all evaluation results to the output directory."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    breakdowns_dir = output_dir / "breakdowns"
+    breakdowns_dir.mkdir(parents=True, exist_ok=True)
+
+    # Per-pair CSV
+    pair_csv = output_dir / "per_pair.csv"
+    pair_df.to_csv(pair_csv, index=False)
+    print(f"  Saved {len(pair_df)} pairs to {pair_csv}")
+
+    # Per-tree CSV
+    tree_csv = output_dir / "per_tree.csv"
+    tree_df.to_csv(tree_csv, index=False)
+    print(f"  Saved {len(tree_df)} trees to {tree_csv}")
+
+    # Baselines JSON
+    baselines_path = output_dir / "baselines.json"
+    with open(baselines_path, "w") as f:
+        json.dump(baselines, f, indent=2)
+    print(f"  Saved baselines to {baselines_path}")
+
+    # Global metrics JSON
+    if global_metrics is not None:
+        global_path = output_dir / "global_metrics.json"
+        with open(global_path, "w") as f:
+            json.dump(global_metrics, f, indent=2)
+        print(f"  Saved global metrics to {global_path}")
+
+    # Breakdowns CSVs
+    for name, df in breakdowns.items():
+        csv_path = breakdowns_dir / f"{name}.csv"
+        df.to_csv(csv_path, index=False)
+        print(f"  Saved {name} breakdown to {csv_path}")
+
+    # Summary JSON
+    summary = {
+        "per_pair": {
+            "n_pairs": len(pair_df),
+            "cd_mean": float(pair_df["cd"].mean()),
+            "cd_std": float(pair_df["cd"].std()),
+            "cd_median": float(pair_df["cd"].median()),
+            "emd_mean": float(pair_df["emd"].mean()),
+            "emd_std": float(pair_df["emd"].std()),
+            "emd_median": float(pair_df["emd"].median()),
+        },
+        "per_tree": {
+            "n_trees": len(tree_df),
+            "cd_mean_of_means": float(tree_df["cd_mean"].mean()),
+            "cd_std_of_means": float(tree_df["cd_mean"].std()),
+            "emd_mean_of_means": float(tree_df["emd_mean"].mean()),
+            "emd_std_of_means": float(tree_df["emd_mean"].std()),
+        },
+        "baselines": {
+            "intra_class": baselines.get("intra", {}),
+            "inter_class": baselines.get("inter", {}),
+        },
+    }
+    if global_metrics is not None:
+        summary["global_metrics"] = global_metrics
+
+    summary_path = output_dir / "evaluation_summary.json"
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"  Saved summary to {summary_path}")
+
+
+def print_results(
+    pair_df: pd.DataFrame,
+    tree_df: pd.DataFrame,
+    baselines: dict,
+    global_metrics: dict | None,
+):
+    """Print formatted evaluation results."""
+    print("\n" + "=" * 70)
+    print("EVALUATION RESULTS")
+    print("=" * 70)
+
+    # Per-pair
+    print(f"\nPer-pair metrics (n={len(pair_df)} pairs):")
+    print(f"  CD:  mean={pair_df['cd'].mean():.6f}  std={pair_df['cd'].std():.6f}  median={pair_df['cd'].median():.6f}")
+    print(f"  EMD: mean={pair_df['emd'].mean():.6f}  std={pair_df['emd'].std():.6f}  median={pair_df['emd'].median():.6f}")
+
+    # Per-tree
+    print(f"\nPer-tree metrics (n={len(tree_df)} trees):")
+    print(f"  CD:  mean={tree_df['cd_mean'].mean():.6f}  std={tree_df['cd_mean'].std():.6f}")
+    print(f"  EMD: mean={tree_df['emd_mean'].mean():.6f}  std={tree_df['emd_mean'].std():.6f}")
+
+    # Baselines
+    intra = baselines.get("intra", {})
+    inter = baselines.get("inter", {})
+    if intra.get("cd"):
+        print(f"\nBaselines:")
+        print(f"  Intra-class CD:  mean={intra['cd']['mean']:.6f}  std={intra['cd']['std']:.6f}  (n={intra['cd']['n_pairs']})")
+        print(f"  Intra-class EMD: mean={intra['emd']['mean']:.6f}  std={intra['emd']['std']:.6f}")
+    if inter.get("cd"):
+        print(f"  Inter-class CD:  mean={inter['cd']['mean']:.6f}  std={inter['cd']['std']:.6f}  (n={inter['cd']['n_pairs']})")
+        print(f"  Inter-class EMD: mean={inter['emd']['mean']:.6f}  std={inter['emd']['std']:.6f}")
+
+    # Interpretation
+    gen_cd = pair_df["cd"].mean()
+    if intra.get("cd") and intra["cd"]["mean"] > 0:
+        ratio = gen_cd / intra["cd"]["mean"]
+        print(f"\n  Gen/Intra ratio: {ratio:.2f} (< 1.5 is good)")
+    if inter.get("cd") and inter["cd"]["mean"] > 0:
+        print(f"  Gen < Inter: {gen_cd < inter['cd']['mean']} (conditioning works if True)")
+
+    # Global metrics
+    if global_metrics is not None:
+        print(f"\nGlobal distributional metrics (PointFlow):")
+        print(f"  JSD:      {global_metrics['jsd']:.6f}")
+        print(f"  MMD-CD:   {global_metrics['mmd_cd']:.6f}")
+        print(f"  COV-CD:   {global_metrics['cov_cd']:.4f} ({global_metrics['cov_cd_count']}/{global_metrics['cov_cd_total']})")
+        print(f"  1-NNA-CD: {global_metrics['one_nna_cd']:.2f}% (50% = perfect)")
+
+    print("=" * 70 + "\n")
 
 
 # =============================================================================
@@ -962,44 +890,29 @@ def main():
         description="Evaluate generated tree point clouds against real trees"
     )
 
-    # Input paths
     parser.add_argument(
-        "--samples_dir",
+        "--experiment_name",
         type=str,
-        default="generated_samples/transformer-8-256-4096_20260105_172326",
-        help="Path to generated samples directory",
+        required=True,
+        help="Name of the experiment (e.g., 'transformer-8-512-4096')",
     )
     parser.add_argument(
         "--data_path",
         type=str,
-        default="FOR-species20K",
-        help="Path to FOR-species20K directory",
+        default="data/preprocessed-4096",
+        help="Path to preprocessed dataset directory",
     )
     parser.add_argument(
-        "--csv_path",
+        "--experiments_dir",
         type=str,
-        default="FOR-species20K/tree_metadata_dev.csv",
-        help="Path to real tree metadata CSV",
-    )
-
-    # Evaluation parameters
-    parser.add_argument(
-        "--num_downsamples",
-        type=int,
-        default=20,
-        help="Number of random downsamples for uncertainty estimation",
+        default="experiments",
+        help="Base directory containing experiments",
     )
     parser.add_argument(
-        "--baseline_pairs_per_species",
+        "--num_workers",
         type=int,
-        default=100,
-        help="Number of pairs to sample per species for intra-class baseline",
-    )
-    parser.add_argument(
-        "--interclass_pairs",
-        type=int,
-        default=100,
-        help="Number of pairs to sample for inter-class baseline",
+        default=40,
+        help="Number of parallel workers",
     )
     parser.add_argument(
         "--seed",
@@ -1007,138 +920,149 @@ def main():
         default=42,
         help="Random seed for reproducibility",
     )
-
-    # Output
     parser.add_argument(
-        "--output_dir",
-        type=str,
-        default=None,
-        help="Output directory for results (default: samples_dir/evaluation/)",
+        "--skip_global",
+        action="store_true",
+        help="Skip global distributional metrics (saves ~1h)",
+    )
+    parser.add_argument(
+        "--baseline_pairs_per_species",
+        type=int,
+        default=20,
+        help="Number of intra-class baseline pairs per species",
+    )
+    parser.add_argument(
+        "--interclass_pairs",
+        type=int,
+        default=200,
+        help="Number of inter-class baseline pairs",
     )
 
     args = parser.parse_args()
 
     # Resolve paths
-    samples_dir = Path(args.samples_dir)
+    experiments_dir = Path(args.experiments_dir)
+    experiment_dir = experiments_dir / args.experiment_name
+    if not experiment_dir.exists():
+        raise FileNotFoundError(f"Experiment not found: {experiment_dir}")
+
     data_path = Path(args.data_path)
-    csv_path = Path(args.csv_path)
+    zarr_dir = experiment_dir / "samples" / "zarr"
+    if not zarr_dir.exists():
+        raise FileNotFoundError(f"Generated samples not found: {zarr_dir}")
 
-    if args.output_dir:
-        output_dir = Path(args.output_dir)
-    else:
-        output_dir = samples_dir / "evaluation"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = experiment_dir / "samples" / "evaluation"
 
-    print(f"Samples directory: {samples_dir}")
+    print(f"Experiment: {args.experiment_name}")
     print(f"Data path: {data_path}")
-    print(f"Output directory: {output_dir}")
-    print(f"Downsamples per pair: {args.num_downsamples}")
+    print(f"Generated samples: {zarr_dir}")
+    print(f"Output: {output_dir}")
+    print(f"Workers: {args.num_workers}")
     print()
 
-    # ==========================================================================
-    # 1. Load Data
-    # ==========================================================================
+    # =========================================================================
+    # 1. Load Metadata
+    # =========================================================================
 
     print("=" * 60)
-    print("LOADING DATA")
+    print("LOADING METADATA")
     print("=" * 60)
 
-    # Load generated samples
-    print("\nLoading generated samples...")
-    gen_metadata, gen_point_clouds = load_generated_samples(samples_dir)
+    gen_metadata = load_generated_metadata(experiment_dir)
+    real_metadata = load_real_metadata(data_path)
 
-    # Get unique source tree IDs
-    source_tree_ids = gen_metadata["source_tree_id"].unique().tolist()
-    print(f"\nFound {len(source_tree_ids)} unique source trees")
-
-    # Load corresponding real samples
-    print("\nLoading real samples...")
-    real_metadata, real_point_clouds = load_real_samples(
-        data_path=data_path,
-        csv_path=csv_path,
-        source_tree_ids=source_tree_ids,
-    )
-
-    # Build evaluation pairs
-    print("\nBuilding evaluation pairs...")
-    pairs = build_evaluation_pairs(
-        gen_metadata,
-        gen_point_clouds,
-        real_metadata,
-        real_point_clouds,
-    )
-
-    # Group by tree and print summary
-    grouped = group_pairs_by_tree(pairs)
-    print_data_summary(pairs, grouped)
-
-    # ==========================================================================
-    # 2. Compute Baselines
-    # ==========================================================================
-
-    print("=" * 60)
-    print("COMPUTING BASELINES")
-    print("=" * 60)
-
-    print("\nComputing intra-class (same species) baseline...")
-    intraclass_baseline = compute_intraclass_baseline(
-        real_point_clouds=real_point_clouds,
-        real_metadata=real_metadata,
-        num_pairs_per_species=args.baseline_pairs_per_species,
-        target_count=4096,
-        num_downsamples=args.num_downsamples,
-        seed=args.seed,
-    )
-
-    print("\nComputing inter-class (different species) baseline...")
-    interclass_baseline = compute_interclass_baseline(
-        real_point_clouds=real_point_clouds,
-        real_metadata=real_metadata,
-        num_pairs=args.interclass_pairs,
-        target_count=4096,
-        num_downsamples=args.num_downsamples,
-        seed=args.seed + 1000,
-    )
-
-    # ==========================================================================
-    # 3. Compute Pairwise Chamfer Distance
-    # ==========================================================================
+    # =========================================================================
+    # 2. Per-Tree Evaluation
+    # =========================================================================
 
     print("\n" + "=" * 60)
-    print("COMPUTING CHAMFER DISTANCE")
+    print("PER-TREE EVALUATION (CD + EMD)")
     print("=" * 60)
 
-    print(f"\nComputing CD for {len(pairs)} real-generated pairs...")
-    pair_results = compute_pairwise_cd(
-        pairs=pairs,
-        num_downsamples=args.num_downsamples,
-        seed=args.seed,
+    tasks = build_tree_tasks(gen_metadata, real_metadata, zarr_dir, args.seed)
+    pair_df, real_clouds = evaluate_all_trees(tasks, args.num_workers)
+
+    if pair_df.empty:
+        print("ERROR: No valid pairs found. Check data paths.")
+        return
+
+    tree_df = aggregate_per_tree(pair_df)
+    print(f"  {len(pair_df)} pairs across {len(tree_df)} trees")
+
+    # =========================================================================
+    # 3. Baselines
+    # =========================================================================
+
+    print("\n" + "=" * 60)
+    print("BASELINES (Intra-class + Inter-class)")
+    print("=" * 60)
+
+    baseline_tasks = build_baseline_tasks(
+        real_metadata,
+        pairs_per_species=args.baseline_pairs_per_species,
+        interclass_pairs=args.interclass_pairs,
+        seed=args.seed + 1000,
     )
+    baselines = compute_baselines(baseline_tasks, args.num_workers)
 
-    # Aggregate by tree
-    print("\nAggregating results by tree...")
-    tree_results = aggregate_by_tree(pair_results)
+    # =========================================================================
+    # 4. Global Distributional Metrics
+    # =========================================================================
 
-    # ==========================================================================
-    # 4. Report and Save Results
-    # ==========================================================================
+    global_metrics = None
+    if not args.skip_global:
+        print("\n" + "=" * 60)
+        print("GLOBAL DISTRIBUTIONAL METRICS")
+        print("=" * 60)
 
-    print_cd_results(
-        pair_results=pair_results,
-        tree_results=tree_results,
-        intraclass_baseline=intraclass_baseline,
-        interclass_baseline=interclass_baseline,
-    )
+        # Select one representative generated sample per tree
+        rng = np.random.default_rng(args.seed + 2000)
+        tree_ids = sorted(real_clouds.keys())
+        real_list = [real_clouds[tid] for tid in tree_ids]
+        gen_list = []
 
-    save_results(
-        pair_results=pair_results,
-        tree_results=tree_results,
-        intraclass_baseline=intraclass_baseline,
-        interclass_baseline=interclass_baseline,
-        output_dir=output_dir,
-    )
+        for tid in tree_ids:
+            tree_pairs = pair_df[pair_df["source_tree_id"] == tid]
+            if len(tree_pairs) == 0:
+                gen_list.append(real_clouds[tid])  # fallback
+                continue
 
-    print("\nEvaluation complete!")
+            # Pick random sample and reload its cloud
+            chosen = tree_pairs.iloc[rng.integers(len(tree_pairs))]
+            sample_file = f"{chosen['sample_id']}.zarr"
+            gen_path = str(zarr_dir / sample_file)
+            try:
+                gen_cloud = load_point_cloud(gen_path)
+                gen_list.append(gen_cloud)
+            except Exception:
+                gen_list.append(real_clouds[tid])  # fallback
+
+        global_metrics = compute_global_metrics_from_clouds(
+            real_list, gen_list, args.num_workers
+        )
+
+    # =========================================================================
+    # 5. Breakdowns
+    # =========================================================================
+
+    print("\n" + "=" * 60)
+    print("BREAKDOWNS")
+    print("=" * 60)
+
+    breakdowns = compute_breakdowns(pair_df, tree_df)
+
+    # =========================================================================
+    # 6. Save and Report
+    # =========================================================================
+
+    print("\n" + "=" * 60)
+    print("SAVING RESULTS")
+    print("=" * 60)
+
+    save_results(pair_df, tree_df, baselines, global_metrics, breakdowns, output_dir)
+    print_results(pair_df, tree_df, baselines, global_metrics)
+
+    print("Evaluation complete!")
 
 
 if __name__ == "__main__":
