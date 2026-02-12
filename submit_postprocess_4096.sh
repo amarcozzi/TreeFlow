@@ -9,4 +9,4 @@ source /project/umontana_fire_modeling/anthony.marcozzi/miniforge3/etc/profile.d
 conda activate treeflow
 
 python postprocess_samples.py \
-    --experiment_name transformer-8-256-4096
+    --experiment_name transformer-8-512-4096
