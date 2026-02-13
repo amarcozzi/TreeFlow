@@ -92,9 +92,24 @@ def earth_movers_distance(p1: np.ndarray, p2: np.ndarray) -> float:
 
 
 def compute_rz(cloud: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Convert (N,3) point cloud to (r, z) where r = sqrt(x^2 + y^2)."""
-    r = np.sqrt(cloud[:, 0] ** 2 + cloud[:, 1] ** 2)
-    z = cloud[:, 2]
+    """Convert (N,3) point cloud to (r, z) in trunk-aligned cylindrical coordinates.
+
+    Uses SVD to find the principal axis (direction of maximum variance),
+    which corresponds to the main growth direction. r is perpendicular
+    distance from that axis, z is projection along it.
+    """
+    centroid = cloud.mean(axis=0)
+    centered = cloud - centroid
+
+    _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+    axis = Vt[0]
+
+    # Ensure axis points "up" (positive z component)
+    if axis[2] < 0:
+        axis = -axis
+
+    z = centered @ axis
+    r = np.linalg.norm(centered - np.outer(z, axis), axis=1)
     return r, z
 
 
@@ -755,8 +770,16 @@ def compute_stratified_jsd(
 # =============================================================================
 
 
-def compute_breakdowns(pair_df: pd.DataFrame, tree_df: pd.DataFrame) -> dict:
-    """Compute metric breakdowns by species, height, scan type, and CFG scale."""
+def compute_breakdowns(
+    pair_df: pd.DataFrame,
+    tree_df: pd.DataFrame,
+    stratified_jsd: dict,
+) -> dict:
+    """Compute metric breakdowns by species, height, scan type, and CFG scale.
+
+    Merges per-pair metric aggregations with stratified 3D voxel JSD into
+    unified tables per dimension.
+    """
     breakdowns = {}
 
     tree_agg = dict(
@@ -771,23 +794,26 @@ def compute_breakdowns(pair_df: pd.DataFrame, tree_df: pd.DataFrame) -> dict:
     )
 
     # --- By Species ---
-    breakdowns["by_species"] = (
-        tree_df.groupby("species").agg(**tree_agg).reset_index()
-    )
+    df = tree_df.groupby("species").agg(**tree_agg).reset_index()
+    jsd_map = stratified_jsd.get("by_species", {})
+    df["voxel_jsd"] = df["species"].map(jsd_map)
+    breakdowns["by_species"] = df
 
     # --- By Height (5m bins) ---
     tree_df = tree_df.copy()
     tree_df["height_bin"] = tree_df["height_m"].apply(get_height_bin)
-    breakdowns["by_height"] = (
-        tree_df.groupby("height_bin", observed=True).agg(**tree_agg).reset_index()
-    )
+    df = tree_df.groupby("height_bin", observed=True).agg(**tree_agg).reset_index()
+    jsd_map = stratified_jsd.get("by_height_bin", {})
+    df["voxel_jsd"] = df["height_bin"].map(jsd_map)
+    breakdowns["by_height"] = df
 
     # --- By Scan Type ---
-    breakdowns["by_scan_type"] = (
-        tree_df.groupby("scan_type").agg(**tree_agg).reset_index()
-    )
+    df = tree_df.groupby("scan_type").agg(**tree_agg).reset_index()
+    jsd_map = stratified_jsd.get("by_scan_type", {})
+    df["voxel_jsd"] = df["scan_type"].map(jsd_map)
+    breakdowns["by_scan_type"] = df
 
-    # --- By CFG Scale (pair-level) ---
+    # --- By CFG Scale (pair-level, no voxel JSD) ---
     if "cfg_scale" in pair_df.columns:
         cfg_bins = np.arange(1.0, 5.0, 0.5)
         cfg_labels = [f"{b:.1f}-{b + 0.5:.1f}" for b in cfg_bins[:-1]]
@@ -926,11 +952,35 @@ def save_results(
     print(f"  Saved summary to {summary_path}")
 
 
+def _print_breakdown_table(df: pd.DataFrame, key_col: str, key_width: int = 25):
+    """Print a unified breakdown table with all metrics."""
+    cols = ["cd_mean", "hjsd_mean", "crown_mae_p50_mean", "crown_mae_p75_mean", "crown_mae_p98_mean"]
+    has_voxel = "voxel_jsd" in df.columns
+
+    header = f"  {'':>{key_width}s}  {'N':>5s}  {'CD':>8s}  {'HJSD':>8s}  {'CrP50':>8s}  {'CrP75':>8s}  {'CrP98':>8s}"
+    if has_voxel:
+        header += f"  {'VoxJSD':>8s}"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+
+    for _, row in df.iterrows():
+        n = int(row.get("n_trees", row.get("n_pairs", 0)))
+        line = f"  {str(row[key_col]):>{key_width}s}  {n:>5d}"
+        for c in cols:
+            val = row.get(c, float("nan"))
+            line += f"  {val:>8.4f}" if pd.notna(val) else f"  {'--':>8s}"
+        if has_voxel:
+            val = row.get("voxel_jsd", float("nan"))
+            line += f"  {val:>8.4f}" if pd.notna(val) else f"  {'--':>8s}"
+        print(line)
+
+
 def print_results(
     pair_df: pd.DataFrame,
     tree_df: pd.DataFrame,
     baseline_df: pd.DataFrame,
     stratified_jsd: dict,
+    breakdowns: dict,
 ):
     """Print formatted evaluation results."""
     print("\n" + "=" * 70)
@@ -942,24 +992,6 @@ def print_results(
     for m in PAIR_METRICS:
         s = pair_df[m]
         print(f"  {m:20s}  mean={s.mean():.6f}  std={s.std():.6f}  median={s.median():.6f}")
-
-    # Per-tree
-    print(f"\nPer-tree metrics (n={len(tree_df)} trees):")
-    print(
-        f"  CD:       mean={tree_df['cd_mean'].mean():.6f}  std={tree_df['cd_mean'].std():.6f}"
-    )
-    print(
-        f"  HJSD:     mean={tree_df['hjsd_mean'].mean():.6f}  std={tree_df['hjsd_mean'].std():.6f}"
-    )
-    print(
-        f"  Crown p50: mean={tree_df['crown_mae_p50_mean'].mean():.6f}"
-    )
-    print(
-        f"  Crown p75: mean={tree_df['crown_mae_p75_mean'].mean():.6f}"
-    )
-    print(
-        f"  Crown p98: mean={tree_df['crown_mae_p98_mean'].mean():.6f}"
-    )
 
     # Baselines
     intra_df = baseline_df[baseline_df["label"] == "intra"]
@@ -995,18 +1027,31 @@ def print_results(
                 f"{m:20s} | {gen_val:9.6f} +/- {gen_std:8.6f} | "
                 f"{base_val:9.6f} +/- {base_std:8.6f} | {ratio:6.2f}"
             )
+        if stratified_jsd.get("overall") is not None:
+            print(f"{'voxel_jsd':20s} | {stratified_jsd['overall']:9.6f}{'':>15s} |{'':>24s} |{'':>6s}")
 
-    # Stratified JSD
-    if stratified_jsd.get("overall") is not None:
-        print(f"\nStratified 3D Voxel JSD:")
-        print(f"  Overall: {stratified_jsd['overall']:.6f}")
-        for dim in ["by_species", "by_scan_type", "by_height_bin"]:
-            if dim in stratified_jsd:
-                print(f"  {dim}:")
-                for k, v in sorted(stratified_jsd[dim].items()):
-                    print(f"    {k:25s}: {v:.6f}")
+    # Stratified breakdowns
+    print(f"\n{'='*70}")
+    print("TABLE 2: STRATIFIED BREAKDOWNS")
+    print(f"{'='*70}")
 
-    print("=" * 70 + "\n")
+    if "by_species" in breakdowns:
+        print("\n  By Species:")
+        _print_breakdown_table(breakdowns["by_species"], "species", 25)
+
+    if "by_scan_type" in breakdowns:
+        print("\n  By Scan Type:")
+        _print_breakdown_table(breakdowns["by_scan_type"], "scan_type", 10)
+
+    if "by_height" in breakdowns:
+        print("\n  By Height:")
+        _print_breakdown_table(breakdowns["by_height"], "height_bin", 10)
+
+    if "by_cfg" in breakdowns:
+        print("\n  By CFG Scale:")
+        _print_breakdown_table(breakdowns["by_cfg"], "cfg_bin", 10)
+
+    print("\n" + "=" * 70)
 
 
 # =============================================================================
@@ -1175,7 +1220,7 @@ def main():
     print("BREAKDOWNS")
     print("=" * 60)
 
-    breakdowns = compute_breakdowns(pair_df, tree_df)
+    breakdowns = compute_breakdowns(pair_df, tree_df, stratified_jsd)
 
     # =========================================================================
     # 6. Save and Report
@@ -1186,7 +1231,7 @@ def main():
     print("=" * 60)
 
     save_results(pair_df, tree_df, baseline_df, stratified_jsd, breakdowns, output_dir)
-    print_results(pair_df, tree_df, baseline_df, stratified_jsd)
+    print_results(pair_df, tree_df, baseline_df, stratified_jsd, breakdowns)
 
     print("Evaluation complete!")
 
