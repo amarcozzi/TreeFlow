@@ -30,6 +30,7 @@ accelerate launch --num_processes=4 train.py \
     --shuffle_augment \
     --num_workers 4 \
     --num_epochs 2000 \
+    --resume \
     --lr 5e-5 \
     --min_lr 1e-6 \
     --lr_scheduler cosine \
