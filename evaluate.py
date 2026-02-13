@@ -448,10 +448,21 @@ def compute_baselines(tasks: list[dict], num_workers: int) -> pd.DataFrame:
 # =============================================================================
 
 
+_cd_matrix_clouds_b = None
+
+
+def _cd_matrix_init(clouds_b: list[np.ndarray]):
+    """Pool initializer: store clouds_b as a global to avoid per-task pickling."""
+    global _cd_matrix_clouds_b
+    _cd_matrix_clouds_b = clouds_b
+
+
 def _cd_row_worker(args: tuple) -> tuple[int, np.ndarray]:
     """Compute one row of a CD cross-distance matrix."""
-    row_idx, cloud_a, clouds_b = args
-    row = np.array([chamfer_distance(cloud_a, cb) for cb in clouds_b], dtype=np.float32)
+    row_idx, cloud_a = args
+    row = np.array(
+        [chamfer_distance(cloud_a, cb) for cb in _cd_matrix_clouds_b], dtype=np.float32
+    )
     return row_idx, row
 
 
@@ -465,16 +476,17 @@ def compute_cd_matrix(
     Compute pairwise CD matrix between two sets of point clouds.
 
     Returns (len(clouds_a), len(clouds_b)) matrix.
+    Uses a pool initializer to share clouds_b across workers without per-task pickling.
     """
     n_a = len(clouds_a)
     n_b = len(clouds_b)
 
-    # Build tasks: each task is one row
-    tasks = [(i, clouds_a[i], clouds_b) for i in range(n_a)]
+    # Each task is just (row_idx, cloud_a) — clouds_b is shared via initializer
+    tasks = [(i, clouds_a[i]) for i in range(n_a)]
 
     matrix = np.zeros((n_a, n_b), dtype=np.float32)
 
-    with mp.Pool(num_workers) as pool:
+    with mp.Pool(num_workers, initializer=_cd_matrix_init, initargs=(clouds_b,)) as pool:
         results = list(
             tqdm(
                 pool.imap_unordered(_cd_row_worker, tasks),
