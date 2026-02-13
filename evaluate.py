@@ -2,7 +2,7 @@
 treeflow/evaluate.py
 
 Evaluate generated tree point clouds against real trees using:
-- Per-pair metrics: CD, EMD, 2D histogram JSD, crown profile MAE (p50/p75/p98)
+- Per-pair metrics: CD, 2D histogram JSD, crown profile MAE (p50/p75/p98)
 - Baselines: intra-class (same species + scan type + height bin) and inter-class
 - Stratified 3D voxel JSD: per species, scan type, height bin
 - Breakdowns by species, height, scan type, and CFG scale
@@ -41,7 +41,6 @@ HEIGHT_BIN_LABELS = [
 
 PAIR_METRICS = [
     "cd",
-    "emd",
     "histogram_jsd",
     "crown_mae_p50",
     "crown_mae_p75",
@@ -85,13 +84,6 @@ def earth_movers_distance(p1: np.ndarray, p2: np.ndarray) -> float:
     dist_matrix = cdist(p1, p2, metric="euclidean")
     row_ind, col_ind = linear_sum_assignment(dist_matrix)
     return float(dist_matrix[row_ind, col_ind].mean())
-
-
-def compute_distances(real: np.ndarray, gen: np.ndarray) -> tuple[float, float]:
-    """Compute CD and EMD between two point clouds."""
-    cd = chamfer_distance(real, gen)
-    emd = earth_movers_distance(real, gen)
-    return cd, emd
 
 
 # =============================================================================
@@ -369,7 +361,7 @@ def evaluate_tree_worker(task: dict) -> dict:
     """
     Worker: evaluate all generated samples for one real tree.
 
-    Computes CD, EMD, 2D histogram JSD, and crown profile MAE for each
+    Computes CD, 2D histogram JSD, and crown profile MAE for each
     generated sample against the real tree.
     """
     max_points = task.get("max_points")
@@ -415,7 +407,6 @@ def evaluate_tree_worker(task: dict) -> dict:
     pairs = []
     for gen_cloud, gen_rz, gen_info in zip(gen_clouds, gen_rz_list, gen_infos):
         cd = chamfer_distance(real_cloud, gen_cloud)
-        emd = earth_movers_distance(real_cloud, gen_cloud)
         hjsd, mae_p50, mae_p75, mae_p98 = compute_shape_metrics(
             real_rz, gen_rz, radial_edges, height_edges, profile_a=real_profile
         )
@@ -429,7 +420,6 @@ def evaluate_tree_worker(task: dict) -> dict:
                 "scan_type": gen_info["scan_type"],
                 "cfg_scale": gen_info["cfg_scale"],
                 "cd": cd,
-                "emd": emd,
                 "histogram_jsd": hjsd,
                 "crown_mae_p50": mae_p50,
                 "crown_mae_p75": mae_p75,
@@ -440,22 +430,25 @@ def evaluate_tree_worker(task: dict) -> dict:
     return {
         "pairs": pairs,
         "real_cloud": real_cloud,
+        "gen_cloud": gen_clouds[0] if gen_clouds else real_cloud,
         "source_tree_id": task["source_tree_id"],
     }
 
 
 def evaluate_all_trees(
     tasks: list[dict], num_workers: int
-) -> tuple[pd.DataFrame, dict]:
+) -> tuple[pd.DataFrame, dict, dict]:
     """
     Evaluate all trees in parallel.
 
     Returns:
         pair_df: DataFrame with one row per generated sample
         real_clouds: dict mapping source_tree_id -> np.ndarray
+        gen_clouds: dict mapping source_tree_id -> np.ndarray (one representative)
     """
     all_pairs = []
     real_clouds = {}
+    gen_clouds = {}
 
     print(f"Evaluating {len(tasks)} trees with {num_workers} workers...")
     start = time.time()
@@ -472,12 +465,13 @@ def evaluate_all_trees(
     for result in results:
         all_pairs.extend(result["pairs"])
         real_clouds[result["source_tree_id"]] = result["real_cloud"]
+        gen_clouds[result["source_tree_id"]] = result["gen_cloud"]
 
     elapsed = time.time() - start
     print(f"  Completed {len(all_pairs)} pairs in {elapsed:.0f}s")
 
     pair_df = pd.DataFrame(all_pairs)
-    return pair_df, real_clouds
+    return pair_df, real_clouds, gen_clouds
 
 
 def aggregate_per_tree(pair_df: pd.DataFrame) -> pd.DataFrame:
@@ -494,11 +488,6 @@ def aggregate_per_tree(pair_df: pd.DataFrame) -> pd.DataFrame:
             cd_median=("cd", "median"),
             cd_min=("cd", "min"),
             cd_max=("cd", "max"),
-            emd_mean=("emd", "mean"),
-            emd_std=("emd", "std"),
-            emd_median=("emd", "median"),
-            emd_min=("emd", "min"),
-            emd_max=("emd", "max"),
             hjsd_mean=("histogram_jsd", "mean"),
             hjsd_std=("histogram_jsd", "std"),
             hjsd_median=("histogram_jsd", "median"),
@@ -531,7 +520,6 @@ def baseline_worker(task: dict) -> dict:
     cloud_b = load_point_cloud(task["path_b"], max_points=max_points, rng=rng)
 
     cd = chamfer_distance(cloud_a, cloud_b)
-    emd = earth_movers_distance(cloud_a, cloud_b)
 
     rz_a = compute_rz(cloud_a)
     rz_b = compute_rz(cloud_b)
@@ -548,7 +536,6 @@ def baseline_worker(task: dict) -> dict:
         "height_bin": task["height_bin"],
         "label": task["label"],
         "cd": cd,
-        "emd": emd,
         "histogram_jsd": hjsd,
         "crown_mae_p50": mae_p50,
         "crown_mae_p75": mae_p75,
@@ -776,8 +763,6 @@ def compute_breakdowns(pair_df: pd.DataFrame, tree_df: pd.DataFrame) -> dict:
         n_trees=("source_tree_id", "count"),
         cd_mean=("cd_mean", "mean"),
         cd_std=("cd_mean", "std"),
-        emd_mean=("emd_mean", "mean"),
-        emd_std=("emd_mean", "std"),
         hjsd_mean=("hjsd_mean", "mean"),
         hjsd_std=("hjsd_mean", "std"),
         crown_mae_p50_mean=("crown_mae_p50_mean", "mean"),
@@ -814,8 +799,6 @@ def compute_breakdowns(pair_df: pd.DataFrame, tree_df: pd.DataFrame) -> dict:
             n_pairs=("cd", "count"),
             cd_mean=("cd", "mean"),
             cd_std=("cd", "std"),
-            emd_mean=("emd", "mean"),
-            emd_std=("emd", "std"),
             hjsd_mean=("histogram_jsd", "mean"),
             hjsd_std=("histogram_jsd", "std"),
             crown_mae_p50_mean=("crown_mae_p50", "mean"),
@@ -930,8 +913,6 @@ def save_results(
             "n_trees": len(tree_df),
             "cd_mean_of_means": float(tree_df["cd_mean"].mean()),
             "cd_std_of_means": float(tree_df["cd_mean"].std()),
-            "emd_mean_of_means": float(tree_df["emd_mean"].mean()),
-            "emd_std_of_means": float(tree_df["emd_mean"].std()),
             "hjsd_mean_of_means": float(tree_df["hjsd_mean"].mean()),
             "hjsd_std_of_means": float(tree_df["hjsd_mean"].std()),
         },
@@ -966,9 +947,6 @@ def print_results(
     print(f"\nPer-tree metrics (n={len(tree_df)} trees):")
     print(
         f"  CD:       mean={tree_df['cd_mean'].mean():.6f}  std={tree_df['cd_mean'].std():.6f}"
-    )
-    print(
-        f"  EMD:      mean={tree_df['emd_mean'].mean():.6f}  std={tree_df['emd_mean'].std():.6f}"
     )
     print(
         f"  HJSD:     mean={tree_df['hjsd_mean'].mean():.6f}  std={tree_df['hjsd_mean'].std():.6f}"
@@ -1135,7 +1113,7 @@ def main():
     # =========================================================================
 
     print("\n" + "=" * 60)
-    print("PER-TREE EVALUATION (CD + EMD + Histogram JSD + Crown MAE)")
+    print("PER-TREE EVALUATION (CD + Histogram JSD + Crown MAE)")
     print("=" * 60)
 
     tasks = build_tree_tasks(
@@ -1147,7 +1125,7 @@ def main():
         histogram_radial_bins=args.histogram_radial_bins,
         histogram_height_bins=args.histogram_height_bins,
     )
-    pair_df, real_clouds = evaluate_all_trees(tasks, args.num_workers)
+    pair_df, real_clouds, gen_clouds_map = evaluate_all_trees(tasks, args.num_workers)
 
     if pair_df.empty:
         print("ERROR: No valid pairs found. Check data paths.")
@@ -1182,23 +1160,7 @@ def main():
     print("STRATIFIED 3D VOXEL JSD")
     print("=" * 60)
 
-    # Pick one representative generated sample per tree
-    rng = np.random.default_rng(args.seed + 2000)
-    gen_clouds_map = {}
-    for tid in sorted(real_clouds.keys()):
-        tree_pairs = pair_df[pair_df["source_tree_id"] == tid]
-        if len(tree_pairs) == 0:
-            gen_clouds_map[tid] = real_clouds[tid]  # fallback
-            continue
-
-        chosen = tree_pairs.iloc[rng.integers(len(tree_pairs))]
-        sample_file = f"{chosen['sample_id']}.zarr"
-        gen_path = str(zarr_dir / sample_file)
-        try:
-            gen_clouds_map[tid] = load_point_cloud(gen_path)
-        except Exception:
-            gen_clouds_map[tid] = real_clouds[tid]  # fallback
-
+    # gen_clouds_map already populated from per-tree evaluation (one representative per tree)
     stratified_jsd = compute_stratified_jsd(tree_df, real_clouds, gen_clouds_map)
     print(f"  Overall JSD: {stratified_jsd.get('overall', 'N/A')}")
     print(f"  Species groups: {len(stratified_jsd.get('by_species', {}))}")
