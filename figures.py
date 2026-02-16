@@ -773,7 +773,7 @@ def _select_median_tree(per_pair_csv: str, metric: str) -> tuple[str, float]:
     global_median = pair_df[metric].median()
     tree_medians = pair_df.groupby("source_tree_id")[metric].median()
     best_tree = (tree_medians - global_median).abs().idxmin()
-    return best_tree, tree_medians[best_tree]
+    return str(best_tree), float(tree_medians[best_tree])
 
 
 def _load_pair_clouds(
