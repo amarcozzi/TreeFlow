@@ -810,7 +810,7 @@ def _load_pair_clouds(
     # Load generated cloud
     experiment_dir = Path(experiment_dir)
     gen_meta = pd.read_csv(experiment_dir / "samples" / "samples_metadata.csv")
-    sample_row = gen_meta[gen_meta["sample_id"] == int(pair_info["sample_id"])].iloc[0]
+    sample_row = gen_meta[gen_meta["sample_id"] == pair_info["sample_id"]].iloc[0]
     gen_path = experiment_dir / "samples" / "zarr" / sample_row["sample_file"]
     gen_cloud = zarr.load(str(gen_path)).astype(np.float32)
 
@@ -954,7 +954,7 @@ def create_figure_hjsd(
     # Save metadata (cast numpy types for JSON)
     meta = {
         "source_tree_id": int(tree_id),
-        "sample_id": int(pair_info["sample_id"]),
+        "sample_id": str(pair_info["sample_id"]),
         "species": pair_info["species"],
         "height_m": float(pair_info["height_m"]),
         "histogram_jsd": float(jsd_value),
@@ -1094,7 +1094,7 @@ def create_figure_crown_mae(
     # Save metadata (cast numpy types for JSON)
     meta = {
         "source_tree_id": int(tree_id),
-        "sample_id": int(pair_info["sample_id"]),
+        "sample_id": str(pair_info["sample_id"]),
         "species": pair_info["species"],
         "height_m": float(pair_info["height_m"]),
         "crown_mae_p50": float(pair_info["crown_mae_p50"]),
