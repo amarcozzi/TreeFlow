@@ -17,7 +17,6 @@ accelerate launch --num_processes=4 train.py \
     --output_dir experiments \
     --model_type transformer \
     --experiment_name "finetune-8-512-16384" \
-    --pretrained_weights ./experiments/pretrain-8-512-8192/checkpoints/epoch_1000.pt \
     --data_path ./data/preprocessed-16384 \
     --model_dim 512 \
     --num_heads 8 \
