@@ -950,14 +950,14 @@ def create_figure_hjsd(
     plt.close(fig)
     print(f"  Saved: {out_path}")
 
-    # Save metadata
+    # Save metadata (cast numpy types for JSON)
     meta = {
         "source_tree_id": tree_id,
-        "sample_id": pair_info["sample_id"],
+        "sample_id": int(pair_info["sample_id"]),
         "species": pair_info["species"],
-        "height_m": pair_info["height_m"],
-        "histogram_jsd": jsd_value,
-        "global_median_hjsd": median_hjsd,
+        "height_m": float(pair_info["height_m"]),
+        "histogram_jsd": float(jsd_value),
+        "global_median_hjsd": float(median_hjsd),
     }
     meta_path = output_dir / "figure_hjsd.json"
     with open(meta_path, "w") as f:
@@ -1090,16 +1090,16 @@ def create_figure_crown_mae(
     plt.close(fig)
     print(f"  Saved: {out_path}")
 
-    # Save metadata
+    # Save metadata (cast numpy types for JSON)
     meta = {
         "source_tree_id": tree_id,
-        "sample_id": pair_info["sample_id"],
+        "sample_id": int(pair_info["sample_id"]),
         "species": pair_info["species"],
-        "height_m": pair_info["height_m"],
-        "crown_mae_p50": pair_info["crown_mae_p50"],
-        "crown_mae_p75": pair_info["crown_mae_p75"],
-        "crown_mae_p98": pair_info["crown_mae_p98"],
-        "global_median_crown_mae_p75": median_mae,
+        "height_m": float(pair_info["height_m"]),
+        "crown_mae_p50": float(pair_info["crown_mae_p50"]),
+        "crown_mae_p75": float(pair_info["crown_mae_p75"]),
+        "crown_mae_p98": float(pair_info["crown_mae_p98"]),
+        "global_median_crown_mae_p75": float(median_mae),
     }
     meta_path = output_dir / "figure_crown_mae.json"
     with open(meta_path, "w") as f:
