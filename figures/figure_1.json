@@ -1,0 +1,30 @@
+{
+  "a": {
+    "file_id": "10837",
+    "species": "Acer_pseudoplatanus",
+    "data_type": "TLS",
+    "height_m": 19.43,
+    "num_points": 16384
+  },
+  "b": {
+    "file_id": "11116",
+    "species": "Corylus_avellana",
+    "data_type": "TLS",
+    "height_m": 9.84,
+    "num_points": 16384
+  },
+  "c": {
+    "file_id": "15379",
+    "species": "Acer_campestre",
+    "data_type": "TLS",
+    "height_m": 12.28,
+    "num_points": 16384
+  },
+  "d": {
+    "file_id": "05957",
+    "species": "Pseudotsuga_menziesii",
+    "data_type": "ULS",
+    "height_m": 34.87,
+    "num_points": 16384
+  }
+}
