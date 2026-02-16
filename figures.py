@@ -837,6 +837,184 @@ def _compute_rz(cloud: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return r, z
 
 
+def create_figure_svd_axes(
+    experiment_dir: str = "experiments/transformer-8-512-4096",
+    data_path: str = "./data/preprocessed-4096",
+    output_dir: str = "figures",
+    seed: int = 42,
+):
+    """
+    Create a figure showing the SVD-based coordinate system on a real tree.
+
+    Shows a 3D point cloud with the three SVD axes drawn from the centroid,
+    plus a translucent disc in the plane of axes 2-3 to illustrate the
+    radial (r) vs height (z) decomposition used by HJSD and CrMAE.
+    Uses the same tree selected for the HJSD figure for visual continuity.
+    """
+    import zarr
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    eval_dir = Path(experiment_dir) / "samples" / "evaluation"
+    per_pair_csv = str(eval_dir / "per_pair.csv")
+
+    # Use same tree as HJSD figure
+    tree_id, _ = _select_median_tree(
+        per_pair_csv, "histogram_jsd", min_height=10.0
+    )
+
+    # Load real cloud
+    data_path = Path(data_path)
+    tree_id_str = f"{int(tree_id):05d}"
+    real_path = data_path / f"{tree_id_str}.zarr"
+    cloud = zarr.load(str(real_path)).astype(np.float32)
+
+    # Get species from per_pair
+    pair_df = pd.read_csv(per_pair_csv)
+    tree_rows = pair_df[pair_df["source_tree_id"] == tree_id]
+    species = tree_rows.iloc[0]["species"]
+    height_m = float(tree_rows.iloc[0]["height_m"])
+
+    print(
+        f"SVD axes figure: tree {tree_id}, {species}, H={height_m:.1f}m, "
+        f"{len(cloud)} points"
+    )
+
+    # SVD decomposition
+    centroid = cloud.mean(axis=0)
+    centered = cloud - centroid
+    _, S, Vt = np.linalg.svd(centered, full_matrices=False)
+    axes_svd = Vt[:3].copy()
+    # Ensure axis 1 (trunk) points upward
+    if axes_svd[0, 2] < 0:
+        axes_svd[0] = -axes_svd[0]
+
+    # Project for coloring by height along trunk
+    z_proj = centered @ axes_svd[0]
+
+    # Subsample for plotting
+    rng = np.random.default_rng(seed)
+    n_show = min(4000, len(cloud))
+    idx = rng.choice(len(cloud), n_show, replace=False)
+
+    # --- Plot ---
+    fig = plt.figure(figsize=(7, 8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Point cloud colored by height along trunk axis
+    pts = cloud[idx]
+    colors_z = z_proj[idx]
+    sc = ax.scatter(
+        pts[:, 0], pts[:, 1], pts[:, 2],
+        c=colors_z, cmap="viridis", s=1.5, alpha=0.4, rasterized=True,
+    )
+
+    # Draw SVD axes as arrows from centroid
+    axis_colors = ["#d62728", "#2ca02c", "#1f77b4"]  # red, green, blue
+    axis_labels = [
+        "Axis 1 (trunk / $z$)",
+        "Axis 2",
+        "Axis 3",
+    ]
+    # Scale arrows to ~40% of cloud extent for visibility
+    cloud_extent = np.linalg.norm(centered, axis=1).max()
+    arrow_len = cloud_extent * 0.45
+
+    for i in range(3):
+        direction = axes_svd[i] * arrow_len
+        ax.quiver(
+            centroid[0], centroid[1], centroid[2],
+            direction[0], direction[1], direction[2],
+            color=axis_colors[i], linewidth=3, arrow_length_ratio=0.08,
+            zorder=10,
+        )
+        # Label at arrow tip
+        tip = centroid + direction * 1.12
+        ax.text(
+            tip[0], tip[1], tip[2], axis_labels[i],
+            color=axis_colors[i], fontsize=10, fontweight="bold",
+            zorder=11,
+        )
+
+    # Draw translucent disc in the plane of axes 2-3 at the centroid
+    disc_r = arrow_len * 0.55
+    theta = np.linspace(0, 2 * np.pi, 60)
+    disc_pts = centroid[None, :] + np.outer(np.cos(theta), axes_svd[1] * disc_r) \
+        + np.outer(np.sin(theta), axes_svd[2] * disc_r)
+    # Fill as polygon
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    verts = [list(zip(disc_pts[:, 0], disc_pts[:, 1], disc_pts[:, 2]))]
+    disc_poly = Poly3DCollection(verts, alpha=0.15, facecolor="#888888",
+                                  edgecolor="#666666", linewidth=1)
+    ax.add_collection3d(disc_poly)
+
+    # Label the disc
+    disc_label_pos = centroid + axes_svd[1] * disc_r * 0.7 + axes_svd[2] * disc_r * 0.7
+    ax.text(
+        disc_label_pos[0], disc_label_pos[1], disc_label_pos[2],
+        "radial plane ($r$)",
+        color="#666666", fontsize=9, fontstyle="italic", zorder=11,
+    )
+
+    # Centroid marker
+    ax.scatter(
+        [centroid[0]], [centroid[1]], [centroid[2]],
+        color="black", s=60, marker="o", zorder=12, edgecolors="white", linewidths=1.5,
+    )
+
+    # Set equal aspect ratio
+    max_range = np.array([
+        cloud[:, 0].max() - cloud[:, 0].min(),
+        cloud[:, 1].max() - cloud[:, 1].min(),
+        cloud[:, 2].max() - cloud[:, 2].min(),
+    ]).max() / 2.0
+
+    mid = centroid
+    ax.set_xlim(mid[0] - max_range, mid[0] + max_range)
+    ax.set_ylim(mid[1] - max_range, mid[1] + max_range)
+    ax.set_zlim(mid[2] - max_range, mid[2] + max_range)
+
+    ax.view_init(elev=20, azim=45)
+
+    # Clean styling
+    ax.xaxis.pane.fill = False
+    ax.yaxis.pane.fill = False
+    ax.zaxis.pane.fill = False
+    ax.xaxis.pane.set_edgecolor("lightgray")
+    ax.yaxis.pane.set_edgecolor("lightgray")
+    ax.zaxis.pane.set_edgecolor("lightgray")
+    ax.grid(True, alpha=0.3)
+    ax.set_xlabel("X", fontsize=10)
+    ax.set_ylabel("Y", fontsize=10)
+    ax.set_zlabel("Z", fontsize=10)
+
+    species_display = species.replace("_", " ")
+    ax.set_title(
+        f"SVD-aligned coordinate system\n{species_display}, H = {height_m:.1f} m",
+        fontsize=12, pad=15,
+    )
+
+    fig.patch.set_facecolor("white")
+    plt.tight_layout()
+    out_path = output_dir / "figure_svd_axes.pdf"
+    fig.savefig(out_path, format="pdf", bbox_inches="tight", dpi=300)
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+    # Save metadata
+    meta = {
+        "source_tree_id": int(tree_id),
+        "species": species,
+        "height_m": height_m,
+        "num_points": len(cloud),
+        "singular_values": [float(s) for s in S],
+    }
+    meta_path = output_dir / "figure_svd_axes.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  Saved metadata: {meta_path}")
+
+
 def create_figure_hjsd(
     experiment_dir: str = "experiments/transformer-8-512-4096",
     data_path: str = "./data/preprocessed-4096",
@@ -1153,8 +1331,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--figures",
         nargs="+",
-        default=["1", "2", "hjsd", "crown_mae"],
-        help="Which figures to generate (1, 2, hjsd, crown_mae)",
+        default=["1", "2", "svd_axes", "hjsd", "crown_mae"],
+        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae)",
     )
     parser.add_argument(
         "--experiment_dir", default="experiments/transformer-8-512-4096"
@@ -1169,6 +1347,13 @@ if __name__ == "__main__":
             create_figure_1(output_dir=args.output_dir, seed=args.seed)
         elif fig_name == "2":
             create_figure_2(output_dir=args.output_dir, seed=args.seed)
+        elif fig_name == "svd_axes":
+            create_figure_svd_axes(
+                experiment_dir=args.experiment_dir,
+                data_path=args.data_path,
+                output_dir=args.output_dir,
+                seed=args.seed,
+            )
         elif fig_name == "hjsd":
             create_figure_hjsd(
                 experiment_dir=args.experiment_dir,
