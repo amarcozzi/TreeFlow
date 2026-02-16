@@ -1,0 +1,10 @@
+{
+  "source_tree_id": 19281,
+  "sample_id": "19281_11",
+  "species": "Fagus_sylvatica",
+  "height_m": 27.800960540771484,
+  "crown_mae_p50": 0.0353327154774557,
+  "crown_mae_p75": 0.0753442851657217,
+  "crown_mae_p98": 0.1043815987015312,
+  "global_median_crown_mae_p75": 0.07636580537643885
+}
