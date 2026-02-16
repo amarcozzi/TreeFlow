@@ -1,13 +1,12 @@
 #!/bin/bash
 #SBATCH --account=umontana_fire_modeling
-#SBATCH --partition=gpu-l40s
-#SBATCH --gres=gpu:l40s:4
+#SBATCH --partition=gpu-a100
+#SBATCH --gres=gpu:a100:4
 #SBATCH --job-name="finetune_tf_512_16k"
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=512G
 #SBATCH --time=2-0
 #SBATCH --output=log_finetune_transformer_8_512_16384.out
-  #SBATCH --exclude=atlas-0248
 
 module load cuda
 
