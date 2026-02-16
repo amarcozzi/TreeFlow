@@ -4,6 +4,7 @@ figures.py - Create figures for paper
 
 import json
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy.ndimage import gaussian_filter
@@ -248,13 +249,13 @@ def create_figure_2(
     ax_a.xaxis.pane.fill = False
     ax_a.yaxis.pane.fill = False
     ax_a.zaxis.pane.fill = False
-    ax_a.xaxis.pane.set_edgecolor('lightgray')
-    ax_a.yaxis.pane.set_edgecolor('lightgray')
-    ax_a.zaxis.pane.set_edgecolor('lightgray')
+    ax_a.xaxis.pane.set_edgecolor("lightgray")
+    ax_a.yaxis.pane.set_edgecolor("lightgray")
+    ax_a.zaxis.pane.set_edgecolor("lightgray")
     ax_a.grid(True, alpha=0.3)
 
     # White background
-    fig_a.patch.set_facecolor('white')
+    fig_a.patch.set_facecolor("white")
 
     plt.tight_layout()
     fig_a.savefig(
@@ -307,9 +308,9 @@ def create_figure_2(
     ax_b.xaxis.pane.fill = False
     ax_b.yaxis.pane.fill = False
     ax_b.zaxis.pane.fill = False
-    ax_b.xaxis.pane.set_edgecolor('lightgray')
-    ax_b.yaxis.pane.set_edgecolor('lightgray')
-    ax_b.zaxis.pane.set_edgecolor('lightgray')
+    ax_b.xaxis.pane.set_edgecolor("lightgray")
+    ax_b.yaxis.pane.set_edgecolor("lightgray")
+    ax_b.zaxis.pane.set_edgecolor("lightgray")
     ax_b.grid(True, alpha=0.3)
 
     ax_b.xaxis.set_major_locator(MaxNLocator(nbins=4))
@@ -317,12 +318,10 @@ def create_figure_2(
     ax_b.zaxis.set_major_locator(MaxNLocator(nbins=4))
 
     # White background
-    fig_b.patch.set_facecolor('white')
+    fig_b.patch.set_facecolor("white")
 
     plt.tight_layout()
-    fig_b.savefig(
-        output_dir / "figure_2_c.png", bbox_inches="tight", dpi=300
-    )
+    fig_b.savefig(output_dir / "figure_2_c.png", bbox_inches="tight", dpi=300)
     plt.close(fig_b)
     print(f"  Saved: {output_dir}/figure_2_c.png")
 
@@ -346,8 +345,8 @@ def create_figure_2(
     X, Y = np.meshgrid(x_range, y_range)
 
     # Define source and target points for paths (used throughout)
-    x0 = np.array([1.5, 1.8])    # Source point (noise sample)
-    x1 = np.array([7.5, 2.0])    # Target point (tree sample)
+    x0 = np.array([1.5, 1.8])  # Source point (noise sample)
+    x1 = np.array([7.5, 2.0])  # Target point (tree sample)
 
     # Source distribution: Simple Gaussian on the left side
     source_center = np.array([1.5, 1.8])
@@ -360,12 +359,12 @@ def create_figure_2(
     # Target distribution: Complex multi-modal distribution on the right side
     # Many modes with varying shapes to show complexity of learned distribution
     target_centers = [
-        (7.5, 2.0),   # Main mode
-        (8.2, 2.6),   # Secondary mode
-        (6.9, 2.7),   # Third mode
-        (8.1, 1.4),   # Fourth mode
-        (7.0, 1.3),   # Fifth mode (smaller)
-        (8.5, 2.0),   # Sixth mode (smaller)
+        (7.5, 2.0),  # Main mode
+        (8.2, 2.6),  # Secondary mode
+        (6.9, 2.7),  # Third mode
+        (8.1, 1.4),  # Fourth mode
+        (7.0, 1.3),  # Fifth mode (smaller)
+        (8.5, 2.0),  # Sixth mode (smaller)
     ]
     target_sigmas = [
         (0.40, 0.44),  # Slightly elliptical
@@ -381,8 +380,10 @@ def create_figure_2(
     for center, sigmas, weight in zip(target_centers, target_sigmas, target_weights):
         # Elliptical Gaussians for more complex shapes
         target_density += weight * np.exp(
-            -((X - center[0]) ** 2 / (2 * sigmas[0]**2) +
-              (Y - center[1]) ** 2 / (2 * sigmas[1]**2))
+            -(
+                (X - center[0]) ** 2 / (2 * sigmas[0] ** 2)
+                + (Y - center[1]) ** 2 / (2 * sigmas[1] ** 2)
+            )
         )
 
     # Create subtle background gradient
@@ -391,7 +392,9 @@ def create_figure_2(
 
     # Plot filled contours for subtle background
     ax_c.contourf(
-        X, Y, combined_density,
+        X,
+        Y,
+        combined_density,
         levels=20,
         cmap="Reds",
         alpha=0.12,
@@ -417,8 +420,8 @@ def create_figure_2(
             px, py = Arrow_X[i, j], Arrow_Y[i, j]
 
             # Distance from source and target centers
-            dist_to_source = np.sqrt((px - x0[0])**2 + (py - x0[1])**2)
-            dist_to_target = np.sqrt((px - x1[0])**2 + (py - x1[1])**2)
+            dist_to_source = np.sqrt((px - x0[0]) ** 2 + (py - x0[1]) ** 2)
+            dist_to_target = np.sqrt((px - x1[0]) ** 2 + (py - x1[1]) ** 2)
 
             # Skip arrows inside distribution cores
             if dist_to_source < 0.85 or dist_to_target < 0.95:
@@ -432,13 +435,15 @@ def create_figure_2(
 
             # Source influence: radial outward flow
             radial_from_source = np.array([px - x0[0], py - x0[1]])
-            radial_from_source = radial_from_source / (np.linalg.norm(radial_from_source) + 1e-6)
+            radial_from_source = radial_from_source / (
+                np.linalg.norm(radial_from_source) + 1e-6
+            )
 
             # Target influence: weighted attraction to all modes
             target_pull = np.array([0.0, 0.0])
             total_weight = 0
             for k, (tc, tw) in enumerate(zip(target_centers, target_weights)):
-                dist_to_mode = np.sqrt((px - tc[0])**2 + (py - tc[1])**2)
+                dist_to_mode = np.sqrt((px - tc[0]) ** 2 + (py - tc[1]) ** 2)
                 weight = tw / (dist_to_mode + 0.5)
                 toward_mode = np.array([tc[0] - px, tc[1] - py])
                 toward_mode = toward_mode / (np.linalg.norm(toward_mode) + 1e-6)
@@ -455,10 +460,12 @@ def create_figure_2(
             # This adds complexity without chaos
             wave_angle = 0.25 * np.sin(0.8 * px + 0.3 * py) * np.cos(0.5 * py)
             cos_w, sin_w = np.cos(wave_angle), np.sin(wave_angle)
-            local_dir = np.array([
-                local_dir[0] * cos_w - local_dir[1] * sin_w,
-                local_dir[0] * sin_w + local_dir[1] * cos_w
-            ])
+            local_dir = np.array(
+                [
+                    local_dir[0] * cos_w - local_dir[1] * sin_w,
+                    local_dir[0] * sin_w + local_dir[1] * cos_w,
+                ]
+            )
 
             # Magnitude: fade at edges and near distribution centers
             edge_fade_x = min(px / 0.8, (9.0 - px) / 0.8, 1.0)
@@ -472,7 +479,10 @@ def create_figure_2(
 
     # Plot velocity field
     ax_c.quiver(
-        Arrow_X, Arrow_Y, U, V,
+        Arrow_X,
+        Arrow_Y,
+        U,
+        V,
         color="#78909C",  # Blue-gray
         alpha=0.5,
         scale=4,
@@ -486,7 +496,9 @@ def create_figure_2(
     # Plot source distribution contours (blue)
     source_levels = np.linspace(0.12, 0.92, 7) * source_density.max()
     cs_source = ax_c.contour(
-        X, Y, source_density,
+        X,
+        Y,
+        source_density,
         levels=source_levels,
         colors="#1565C0",
         linewidths=1.6,
@@ -496,7 +508,9 @@ def create_figure_2(
     # Plot target distribution contours (red/dark red)
     target_levels = np.linspace(0.08, 0.92, 8) * target_density.max()
     cs_target = ax_c.contour(
-        X, Y, target_density,
+        X,
+        Y,
+        target_density,
         levels=target_levels,
         colors="#C62828",
         linewidths=1.6,
@@ -510,7 +524,8 @@ def create_figure_2(
     train_path = np.array([(1 - t) * x0 + t * x1 for t in t_train])
 
     ax_c.plot(
-        train_path[:, 0], train_path[:, 1],
+        train_path[:, 0],
+        train_path[:, 1],
         color="#00ACC1",
         linewidth=3.5,
         linestyle="-",
@@ -553,7 +568,7 @@ def create_figure_2(
         target_pull = np.array([0.0, 0.0])
         total_weight = 0
         for k, (tc, tw) in enumerate(zip(target_centers, target_weights)):
-            dist_to_mode = np.sqrt((px - tc[0])**2 + (py - tc[1])**2)
+            dist_to_mode = np.sqrt((px - tc[0]) ** 2 + (py - tc[1]) ** 2)
             weight = tw / (dist_to_mode + 0.5)
             toward_mode = np.array([tc[0] - px, tc[1] - py])
             norm_mode = np.linalg.norm(toward_mode)
@@ -574,10 +589,12 @@ def create_figure_2(
         # Add smooth structured variation (gentle waves) - same as quiver field
         wave_angle = 0.25 * np.sin(0.8 * px + 0.3 * py) * np.cos(0.5 * py)
         cos_w, sin_w = np.cos(wave_angle), np.sin(wave_angle)
-        local_dir = np.array([
-            local_dir[0] * cos_w - local_dir[1] * sin_w,
-            local_dir[0] * sin_w + local_dir[1] * cos_w
-        ])
+        local_dir = np.array(
+            [
+                local_dir[0] * cos_w - local_dir[1] * sin_w,
+                local_dir[0] * sin_w + local_dir[1] * cos_w,
+            ]
+        )
 
         return local_dir
 
@@ -608,7 +625,8 @@ def create_figure_2(
 
     # Plot path segments connecting the steps
     ax_c.plot(
-        infer_path[:, 0], infer_path[:, 1],
+        infer_path[:, 0],
+        infer_path[:, 1],
         color="#FF8F00",
         linewidth=2.5,
         linestyle="--",
@@ -618,7 +636,8 @@ def create_figure_2(
 
     # Plot intermediate step markers (exclude start and end)
     ax_c.scatter(
-        infer_path[1:-1, 0], infer_path[1:-1, 1],
+        infer_path[1:-1, 0],
+        infer_path[1:-1, 1],
         color="#FF8F00",
         s=60,
         zorder=7,
@@ -629,7 +648,8 @@ def create_figure_2(
 
     # Plot endpoint marker (larger, to show final ODE result)
     ax_c.scatter(
-        [infer_path[-1, 0]], [infer_path[-1, 1]],
+        [infer_path[-1, 0]],
+        [infer_path[-1, 1]],
         color="#FF8F00",
         s=180,
         zorder=9,
@@ -643,7 +663,8 @@ def create_figure_2(
     # ==========================================
     # Source point (x_0)
     ax_c.scatter(
-        [x0[0]], [x0[1]],
+        [x0[0]],
+        [x0[1]],
         color="#1565C0",
         s=220,
         marker="o",
@@ -654,7 +675,8 @@ def create_figure_2(
 
     # Target point (x_1)
     ax_c.scatter(
-        [x1[0]], [x1[1]],
+        [x1[0]],
+        [x1[1]],
         color="#C62828",
         s=220,
         marker="o",
@@ -668,7 +690,8 @@ def create_figure_2(
     # ==========================================
     # Label for source distribution
     ax_c.text(
-        1.5, 3.2,
+        1.5,
+        3.2,
         r"$X_0$ (Source)" + "\n" + r"$\mathcal{N}(0, I)$",
         fontsize=12,
         color="#1565C0",
@@ -679,7 +702,8 @@ def create_figure_2(
 
     # Label for target distribution
     ax_c.text(
-        7.5, 3.2,
+        7.5,
+        3.2,
         r"$X_1$ (Target)" + "\n" + r"$p_{\mathrm{data}}$",
         fontsize=12,
         color="#C62828",
@@ -701,12 +725,14 @@ def create_figure_2(
 
     # Add legend with proxy artist for velocity field
     from matplotlib.lines import Line2D
+
     velocity_proxy = Line2D(
-        [0], [0],
+        [0],
+        [0],
         color="#78909C",
-        marker=r'$\rightarrow$',
+        marker=r"$\rightarrow$",
         markersize=15,
-        linestyle='None',
+        linestyle="None",
         alpha=0.7,
         label=r"Learned velocity field $v_\theta$",
     )
@@ -715,7 +741,8 @@ def create_figure_2(
     labels.append(velocity_proxy.get_label())
 
     legend = ax_c.legend(
-        handles, labels,
+        handles,
+        labels,
         loc="lower center",
         fontsize=11,
         framealpha=0.95,
@@ -737,6 +764,385 @@ def create_figure_2(
     print(f"\nAll figures saved to {output_dir}/")
 
 
+def _select_median_tree(per_pair_csv: str, metric: str) -> tuple[str, float]:
+    """Select the tree whose median metric value is closest to the global median.
+
+    Returns (source_tree_id, median_value).
+    """
+    pair_df = pd.read_csv(per_pair_csv)
+    global_median = pair_df[metric].median()
+    tree_medians = pair_df.groupby("source_tree_id")[metric].median()
+    best_tree = (tree_medians - global_median).abs().idxmin()
+    return best_tree, tree_medians[best_tree]
+
+
+def _load_pair_clouds(
+    source_tree_id: str,
+    per_pair_csv: str,
+    data_path: str,
+    experiment_dir: str,
+    metric: str,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Load real and generated point clouds for a specific tree.
+
+    Picks the generated sample whose metric value is closest to the tree's
+    median for that metric (most representative single pair).
+
+    Returns (real_cloud, gen_cloud, pair_info).
+    """
+    import zarr
+
+    pair_df = pd.read_csv(per_pair_csv)
+    tree_pairs = pair_df[pair_df["source_tree_id"] == source_tree_id]
+
+    # Pick the sample closest to this tree's median
+    tree_median = tree_pairs[metric].median()
+    best_idx = (tree_pairs[metric] - tree_median).abs().idxmin()
+    pair_info = tree_pairs.loc[best_idx].to_dict()
+
+    # Load real cloud
+    data_path = Path(data_path)
+    real_path = data_path / f"{source_tree_id}.zarr"
+    real_cloud = zarr.load(str(real_path)).astype(np.float32)
+
+    # Load generated cloud
+    experiment_dir = Path(experiment_dir)
+    gen_meta = pd.read_csv(experiment_dir / "samples" / "samples_metadata.csv")
+    sample_row = gen_meta[gen_meta["sample_id"] == pair_info["sample_id"]].iloc[0]
+    gen_path = experiment_dir / "samples" / "zarr" / sample_row["sample_file"]
+    gen_cloud = zarr.load(str(gen_path)).astype(np.float32)
+
+    return real_cloud, gen_cloud, pair_info
+
+
+def _compute_rz(cloud: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """SVD-based trunk-aligned cylindrical coordinates (mirrors evaluate.py)."""
+    centroid = cloud.mean(axis=0)
+    centered = cloud - centroid
+    _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+    axis = Vt[0]
+    if axis[2] < 0:
+        axis = -axis
+    z = centered @ axis
+    r = np.linalg.norm(centered - np.outer(z, axis), axis=1)
+    return r, z
+
+
+def create_figure_hjsd(
+    experiment_dir: str = "experiments/transformer-8-512-4096",
+    data_path: str = "./data/preprocessed-4096",
+    output_dir: str = "figures",
+    seed: int = 42,
+    n_radial: int = 16,
+    n_height: int = 32,
+):
+    """
+    Create a figure explaining the Histogram JSD metric.
+
+    Shows side-by-side 2D (r, z) density heatmaps for a real tree and its
+    generated counterpart, with shared bin edges and the JSD value annotated.
+    Selects the tree whose median HJSD is closest to the global median.
+    """
+    from scipy.spatial.distance import jensenshannon
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    eval_dir = Path(experiment_dir) / "samples" / "evaluation"
+    per_pair_csv = str(eval_dir / "per_pair.csv")
+
+    # Select representative tree
+    tree_id, median_hjsd = _select_median_tree(per_pair_csv, "histogram_jsd")
+    print(f"HJSD figure: selected tree {tree_id} (median HJSD={median_hjsd:.4f})")
+
+    # Load clouds
+    real_cloud, gen_cloud, pair_info = _load_pair_clouds(
+        tree_id, per_pair_csv, data_path, experiment_dir, "histogram_jsd", seed
+    )
+    print(
+        f"  Species: {pair_info['species']}, Height: {pair_info['height_m']:.1f}m, "
+        f"HJSD: {pair_info['histogram_jsd']:.4f}"
+    )
+
+    # Compute (r, z) for both
+    r_real, z_real = _compute_rz(real_cloud)
+    r_gen, z_gen = _compute_rz(gen_cloud)
+
+    # Shared bin edges
+    eps = 1e-6
+    all_r = np.concatenate([r_real, r_gen])
+    all_z = np.concatenate([z_real, z_gen])
+    radial_edges = np.linspace(0, all_r.max() + eps, n_radial + 1)
+    height_edges = np.linspace(all_z.min() - eps, all_z.max() + eps, n_height + 1)
+
+    # Build histograms
+    hist_real, _, _ = np.histogram2d(r_real, z_real, bins=[radial_edges, height_edges])
+    hist_gen, _, _ = np.histogram2d(r_gen, z_gen, bins=[radial_edges, height_edges])
+
+    # Normalize to densities (with Laplace smoothing for JSD)
+    hist_real_s = hist_real + 1.0
+    hist_gen_s = hist_gen + 1.0
+    p = (hist_real_s / hist_real_s.sum()).flatten()
+    q = (hist_gen_s / hist_gen_s.sum()).flatten()
+    jsd_value = float(
+        0.5 * np.sum(p * np.log(p / (0.5 * (p + q))))
+        + 0.5 * np.sum(q * np.log(q / (0.5 * (p + q))))
+    )
+
+    # Normalize for display (no smoothing)
+    density_real = hist_real / hist_real.sum()
+    density_gen = hist_gen / hist_gen.sum()
+    vmax = max(density_real.max(), density_gen.max())
+
+    # Bin centers for axis labels
+    r_centers = 0.5 * (radial_edges[:-1] + radial_edges[1:])
+    z_centers = 0.5 * (height_edges[:-1] + height_edges[1:])
+
+    # --- Plot ---
+    fig, axes = plt.subplots(1, 3, figsize=(14, 5), width_ratios=[1, 1, 0.05])
+
+    for ax, density, title in zip(
+        axes[:2],
+        [density_real, density_gen],
+        ["Real Tree", "Generated Tree"],
+    ):
+        im = ax.imshow(
+            density.T,
+            origin="lower",
+            aspect="auto",
+            extent=[
+                radial_edges[0],
+                radial_edges[-1],
+                height_edges[0],
+                height_edges[-1],
+            ],
+            cmap="inferno",
+            vmin=0,
+            vmax=vmax,
+        )
+        ax.set_xlabel("Radial distance $r$ from trunk axis", fontsize=11)
+        ax.set_ylabel("Height $z$ along trunk axis", fontsize=11)
+        ax.set_title(title, fontsize=13)
+
+    # Colorbar
+    cb = fig.colorbar(im, cax=axes[2])
+    cb.set_label("Point density", fontsize=11)
+
+    # Annotation
+    species_display = pair_info["species"].replace("_", " ")
+    fig.suptitle(
+        (
+            f"Histogram JSD = {jsd_value:.4f}  "
+            f"({n_radial}×{n_height} bins, SVD-aligned)\n"
+            f"\\textit{{{species_display}}}"
+            if plt.rcParams["text.usetex"]
+            else f"Histogram JSD = {jsd_value:.4f}  "
+            f"({n_radial}×{n_height} bins, SVD-aligned)\n"
+            f"{species_display}"
+        ),
+        fontsize=13,
+        y=1.02,
+    )
+
+    plt.tight_layout()
+    out_path = output_dir / "figure_hjsd.pdf"
+    fig.savefig(out_path, format="pdf", bbox_inches="tight", dpi=300)
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+    # Save metadata
+    meta = {
+        "source_tree_id": tree_id,
+        "sample_id": pair_info["sample_id"],
+        "species": pair_info["species"],
+        "height_m": pair_info["height_m"],
+        "histogram_jsd": jsd_value,
+        "global_median_hjsd": median_hjsd,
+    }
+    meta_path = output_dir / "figure_hjsd.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  Saved metadata: {meta_path}")
+
+
+def create_figure_crown_mae(
+    experiment_dir: str = "experiments/transformer-8-512-4096",
+    data_path: str = "./data/preprocessed-4096",
+    output_dir: str = "figures",
+    seed: int = 42,
+    n_height: int = 32,
+    min_points: int = 5,
+):
+    """
+    Create a figure explaining the Crown Profile MAE metric.
+
+    Shows overlaid radial crown profiles (p50, p75, p98) for a real tree
+    and its generated counterpart as a function of height along the trunk axis.
+    Selects the tree whose median CrMAE_p75 is closest to the global median.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    eval_dir = Path(experiment_dir) / "samples" / "evaluation"
+    per_pair_csv = str(eval_dir / "per_pair.csv")
+
+    # Select representative tree
+    tree_id, median_mae = _select_median_tree(per_pair_csv, "crown_mae_p75")
+    print(f"CrMAE figure: selected tree {tree_id} (median CrMAE_p75={median_mae:.4f})")
+
+    # Load clouds
+    real_cloud, gen_cloud, pair_info = _load_pair_clouds(
+        tree_id, per_pair_csv, data_path, experiment_dir, "crown_mae_p75", seed
+    )
+    print(
+        f"  Species: {pair_info['species']}, Height: {pair_info['height_m']:.1f}m, "
+        f"CrMAE p50={pair_info['crown_mae_p50']:.4f}, "
+        f"p75={pair_info['crown_mae_p75']:.4f}, "
+        f"p98={pair_info['crown_mae_p98']:.4f}"
+    )
+
+    # Compute (r, z)
+    r_real, z_real = _compute_rz(real_cloud)
+    r_gen, z_gen = _compute_rz(gen_cloud)
+
+    # Shared height edges
+    eps = 1e-6
+    all_z = np.concatenate([z_real, z_gen])
+    height_edges = np.linspace(all_z.min() - eps, all_z.max() + eps, n_height + 1)
+    z_centers = 0.5 * (height_edges[:-1] + height_edges[1:])
+
+    # Compute crown profiles
+    def _crown_profile(r, z):
+        n_bins = len(height_edges) - 1
+        p50 = np.full(n_bins, np.nan)
+        p75 = np.full(n_bins, np.nan)
+        p98 = np.full(n_bins, np.nan)
+        for i in range(n_bins):
+            mask = (z >= height_edges[i]) & (z < height_edges[i + 1])
+            if mask.sum() >= min_points:
+                r_bin = r[mask]
+                p50[i] = np.percentile(r_bin, 50)
+                p75[i] = np.percentile(r_bin, 75)
+                p98[i] = np.percentile(r_bin, 98)
+        return p50, p75, p98
+
+    real_p50, real_p75, real_p98 = _crown_profile(r_real, z_real)
+    gen_p50, gen_p75, gen_p98 = _crown_profile(r_gen, z_gen)
+
+    # --- Plot ---
+    fig, ax = plt.subplots(figsize=(6, 8))
+
+    # Plot as horizontal profiles: x = radial extent, y = height
+    colors = {"p50": "#1f77b4", "p75": "#ff7f0e", "p98": "#2ca02c"}
+
+    for pct, real_prof, gen_prof, label in [
+        ("p50", real_p50, gen_p50, "p50 (median)"),
+        ("p75", real_p75, gen_p75, "p75"),
+        ("p98", real_p98, gen_p98, "p98"),
+    ]:
+        valid = ~np.isnan(real_prof) & ~np.isnan(gen_prof)
+        c = colors[pct]
+
+        # Real: solid line
+        ax.plot(
+            real_prof[valid],
+            z_centers[valid],
+            color=c,
+            linewidth=2,
+            linestyle="-",
+            label=f"Real {label}",
+        )
+        # Generated: dashed line
+        ax.plot(
+            gen_prof[valid],
+            z_centers[valid],
+            color=c,
+            linewidth=2,
+            linestyle="--",
+            label=f"Gen {label}",
+        )
+
+        # Shade the MAE between them
+        ax.fill_betweenx(
+            z_centers[valid],
+            real_prof[valid],
+            gen_prof[valid],
+            alpha=0.12,
+            color=c,
+        )
+
+    ax.set_xlabel("Radial distance $r$ from trunk axis", fontsize=12)
+    ax.set_ylabel("Height $z$ along trunk axis", fontsize=12)
+    ax.legend(fontsize=9, loc="upper right")
+
+    species_display = pair_info["species"].replace("_", " ")
+    mae_text = (
+        f"Crown MAE:  p50={pair_info['crown_mae_p50']:.4f}  "
+        f"p75={pair_info['crown_mae_p75']:.4f}  "
+        f"p98={pair_info['crown_mae_p98']:.4f}"
+    )
+    ax.set_title(f"{species_display}\n{mae_text}", fontsize=11)
+
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    out_path = output_dir / "figure_crown_mae.pdf"
+    fig.savefig(out_path, format="pdf", bbox_inches="tight", dpi=300)
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+    # Save metadata
+    meta = {
+        "source_tree_id": tree_id,
+        "sample_id": pair_info["sample_id"],
+        "species": pair_info["species"],
+        "height_m": pair_info["height_m"],
+        "crown_mae_p50": pair_info["crown_mae_p50"],
+        "crown_mae_p75": pair_info["crown_mae_p75"],
+        "crown_mae_p98": pair_info["crown_mae_p98"],
+        "global_median_crown_mae_p75": median_mae,
+    }
+    meta_path = output_dir / "figure_crown_mae.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  Saved metadata: {meta_path}")
+
+
 if __name__ == "__main__":
-    create_figure_1()
-    create_figure_2()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Generate paper figures")
+    parser.add_argument(
+        "--figures",
+        nargs="+",
+        default=["1", "2", "hjsd", "crown_mae"],
+        help="Which figures to generate (1, 2, hjsd, crown_mae)",
+    )
+    parser.add_argument(
+        "--experiment_dir", default="experiments/transformer-8-512-4096"
+    )
+    parser.add_argument("--data_path", default="./data/preprocessed-4096")
+    parser.add_argument("--output_dir", default="figures")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    for fig_name in args.figures:
+        if fig_name == "1":
+            create_figure_1(output_dir=args.output_dir, seed=args.seed)
+        elif fig_name == "2":
+            create_figure_2(output_dir=args.output_dir, seed=args.seed)
+        elif fig_name == "hjsd":
+            create_figure_hjsd(
+                experiment_dir=args.experiment_dir,
+                data_path=args.data_path,
+                output_dir=args.output_dir,
+                seed=args.seed,
+            )
+        elif fig_name == "crown_mae":
+            create_figure_crown_mae(
+                experiment_dir=args.experiment_dir,
+                data_path=args.data_path,
+                output_dir=args.output_dir,
+                seed=args.seed,
+            )
+        else:
+            print(f"Unknown figure: {fig_name}")
