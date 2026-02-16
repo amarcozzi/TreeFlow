@@ -764,12 +764,19 @@ def create_figure_2(
     print(f"\nAll figures saved to {output_dir}/")
 
 
-def _select_median_tree(per_pair_csv: str, metric: str) -> tuple[str, float]:
+def _select_median_tree(
+    per_pair_csv: str, metric: str, min_height: float = 0.0
+) -> tuple[str, float]:
     """Select the tree whose median metric value is closest to the global median.
+
+    Args:
+        min_height: Minimum tree height in meters to consider.
 
     Returns (source_tree_id, median_value).
     """
     pair_df = pd.read_csv(per_pair_csv)
+    if min_height > 0:
+        pair_df = pair_df[pair_df["height_m"] >= min_height]
     global_median = pair_df[metric].median()
     tree_medians = pair_df.groupby("source_tree_id")[metric].median()
     best_tree = (tree_medians - global_median).abs().idxmin()
@@ -852,8 +859,10 @@ def create_figure_hjsd(
     eval_dir = Path(experiment_dir) / "samples" / "evaluation"
     per_pair_csv = str(eval_dir / "per_pair.csv")
 
-    # Select representative tree
-    tree_id, median_hjsd = _select_median_tree(per_pair_csv, "histogram_jsd")
+    # Select representative tree (skip small trees < 10m)
+    tree_id, median_hjsd = _select_median_tree(
+        per_pair_csv, "histogram_jsd", min_height=10.0
+    )
     print(f"HJSD figure: selected tree {tree_id} (median HJSD={median_hjsd:.4f})")
 
     # Load clouds
@@ -917,7 +926,7 @@ def create_figure_hjsd(
                 height_edges[0],
                 height_edges[-1],
             ],
-            cmap="inferno",
+            cmap="YlGnBu",
             vmin=0,
             vmax=vmax,
         )
@@ -971,14 +980,14 @@ def create_figure_crown_mae(
     data_path: str = "./data/preprocessed-4096",
     output_dir: str = "figures",
     seed: int = 42,
-    n_height: int = 32,
-    min_points: int = 5,
 ):
     """
     Create a figure explaining the Crown Profile MAE metric.
 
-    Shows overlaid radial crown profiles (p50, p75, p98) for a real tree
-    and its generated counterpart as a function of height along the trunk axis.
+    Shows three top-down (bird's-eye) subfigures — one each for p50, p75, p98.
+    Each subplot shows the real and generated point clouds projected onto the
+    plane perpendicular to the trunk axis, with circles indicating the
+    respective radial percentile for real (solid) and generated (dashed).
     Selects the tree whose median CrMAE_p75 is closest to the global median.
     """
     output_dir = Path(output_dir)
@@ -986,8 +995,10 @@ def create_figure_crown_mae(
     eval_dir = Path(experiment_dir) / "samples" / "evaluation"
     per_pair_csv = str(eval_dir / "per_pair.csv")
 
-    # Select representative tree
-    tree_id, median_mae = _select_median_tree(per_pair_csv, "crown_mae_p75")
+    # Select representative tree (skip small trees < 10m)
+    tree_id, median_mae = _select_median_tree(
+        per_pair_csv, "crown_mae_p75", min_height=10.0
+    )
     print(f"CrMAE figure: selected tree {tree_id} (median CrMAE_p75={median_mae:.4f})")
 
     # Load clouds
@@ -1001,89 +1012,92 @@ def create_figure_crown_mae(
         f"p98={pair_info['crown_mae_p98']:.4f}"
     )
 
-    # Compute (r, z)
-    r_real, z_real = _compute_rz(real_cloud)
-    r_gen, z_gen = _compute_rz(gen_cloud)
+    # SVD-aligned: project onto plane perpendicular to trunk axis
+    def _project_topdown(cloud):
+        centroid = cloud.mean(axis=0)
+        centered = cloud - centroid
+        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+        axis = Vt[0]
+        if axis[2] < 0:
+            axis = -axis
+        # Two perpendicular axes in the plane
+        e1 = Vt[1]
+        e2 = Vt[2]
+        x = centered @ e1
+        y = centered @ e2
+        r = np.sqrt(x**2 + y**2)
+        return x, y, r
 
-    # Shared height edges
-    eps = 1e-6
-    all_z = np.concatenate([z_real, z_gen])
-    height_edges = np.linspace(all_z.min() - eps, all_z.max() + eps, n_height + 1)
-    z_centers = 0.5 * (height_edges[:-1] + height_edges[1:])
+    x_real, y_real, r_real = _project_topdown(real_cloud)
+    x_gen, y_gen, r_gen = _project_topdown(gen_cloud)
 
-    # Compute crown profiles
-    def _crown_profile(r, z):
-        n_bins = len(height_edges) - 1
-        p50 = np.full(n_bins, np.nan)
-        p75 = np.full(n_bins, np.nan)
-        p98 = np.full(n_bins, np.nan)
-        for i in range(n_bins):
-            mask = (z >= height_edges[i]) & (z < height_edges[i + 1])
-            if mask.sum() >= min_points:
-                r_bin = r[mask]
-                p50[i] = np.percentile(r_bin, 50)
-                p75[i] = np.percentile(r_bin, 75)
-                p98[i] = np.percentile(r_bin, 98)
-        return p50, p75, p98
+    # Compute overall radial percentiles
+    percentiles = [50, 75, 98]
+    real_pcts = {p: np.percentile(r_real, p) for p in percentiles}
+    gen_pcts = {p: np.percentile(r_gen, p) for p in percentiles}
 
-    real_p50, real_p75, real_p98 = _crown_profile(r_real, z_real)
-    gen_p50, gen_p75, gen_p98 = _crown_profile(r_gen, z_gen)
+    # --- Plot: 3 subfigures ---
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    labels = {50: "p50 (median)", 75: "p75", 98: "p98"}
+    mae_keys = {50: "crown_mae_p50", 75: "crown_mae_p75", 98: "crown_mae_p98"}
 
-    # --- Plot ---
-    fig, ax = plt.subplots(figsize=(6, 8))
+    # Shared axis limits
+    max_r = max(r_real.max(), r_gen.max()) * 1.15
+    rng = (-max_r, max_r)
 
-    # Plot as horizontal profiles: x = radial extent, y = height
-    colors = {"p50": "#1f77b4", "p75": "#ff7f0e", "p98": "#2ca02c"}
+    for ax, pct in zip(axes, percentiles):
+        # Scatter point clouds (subsample for clarity)
+        rng_gen = np.random.default_rng(seed)
+        n_show = min(2000, len(x_real), len(x_gen))
+        idx_r = rng_gen.choice(len(x_real), n_show, replace=False)
+        idx_g = rng_gen.choice(len(x_gen), n_show, replace=False)
 
-    for pct, real_prof, gen_prof, label in [
-        ("p50", real_p50, gen_p50, "p50 (median)"),
-        ("p75", real_p75, gen_p75, "p75"),
-        ("p98", real_p98, gen_p98, "p98"),
-    ]:
-        valid = ~np.isnan(real_prof) & ~np.isnan(gen_prof)
-        c = colors[pct]
+        ax.scatter(
+            x_real[idx_r], y_real[idx_r],
+            s=1, alpha=0.25, color="#1f77b4", label="Real", rasterized=True,
+        )
+        ax.scatter(
+            x_gen[idx_g], y_gen[idx_g],
+            s=1, alpha=0.25, color="#ff7f0e", label="Generated", rasterized=True,
+        )
 
-        # Real: solid line
+        # Circles for percentile radii
+        theta = np.linspace(0, 2 * np.pi, 200)
+        r_r = real_pcts[pct]
+        r_g = gen_pcts[pct]
         ax.plot(
-            real_prof[valid],
-            z_centers[valid],
-            color=c,
-            linewidth=2,
-            linestyle="-",
-            label=f"Real {label}",
+            r_r * np.cos(theta), r_r * np.sin(theta),
+            color="#1f77b4", linewidth=2, linestyle="-",
+            label=f"Real {labels[pct]} = {r_r:.3f}",
         )
-        # Generated: dashed line
         ax.plot(
-            gen_prof[valid],
-            z_centers[valid],
-            color=c,
-            linewidth=2,
-            linestyle="--",
-            label=f"Gen {label}",
+            r_g * np.cos(theta), r_g * np.sin(theta),
+            color="#ff7f0e", linewidth=2, linestyle="--",
+            label=f"Gen {labels[pct]} = {r_g:.3f}",
         )
 
-        # Shade the MAE between them
-        ax.fill_betweenx(
-            z_centers[valid],
-            real_prof[valid],
-            gen_prof[valid],
-            alpha=0.12,
-            color=c,
-        )
+        # Stem marker
+        ax.plot(0, 0, "k+", markersize=10, markeredgewidth=2)
 
-    ax.set_xlabel("Radial distance $r$ from trunk axis", fontsize=12)
-    ax.set_ylabel("Height $z$ along trunk axis", fontsize=12)
-    ax.legend(fontsize=9, loc="upper right")
+        ax.set_xlim(rng)
+        ax.set_ylim(rng)
+        ax.set_aspect("equal")
+        ax.grid(True, alpha=0.2)
+        mae_val = float(pair_info[mae_keys[pct]])
+        ax.set_title(f"{labels[pct]}\nMAE = {mae_val:.4f}", fontsize=12)
+        ax.legend(fontsize=8, loc="upper right", markerscale=4)
+
+    axes[0].set_ylabel("SVD axis 3", fontsize=11)
+    for ax in axes:
+        ax.set_xlabel("SVD axis 2", fontsize=11)
 
     species_display = pair_info["species"].replace("_", " ")
-    mae_text = (
-        f"Crown MAE:  p50={pair_info['crown_mae_p50']:.4f}  "
-        f"p75={pair_info['crown_mae_p75']:.4f}  "
-        f"p98={pair_info['crown_mae_p98']:.4f}"
+    fig.suptitle(
+        f"Crown Profile MAE  —  {species_display}, "
+        f"H = {pair_info['height_m']:.1f} m",
+        fontsize=13,
+        y=1.02,
     )
-    ax.set_title(f"{species_display}\n{mae_text}", fontsize=11)
-
-    ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     out_path = output_dir / "figure_crown_mae.pdf"
@@ -1101,6 +1115,12 @@ def create_figure_crown_mae(
         "crown_mae_p75": float(pair_info["crown_mae_p75"]),
         "crown_mae_p98": float(pair_info["crown_mae_p98"]),
         "global_median_crown_mae_p75": float(median_mae),
+        "real_p50": float(real_pcts[50]),
+        "real_p75": float(real_pcts[75]),
+        "real_p98": float(real_pcts[98]),
+        "gen_p50": float(gen_pcts[50]),
+        "gen_p75": float(gen_pcts[75]),
+        "gen_p98": float(gen_pcts[98]),
     }
     meta_path = output_dir / "figure_crown_mae.json"
     with open(meta_path, "w") as f:
