@@ -7,6 +7,7 @@
 #SBATCH --mem=512G
 #SBATCH --time=2-0
 #SBATCH --output=log_finetune_transformer_8_512_16384.out
+  #SBATCH --exclude=atlas-0248
 
 module load cuda
 
