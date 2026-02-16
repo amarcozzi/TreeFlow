@@ -773,7 +773,7 @@ def _select_median_tree(per_pair_csv: str, metric: str) -> tuple[str, float]:
     global_median = pair_df[metric].median()
     tree_medians = pair_df.groupby("source_tree_id")[metric].median()
     best_tree = (tree_medians - global_median).abs().idxmin()
-    return str(best_tree), float(tree_medians[best_tree])
+    return best_tree, float(tree_medians[best_tree])
 
 
 def _load_pair_clouds(
@@ -803,13 +803,14 @@ def _load_pair_clouds(
 
     # Load real cloud
     data_path = Path(data_path)
-    real_path = data_path / f"{source_tree_id}.zarr"
+    tree_id_str = f"{int(source_tree_id):05d}"
+    real_path = data_path / f"{tree_id_str}.zarr"
     real_cloud = zarr.load(str(real_path)).astype(np.float32)
 
     # Load generated cloud
     experiment_dir = Path(experiment_dir)
     gen_meta = pd.read_csv(experiment_dir / "samples" / "samples_metadata.csv")
-    sample_row = gen_meta[gen_meta["sample_id"] == pair_info["sample_id"]].iloc[0]
+    sample_row = gen_meta[gen_meta["sample_id"] == int(pair_info["sample_id"])].iloc[0]
     gen_path = experiment_dir / "samples" / "zarr" / sample_row["sample_file"]
     gen_cloud = zarr.load(str(gen_path)).astype(np.float32)
 
@@ -952,7 +953,7 @@ def create_figure_hjsd(
 
     # Save metadata (cast numpy types for JSON)
     meta = {
-        "source_tree_id": tree_id,
+        "source_tree_id": int(tree_id),
         "sample_id": int(pair_info["sample_id"]),
         "species": pair_info["species"],
         "height_m": float(pair_info["height_m"]),
@@ -1092,7 +1093,7 @@ def create_figure_crown_mae(
 
     # Save metadata (cast numpy types for JSON)
     meta = {
-        "source_tree_id": tree_id,
+        "source_tree_id": int(tree_id),
         "sample_id": int(pair_info["sample_id"]),
         "species": pair_info["species"],
         "height_m": float(pair_info["height_m"]),
