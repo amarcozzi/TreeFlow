@@ -899,14 +899,18 @@ def create_figure_hjsd(
         + 0.5 * np.sum(q * np.log(q / (0.5 * (p + q))))
     )
 
-    # Normalize for display (no smoothing)
-    density_real = hist_real / hist_real.sum()
-    density_gen = hist_gen / hist_gen.sum()
+    # Normalize for display (no smoothing), mask empty bins
+    density_real = np.ma.masked_equal(hist_real / hist_real.sum(), 0)
+    density_gen = np.ma.masked_equal(hist_gen / hist_gen.sum(), 0)
     vmax = max(density_real.max(), density_gen.max())
 
     # Bin centers for axis labels
     r_centers = 0.5 * (radial_edges[:-1] + radial_edges[1:])
     z_centers = 0.5 * (height_edges[:-1] + height_edges[1:])
+
+    # Colormap: white background for empty bins, sequential blue for density
+    cmap = plt.cm.Blues.copy()
+    cmap.set_bad(color="white")
 
     # --- Plot ---
     fig, axes = plt.subplots(1, 3, figsize=(14, 5), width_ratios=[1, 1, 0.05])
@@ -926,7 +930,7 @@ def create_figure_hjsd(
                 height_edges[0],
                 height_edges[-1],
             ],
-            cmap="YlGnBu",
+            cmap=cmap,
             vmin=0,
             vmax=vmax,
         )
@@ -1020,21 +1024,35 @@ def create_figure_crown_mae(
         axis = Vt[0]
         if axis[2] < 0:
             axis = -axis
-        # Two perpendicular axes in the plane
         e1 = Vt[1]
         e2 = Vt[2]
         x = centered @ e1
         y = centered @ e2
+        z = centered @ axis
         r = np.sqrt(x**2 + y**2)
-        return x, y, r
+        return x, y, z, r
 
-    x_real, y_real, r_real = _project_topdown(real_cloud)
-    x_gen, y_gen, r_gen = _project_topdown(gen_cloud)
+    x_real, y_real, z_real, r_real = _project_topdown(real_cloud)
+    x_gen, y_gen, z_gen, r_gen = _project_topdown(gen_cloud)
 
-    # Compute overall radial percentiles
+    # Compute per-height-bin percentile radii (matching the actual metric)
+    n_height = 32
+    min_pts = 5
+    eps = 1e-6
+    all_z = np.concatenate([z_real, z_gen])
+    height_edges = np.linspace(all_z.min() - eps, all_z.max() + eps, n_height + 1)
+
+    def _mean_percentile_radius(r, z, pct):
+        vals = []
+        for i in range(n_height):
+            mask = (z >= height_edges[i]) & (z < height_edges[i + 1])
+            if mask.sum() >= min_pts:
+                vals.append(np.percentile(r[mask], pct))
+        return np.mean(vals) if vals else 0.0
+
     percentiles = [50, 75, 98]
-    real_pcts = {p: np.percentile(r_real, p) for p in percentiles}
-    gen_pcts = {p: np.percentile(r_gen, p) for p in percentiles}
+    real_pcts = {p: _mean_percentile_radius(r_real, z_real, p) for p in percentiles}
+    gen_pcts = {p: _mean_percentile_radius(r_gen, z_gen, p) for p in percentiles}
 
     # --- Plot: 3 subfigures ---
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -1043,7 +1061,7 @@ def create_figure_crown_mae(
 
     # Shared axis limits
     max_r = max(r_real.max(), r_gen.max()) * 1.15
-    rng = (-max_r, max_r)
+    lim = (-max_r, max_r)
 
     for ax, pct in zip(axes, percentiles):
         # Scatter point clouds (subsample for clarity)
@@ -1061,7 +1079,7 @@ def create_figure_crown_mae(
             s=1, alpha=0.25, color="#ff7f0e", label="Generated", rasterized=True,
         )
 
-        # Circles for percentile radii
+        # Circles for mean per-height-bin percentile radii
         theta = np.linspace(0, 2 * np.pi, 200)
         r_r = real_pcts[pct]
         r_g = gen_pcts[pct]
@@ -1079,8 +1097,8 @@ def create_figure_crown_mae(
         # Stem marker
         ax.plot(0, 0, "k+", markersize=10, markeredgewidth=2)
 
-        ax.set_xlim(rng)
-        ax.set_ylim(rng)
+        ax.set_xlim(lim)
+        ax.set_ylim(lim)
         ax.set_aspect("equal")
         ax.grid(True, alpha=0.2)
         mae_val = float(pair_info[mae_keys[pct]])
@@ -1115,12 +1133,12 @@ def create_figure_crown_mae(
         "crown_mae_p75": float(pair_info["crown_mae_p75"]),
         "crown_mae_p98": float(pair_info["crown_mae_p98"]),
         "global_median_crown_mae_p75": float(median_mae),
-        "real_p50": float(real_pcts[50]),
-        "real_p75": float(real_pcts[75]),
-        "real_p98": float(real_pcts[98]),
-        "gen_p50": float(gen_pcts[50]),
-        "gen_p75": float(gen_pcts[75]),
-        "gen_p98": float(gen_pcts[98]),
+        "real_mean_p50": float(real_pcts[50]),
+        "real_mean_p75": float(real_pcts[75]),
+        "real_mean_p98": float(real_pcts[98]),
+        "gen_mean_p50": float(gen_pcts[50]),
+        "gen_mean_p75": float(gen_pcts[75]),
+        "gen_mean_p98": float(gen_pcts[98]),
     }
     meta_path = output_dir / "figure_crown_mae.json"
     with open(meta_path, "w") as f:
