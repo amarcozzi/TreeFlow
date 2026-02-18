@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=umontana_fire_modeling
-#SBATCH --partition=gpu-a100
-#SBATCH --gres=gpu:a100:4
+#SBATCH --partition=gpu-l40s
+#SBATCH --gres=gpu:l40s:4
 #SBATCH --job-name="finetune_tf_512_16k"
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=512G
