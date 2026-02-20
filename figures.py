@@ -1487,9 +1487,7 @@ def create_figure_spine_comparison(
         mask = (z >= bin_edges[i]) & (z <= bin_edges[i + 1])
         if mask.sum() < 5:
             continue
-        spine_pts.append(
-            [np.median(x[mask]), np.median(y[mask]), np.median(z[mask])]
-        )
+        spine_pts.append([np.median(x[mask]), np.median(y[mask]), np.median(z[mask])])
     spine_pts = np.array(spine_pts)
 
     # ---- Subsample for 3D scatter ----
@@ -1503,46 +1501,78 @@ def create_figure_spine_comparison(
     # -- Top-left: 3D with SVD axis --
     ax1 = fig.add_subplot(221, projection="3d")
     ax1.scatter(
-        cloud[idx, 0], cloud[idx, 1], cloud[idx, 2],
-        c=cloud[idx, 2], cmap="viridis", s=1.5, alpha=0.35, rasterized=True,
+        cloud[idx, 0],
+        cloud[idx, 1],
+        cloud[idx, 2],
+        c=cloud[idx, 2],
+        cmap="viridis",
+        s=1.5,
+        alpha=0.35,
+        rasterized=True,
     )
     # Draw SVD axis line through centroid
     extent = np.linalg.norm(centered, axis=1).max() * 0.5
     for sign in [-1, 1]:
         tip = centroid + sign * svd_axis * extent
         ax1.plot(
-            [centroid[0], tip[0]], [centroid[1], tip[1]], [centroid[2], tip[2]],
-            color="#d62728", linewidth=3, zorder=10,
+            [centroid[0], tip[0]],
+            [centroid[1], tip[1]],
+            [centroid[2], tip[2]],
+            color="#d62728",
+            linewidth=3,
+            zorder=10,
         )
-    ax1.scatter(*centroid, color="black", s=80, marker="o", zorder=12,
-                edgecolors="white", linewidths=1.5)
+    ax1.scatter(
+        *centroid,
+        color="black",
+        s=80,
+        marker="o",
+        zorder=12,
+        edgecolors="white",
+        linewidths=1.5,
+    )
     ax1.set_title("SVD: single global axis", fontsize=12)
 
     # -- Top-right: 3D with spine --
     ax2 = fig.add_subplot(222, projection="3d")
     ax2.scatter(
-        cloud[idx, 0], cloud[idx, 1], cloud[idx, 2],
-        c=cloud[idx, 2], cmap="viridis", s=1.5, alpha=0.35, rasterized=True,
+        cloud[idx, 0],
+        cloud[idx, 1],
+        cloud[idx, 2],
+        c=cloud[idx, 2],
+        cmap="viridis",
+        s=1.5,
+        alpha=0.35,
+        rasterized=True,
     )
     # Draw spine segments
     ax2.plot(
-        spine_pts[:, 0], spine_pts[:, 1], spine_pts[:, 2],
-        color="#d62728", linewidth=3, zorder=10,
+        spine_pts[:, 0],
+        spine_pts[:, 1],
+        spine_pts[:, 2],
+        color="#d62728",
+        linewidth=3,
+        zorder=10,
     )
     # Spine node markers
     ax2.scatter(
-        spine_pts[:, 0], spine_pts[:, 1], spine_pts[:, 2],
-        color="#d62728", s=60, marker="o", zorder=12,
-        edgecolors="white", linewidths=1.5,
+        spine_pts[:, 0],
+        spine_pts[:, 1],
+        spine_pts[:, 2],
+        color="#d62728",
+        s=60,
+        marker="o",
+        zorder=12,
+        edgecolors="white",
+        linewidths=1.5,
     )
     ax2.set_title(f"Spine: {num_spine_bins}-bin piecewise medians", fontsize=12)
 
     # Shared 3D styling
     for ax3d in [ax1, ax2]:
         max_range = (
-            np.array([
-                cloud[:, 0].ptp(), cloud[:, 1].ptp(), cloud[:, 2].ptp()
-            ]).max() / 2.0
+            np.array([cloud[:, 0].ptp(), cloud[:, 1].ptp(), cloud[:, 2].ptp()]).max()
+            / 2.0
         )
         mid = centroid
         ax3d.set_xlim(mid[0] - max_range, mid[0] + max_range)
@@ -1593,8 +1623,10 @@ def create_figure_spine_comparison(
             origin="lower",
             aspect="auto",
             extent=[
-                radial_edges[0], radial_edges[-1],
-                height_edges[0], height_edges[-1],
+                radial_edges[0],
+                radial_edges[-1],
+                height_edges[0],
+                height_edges[-1],
             ],
             cmap=cmap_heat,
             vmin=0,
@@ -1645,7 +1677,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--figures",
         nargs="+",
-        default=["1", "2", "svd_axes", "hjsd", "crown_mae"],
+        default=["spine_comparison"],
         help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison)",
     )
     parser.add_argument(
