@@ -1685,6 +1685,233 @@ def create_figure_spine_comparison(
     print(f"  Saved metadata: {meta_path}")
 
 
+def create_figure_spine_audit(
+    experiment_dir: str = "experiments/transformer-8-512-4096",
+    data_path: str = "./data/preprocessed-4096",
+    output_dir: str = "figures",
+    seed: int = 42,
+    n_radial: int = 32,
+    n_height: int = 64,
+    num_spine_bins: int = 20,
+    trees_per_group: int = 2,
+):
+    """Generate stem-tracker comparison figures for every (species, height_bin).
+
+    For each group, picks up to `trees_per_group` representative trees
+    (closest to the group's median HJSD) and produces a 1x2 figure:
+      Left:  3D point cloud with SVD axis and stem-tracker curve overlaid
+      Right: side-by-side (r, z) heatmaps from both methods
+
+    Saves into output_dir/spine_audit/<species>/<height_bin>/.
+    Uses the same height bins as evaluate.py (5 m bins via get_height_bin).
+    """
+    import zarr
+    from matplotlib.colors import PowerNorm
+    from evaluate import get_height_bin
+
+    output_dir = Path(output_dir)
+    eval_dir = Path(experiment_dir) / "samples" / "evaluation"
+    per_pair_csv = eval_dir / "per_pair.csv"
+    data_path = Path(data_path)
+
+    pair_df = pd.read_csv(per_pair_csv)
+    pair_df["height_bin"] = pair_df["height_m"].apply(get_height_bin)
+
+    # Group by (species, height_bin), pick representative trees
+    groups = pair_df.groupby(["species", "height_bin"], observed=True)
+    print(f"Found {len(groups)} (species, height_bin) groups")
+
+    total_figs = 0
+    for (species, height_bin), grp in groups:
+        # # Median HJSD within this group
+        # tree_medians = grp.groupby("source_tree_id")["histogram_jsd"].median()
+        # group_median = tree_medians.median()
+        #
+        # # Pick trees closest to group median
+        # ranked = (tree_medians - group_median).abs().sort_values()
+        # selected_trees = ranked.index[: trees_per_group].tolist()
+
+        # pick random trees from this group (for diversity)
+        selected_trees = grp["source_tree_id"].sample(
+            n=min(trees_per_group, grp["source_tree_id"].nunique()),
+            random_state=seed,
+        ).tolist()
+
+        # Output directory
+        species_safe = species.replace(" ", "_")
+        group_dir = output_dir / "spine_audit" / species_safe / height_bin
+        group_dir.mkdir(parents=True, exist_ok=True)
+
+        for tree_id in selected_trees:
+            tree_id_str = f"{int(tree_id):05d}"
+            zarr_path = data_path / f"{tree_id_str}.zarr"
+            if not zarr_path.exists():
+                continue
+
+            cloud = zarr.load(str(zarr_path)).astype(np.float32)
+            tree_row = grp[grp["source_tree_id"] == tree_id].iloc[0]
+            height_m = float(tree_row["height_m"])
+
+            # Compute both coordinate systems
+            r_svd, z_svd = _compute_rz(cloud)
+            r_spine, z_spine, spine_raw = _compute_rz_spine(
+                cloud, num_bins=num_spine_bins
+            )
+
+            # SVD axis
+            centroid = cloud.mean(axis=0)
+            centered = cloud - centroid
+            _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+            svd_axis = Vt[0]
+            if svd_axis[2] < 0:
+                svd_axis = -svd_axis
+
+            # Polynomial spine curve
+            x, y, z = cloud[:, 0], cloud[:, 1], cloud[:, 2]
+            z_min, z_max = z.min(), z.max()
+            degree = 3
+            actual_deg = (
+                min(degree, len(spine_raw) - 1) if len(spine_raw) >= 2 else 1
+            )
+            if len(spine_raw) >= 2:
+                p_x = Polynomial.fit(spine_raw[:, 2], spine_raw[:, 0], actual_deg)
+                p_y = Polynomial.fit(spine_raw[:, 2], spine_raw[:, 1], actual_deg)
+                spine_z_dense = np.linspace(z_min, z_max, 200)
+                spine_curve = np.column_stack(
+                    [p_x(spine_z_dense), p_y(spine_z_dense), spine_z_dense]
+                )
+            else:
+                spine_curve = spine_raw
+
+            # Subsample
+            rng = np.random.default_rng(seed)
+            n_show = min(6000, len(cloud))
+            idx = rng.choice(len(cloud), n_show, replace=False)
+
+            # ---- Figure: 1 row, 3 columns ----
+            fig = plt.figure(figsize=(18, 6))
+
+            # -- (a) 3D with both overlaid --
+            ax3d = fig.add_subplot(131, projection="3d")
+            ax3d.scatter(
+                cloud[idx, 0], cloud[idx, 1], cloud[idx, 2],
+                c=cloud[idx, 2], cmap="viridis", s=0.6, alpha=0.35,
+                rasterized=True,
+            )
+            # SVD axis (blue)
+            extent = np.linalg.norm(centered, axis=1).max() * 0.55
+            for sign in [-1, 1]:
+                tip = centroid + sign * svd_axis * extent
+                ax3d.plot(
+                    [centroid[0], tip[0]],
+                    [centroid[1], tip[1]],
+                    [centroid[2], tip[2]],
+                    color="#1f77b4", linewidth=3, zorder=10,
+                )
+            # Stem tracker (red)
+            if len(spine_curve) > 0:
+                ax3d.plot(
+                    spine_curve[:, 0], spine_curve[:, 1], spine_curve[:, 2],
+                    color="#d62728", linewidth=3, zorder=11,
+                )
+            if len(spine_raw) > 0:
+                ax3d.scatter(
+                    spine_raw[:, 0], spine_raw[:, 1], spine_raw[:, 2],
+                    color="#d62728", s=25, marker="o", zorder=12,
+                    edgecolors="white", linewidths=0.6, alpha=0.5,
+                )
+
+            # 3D styling
+            cloud_range = np.array([
+                cloud[:, 0].max() - cloud[:, 0].min(),
+                cloud[:, 1].max() - cloud[:, 1].min(),
+                cloud[:, 2].max() - cloud[:, 2].min(),
+            ]).max() / 2.0
+            ax3d.set_xlim(centroid[0] - cloud_range, centroid[0] + cloud_range)
+            ax3d.set_ylim(centroid[1] - cloud_range, centroid[1] + cloud_range)
+            ax3d.set_zlim(centroid[2] - cloud_range, centroid[2] + cloud_range)
+            ax3d.view_init(elev=15, azim=135)
+            ax3d.xaxis.pane.fill = False
+            ax3d.yaxis.pane.fill = False
+            ax3d.zaxis.pane.fill = False
+            ax3d.xaxis.pane.set_edgecolor("lightgray")
+            ax3d.yaxis.pane.set_edgecolor("lightgray")
+            ax3d.zaxis.pane.set_edgecolor("lightgray")
+            ax3d.grid(True, alpha=0.2)
+            ax3d.set_xticklabels([])
+            ax3d.set_yticklabels([])
+            ax3d.set_zticklabels([])
+            ax3d.set_xlabel("")
+            ax3d.set_ylabel("")
+            ax3d.set_zlabel("")
+            ax3d.set_title("3D overlay", fontsize=11, fontweight="bold")
+
+            # Heatmap helper
+            cmap_heat = plt.cm.YlGnBu.copy()
+            cmap_heat.set_bad(color="white")
+
+            def _heatmap(ax, r, z_vals, title):
+                eps = 1e-6
+                r_edges = np.linspace(
+                    0, np.percentile(r, 99.5) + eps, n_radial + 1
+                )
+                z_edges = np.linspace(
+                    z_vals.min() - eps, z_vals.max() + eps, n_height + 1
+                )
+                hist, _, _ = np.histogram2d(r, z_vals, bins=[r_edges, z_edges])
+                density = hist / hist.sum()
+                density_ma = np.ma.masked_equal(density, 0)
+                vmax = (
+                    np.percentile(density[density > 0], 99)
+                    if (density > 0).any()
+                    else 1
+                )
+                im = ax.pcolormesh(
+                    r_edges, z_edges, density_ma.T,
+                    cmap=cmap_heat,
+                    norm=PowerNorm(gamma=0.4, vmin=0, vmax=vmax),
+                    rasterized=True,
+                )
+                ax.set_xlabel("$r$", fontsize=10)
+                ax.set_ylabel("$z$", fontsize=10)
+                ax.set_title(title, fontsize=11, fontweight="bold")
+                fig.colorbar(im, ax=ax, pad=0.02, fraction=0.046)
+
+            # -- (b) SVD heatmap --
+            ax_svd = fig.add_subplot(132)
+            _heatmap(ax_svd, r_svd, z_svd, "SVD $(r, z)$")
+
+            # -- (c) Stem tracker heatmap --
+            ax_st = fig.add_subplot(133)
+            _heatmap(ax_st, r_spine, z_spine, "Stem tracker $(r, z)$")
+
+            species_display = species.replace("_", " ")
+            fig.suptitle(
+                f"{species_display}  |  {height_bin} m  |  "
+                f"H = {height_m:.1f} m  |  tree {tree_id}  |  "
+                f"{len(cloud):,} pts",
+                fontsize=12,
+                fontweight="bold",
+                y=1.0,
+            )
+
+            fig.patch.set_facecolor("white")
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            fname = f"tree_{tree_id_str}.pdf"
+            fig.savefig(
+                group_dir / fname, format="pdf", bbox_inches="tight", dpi=200,
+            )
+            plt.close(fig)
+            total_figs += 1
+
+        print(
+            f"  {species_display:>25s} / {height_bin:>5s}: "
+            f"{len(selected_trees)} trees"
+        )
+
+    print(f"\nSpine audit: {total_figs} figures saved to {output_dir}/spine_audit/")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -1693,7 +1920,7 @@ if __name__ == "__main__":
         "--figures",
         nargs="+",
         default=["spine_comparison"],
-        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison)",
+        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit)",
     )
     parser.add_argument(
         "--experiment_dir", default="experiments/transformer-8-512-4096"
@@ -1731,6 +1958,13 @@ if __name__ == "__main__":
             )
         elif fig_name == "spine_comparison":
             create_figure_spine_comparison(
+                experiment_dir=args.experiment_dir,
+                data_path=args.data_path,
+                output_dir=args.output_dir,
+                seed=args.seed,
+            )
+        elif fig_name == "spine_audit":
+            create_figure_spine_audit(
                 experiment_dir=args.experiment_dir,
                 data_path=args.data_path,
                 output_dir=args.output_dir,
