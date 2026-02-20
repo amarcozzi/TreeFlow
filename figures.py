@@ -11,7 +11,7 @@ from scipy.ndimage import gaussian_filter
 from matplotlib.ticker import MaxNLocator
 
 
-from scipy.interpolate import interp1d
+from numpy.polynomial import Polynomial
 
 from dataset import create_datasets
 
@@ -1381,46 +1381,79 @@ def create_figure_crown_mae(
 
 
 def _compute_rz_spine(
-    cloud: np.ndarray, num_bins: int = 10
-) -> tuple[np.ndarray, np.ndarray]:
-    """Piecewise-spine cylindrical coordinates.
+    cloud: np.ndarray,
+    num_bins: int = 20,
+    sigma: float = 0.05,
+    degree: int = 3,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Robust stem-tracking cylindrical coordinates.
 
-    Slices the tree into horizontal bins, finds the median (X, Y) center
-    of each bin (robust to canopy asymmetry), interpolates a continuous
-    spine, then computes r as horizontal distance to the spine and z as
-    height from the base.
+    1. Bottom-up tracking: starts at the trunk base and traces upward using
+       Gaussian proximity weights, staying locked on dense wood and ignoring
+       asymmetric foliage.
+    2. Polynomial smoothing: fits a low-degree polynomial to the tracked
+       centers, enforcing biological rigidity (allows leans/sweeps, prevents
+       zigzags).
 
-    Returns (r, z) arrays in the original point order.
+    Returns (r, z, spine_xyz) where spine_xyz is (M, 3) tracked centers
+    before polynomial smoothing (for visualization).
     """
     x, y, z = cloud[:, 0], cloud[:, 1], cloud[:, 2]
     z_min, z_max = z.min(), z.max()
-
     bin_edges = np.linspace(z_min, z_max, num_bins + 1)
 
+    # Initialize at the physical base (lowest 5% of height)
+    base_mask = z <= (z_min + (z_max - z_min) * 0.05)
+    if base_mask.sum() < 5:
+        base_mask = (z >= bin_edges[0]) & (z <= bin_edges[1])
+
+    current_x = np.median(x[base_mask])
+    current_y = np.median(y[base_mask])
+
     spine_z, spine_x, spine_y = [], [], []
+
+    # Bottom-up tracking with Gaussian proximity weighting
     for i in range(num_bins):
         mask = (z >= bin_edges[i]) & (z <= bin_edges[i + 1])
         if mask.sum() < 5:
             continue
-        spine_x.append(np.median(x[mask]))
-        spine_y.append(np.median(y[mask]))
-        spine_z.append(np.median(z[mask]))
 
-    # Fallback: if too few bins populated, use simple centering
-    if len(spine_z) < 2:
-        cx, cy = np.median(x), np.median(y)
-        r = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
-        return r, z - z_min
+        x_bin, y_bin, z_bin = x[mask], y[mask], z[mask]
 
-    # Interpolate a continuous spine
-    fx = interp1d(spine_z, spine_x, kind="linear", fill_value="extrapolate")
-    fy = interp1d(spine_z, spine_y, kind="linear", fill_value="extrapolate")
+        dist_sq = (x_bin - current_x) ** 2 + (y_bin - current_y) ** 2
+        weights = np.exp(-dist_sq / (2 * sigma**2))
+        w_sum = weights.sum()
 
-    center_x = fx(z)
-    center_y = fy(z)
+        if w_sum > 1e-6:
+            next_x = np.sum(x_bin * weights) / w_sum
+            next_y = np.sum(y_bin * weights) / w_sum
+        else:
+            next_x = np.median(x_bin)
+            next_y = np.median(y_bin)
+
+        spine_x.append(next_x)
+        spine_y.append(next_y)
+        spine_z.append(np.median(z_bin))
+
+        current_x, current_y = next_x, next_y
+
+    # Raw tracked centers (for visualization)
+    spine_xyz = np.column_stack([spine_x, spine_y, spine_z]) if spine_z else np.empty((0, 3))
+
+    # Polynomial smoothing for biological rigidity
+    if len(spine_z) >= 2:
+        actual_deg = min(degree, len(spine_z) - 1)
+        p_x = Polynomial.fit(spine_z, spine_x, actual_deg)
+        p_y = Polynomial.fit(spine_z, spine_y, actual_deg)
+        center_x = p_x(z)
+        center_y = p_y(z)
+    else:
+        center_x = np.full_like(z, current_x)
+        center_y = np.full_like(z, current_y)
+
     r = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
     z_out = z - z_min
-    return r, z_out
+    return r, z_out, spine_xyz
 
 
 def create_figure_spine_comparison(
@@ -1428,19 +1461,19 @@ def create_figure_spine_comparison(
     data_path: str = "./data/preprocessed-4096",
     output_dir: str = "figures",
     seed: int = 42,
-    n_radial: int = 16,
-    n_height: int = 32,
-    num_spine_bins: int = 10,
+    n_radial: int = 32,
+    n_height: int = 64,
+    num_spine_bins: int = 20,
 ):
-    """Compare SVD-axis vs piecewise-spine cylindrical coordinate systems.
+    """Compare SVD-axis vs stem-tracker cylindrical coordinate systems.
 
     Produces a 2x2 figure:
-      Top-left:  3D point cloud with SVD axis + centroid
-      Top-right: 3D point cloud with spine segments + bin centers
-      Bottom-left:  (r, z) density heatmap from SVD method
-      Bottom-right: (r, z) density heatmap from spine method
+      Top row:   3D point clouds with SVD axis (left) and stem tracker (right)
+      Bottom row: (r, z) density heatmaps, each with independent bin edges
+                  and sqrt-normalized color to reveal both trunk and canopy
     """
     import zarr
+    from matplotlib.colors import PowerNorm
 
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
@@ -1468,7 +1501,7 @@ def create_figure_spine_comparison(
 
     # ---- Compute both coordinate systems ----
     r_svd, z_svd = _compute_rz(cloud)
-    r_spine, z_spine = _compute_rz_spine(cloud, num_bins=num_spine_bins)
+    r_spine, z_spine, spine_raw = _compute_rz_spine(cloud, num_bins=num_spine_bins)
 
     # ---- SVD decomposition for 3D overlay ----
     centroid = cloud.mean(axis=0)
@@ -1478,175 +1511,157 @@ def create_figure_spine_comparison(
     if svd_axis[2] < 0:
         svd_axis = -svd_axis
 
-    # ---- Spine centers for 3D overlay ----
+    # ---- Smooth polynomial spine curve for 3D overlay ----
     x, y, z = cloud[:, 0], cloud[:, 1], cloud[:, 2]
     z_min, z_max = z.min(), z.max()
-    bin_edges = np.linspace(z_min, z_max, num_spine_bins + 1)
-    spine_pts = []
-    for i in range(num_spine_bins):
-        mask = (z >= bin_edges[i]) & (z <= bin_edges[i + 1])
-        if mask.sum() < 5:
-            continue
-        spine_pts.append([np.median(x[mask]), np.median(y[mask]), np.median(z[mask])])
-    spine_pts = np.array(spine_pts)
+    degree = 3
+    actual_deg = min(degree, len(spine_raw) - 1) if len(spine_raw) >= 2 else 1
+    if len(spine_raw) >= 2:
+        p_x = Polynomial.fit(spine_raw[:, 2], spine_raw[:, 0], actual_deg)
+        p_y = Polynomial.fit(spine_raw[:, 2], spine_raw[:, 1], actual_deg)
+        spine_z_dense = np.linspace(z_min, z_max, 200)
+        spine_curve = np.column_stack(
+            [p_x(spine_z_dense), p_y(spine_z_dense), spine_z_dense]
+        )
+    else:
+        spine_curve = spine_raw
 
     # ---- Subsample for 3D scatter ----
     rng = np.random.default_rng(seed)
-    n_show = min(4000, len(cloud))
+    n_show = min(8000, len(cloud))
     idx = rng.choice(len(cloud), n_show, replace=False)
 
     # ---- Figure ----
-    fig = plt.figure(figsize=(14, 12))
+    fig = plt.figure(figsize=(13, 12))
 
-    # -- Top-left: 3D with SVD axis --
+    # Common 3D helper
+    def _setup_3d(ax, title, label):
+        cloud_range = np.array([
+            cloud[:, 0].max() - cloud[:, 0].min(),
+            cloud[:, 1].max() - cloud[:, 1].min(),
+            cloud[:, 2].max() - cloud[:, 2].min(),
+        ]).max() / 2.0
+        mid = centroid
+        ax.set_xlim(mid[0] - cloud_range, mid[0] + cloud_range)
+        ax.set_ylim(mid[1] - cloud_range, mid[1] + cloud_range)
+        ax.set_zlim(mid[2] - cloud_range, mid[2] + cloud_range)
+        ax.view_init(elev=15, azim=135)
+        ax.xaxis.pane.fill = False
+        ax.yaxis.pane.fill = False
+        ax.zaxis.pane.fill = False
+        ax.xaxis.pane.set_edgecolor("lightgray")
+        ax.yaxis.pane.set_edgecolor("lightgray")
+        ax.zaxis.pane.set_edgecolor("lightgray")
+        ax.grid(True, alpha=0.2)
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        ax.set_zticklabels([])
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        ax.set_zlabel("")
+        ax.set_title(title, fontsize=13, fontweight="bold", pad=8)
+        # Panel label
+        ax.text2D(
+            0.02, 0.95, label, transform=ax.transAxes,
+            fontsize=16, fontweight="bold", va="top",
+        )
+
+    # -- (a) 3D with SVD axis --
     ax1 = fig.add_subplot(221, projection="3d")
     ax1.scatter(
-        cloud[idx, 0],
-        cloud[idx, 1],
-        cloud[idx, 2],
-        c=cloud[idx, 2],
-        cmap="viridis",
-        s=1.5,
-        alpha=0.35,
-        rasterized=True,
+        cloud[idx, 0], cloud[idx, 1], cloud[idx, 2],
+        c=cloud[idx, 2], cmap="viridis", s=0.8, alpha=0.4, rasterized=True,
     )
-    # Draw SVD axis line through centroid
-    extent = np.linalg.norm(centered, axis=1).max() * 0.5
+    extent = np.linalg.norm(centered, axis=1).max() * 0.55
     for sign in [-1, 1]:
         tip = centroid + sign * svd_axis * extent
         ax1.plot(
-            [centroid[0], tip[0]],
-            [centroid[1], tip[1]],
-            [centroid[2], tip[2]],
-            color="#d62728",
-            linewidth=3,
-            zorder=10,
+            [centroid[0], tip[0]], [centroid[1], tip[1]], [centroid[2], tip[2]],
+            color="#d62728", linewidth=3.5, zorder=10,
         )
     ax1.scatter(
-        *centroid,
-        color="black",
-        s=80,
-        marker="o",
-        zorder=12,
-        edgecolors="white",
-        linewidths=1.5,
+        [centroid[0]], [centroid[1]], [centroid[2]],
+        color="black", s=80, marker="o", zorder=12,
+        edgecolors="white", linewidths=1.5,
     )
-    ax1.set_title("SVD: single global axis", fontsize=12)
+    _setup_3d(ax1, "SVD: single global axis", "(a)")
 
-    # -- Top-right: 3D with spine --
+    # -- (b) 3D with stem tracker --
     ax2 = fig.add_subplot(222, projection="3d")
     ax2.scatter(
-        cloud[idx, 0],
-        cloud[idx, 1],
-        cloud[idx, 2],
-        c=cloud[idx, 2],
-        cmap="viridis",
-        s=1.5,
-        alpha=0.35,
-        rasterized=True,
+        cloud[idx, 0], cloud[idx, 1], cloud[idx, 2],
+        c=cloud[idx, 2], cmap="viridis", s=0.8, alpha=0.4, rasterized=True,
     )
-    # Draw spine segments
     ax2.plot(
-        spine_pts[:, 0],
-        spine_pts[:, 1],
-        spine_pts[:, 2],
-        color="#d62728",
-        linewidth=3,
-        zorder=10,
+        spine_curve[:, 0], spine_curve[:, 1], spine_curve[:, 2],
+        color="#d62728", linewidth=3.5, zorder=10,
     )
-    # Spine node markers
-    ax2.scatter(
-        spine_pts[:, 0],
-        spine_pts[:, 1],
-        spine_pts[:, 2],
-        color="#d62728",
-        s=60,
-        marker="o",
-        zorder=12,
-        edgecolors="white",
-        linewidths=1.5,
-    )
-    ax2.set_title(f"Spine: {num_spine_bins}-bin piecewise medians", fontsize=12)
-
-    # Shared 3D styling
-    for ax3d in [ax1, ax2]:
-        max_range = (
-            np.array([np.ptp(cloud[:, 0]), np.ptp(cloud[:, 1]), np.ptp(cloud[:, 2])]).max()
-            / 2.0
+    if len(spine_raw) > 0:
+        ax2.scatter(
+            spine_raw[:, 0], spine_raw[:, 1], spine_raw[:, 2],
+            color="#d62728", s=30, marker="o", zorder=12,
+            edgecolors="white", linewidths=0.8, alpha=0.5,
         )
-        mid = centroid
-        ax3d.set_xlim(mid[0] - max_range, mid[0] + max_range)
-        ax3d.set_ylim(mid[1] - max_range, mid[1] + max_range)
-        ax3d.set_zlim(mid[2] - max_range, mid[2] + max_range)
-        ax3d.view_init(elev=20, azim=45)
-        ax3d.xaxis.pane.fill = False
-        ax3d.yaxis.pane.fill = False
-        ax3d.zaxis.pane.fill = False
-        ax3d.xaxis.pane.set_edgecolor("lightgray")
-        ax3d.yaxis.pane.set_edgecolor("lightgray")
-        ax3d.zaxis.pane.set_edgecolor("lightgray")
-        ax3d.grid(True, alpha=0.3)
-        ax3d.set_xlabel("X", fontsize=9)
-        ax3d.set_ylabel("Y", fontsize=9)
-        ax3d.set_zlabel("Z", fontsize=9)
+    _setup_3d(
+        ax2,
+        f"Stem tracker: {num_spine_bins} bins, degree-{actual_deg} polynomial",
+        "(b)",
+    )
 
-    # ---- Shared bin edges for both heatmaps ----
-    eps = 1e-6
-    all_r = np.concatenate([r_svd, r_spine])
-    all_z = np.concatenate([z_svd, z_spine])
-    radial_edges = np.linspace(0, all_r.max() + eps, n_radial + 1)
-    height_edges = np.linspace(all_z.min() - eps, all_z.max() + eps, n_height + 1)
-
-    cmap_heat = plt.cm.Blues.copy()
+    # ---- Heatmaps with INDEPENDENT bin edges per method ----
+    cmap_heat = plt.cm.YlGnBu.copy()
     cmap_heat.set_bad(color="white")
 
-    # -- Bottom-left: SVD heatmap --
-    ax3 = fig.add_subplot(223)
-    hist_svd, _, _ = np.histogram2d(r_svd, z_svd, bins=[radial_edges, height_edges])
-    density_svd = np.ma.masked_equal(hist_svd / hist_svd.sum(), 0)
+    def _make_heatmap(ax, r, z_vals, title, label):
+        eps = 1e-6
+        r_edges = np.linspace(0, np.percentile(r, 99.5) + eps, n_radial + 1)
+        z_edges = np.linspace(z_vals.min() - eps, z_vals.max() + eps, n_height + 1)
+        hist, _, _ = np.histogram2d(r, z_vals, bins=[r_edges, z_edges])
+        density = hist / hist.sum()
+        density_ma = np.ma.masked_equal(density, 0)
+        vmax = np.percentile(density[density > 0], 99) if (density > 0).any() else 1
 
-    # -- Bottom-right: Spine heatmap --
-    ax4 = fig.add_subplot(224)
-    hist_spine, _, _ = np.histogram2d(
-        r_spine, z_spine, bins=[radial_edges, height_edges]
-    )
-    density_spine = np.ma.masked_equal(hist_spine / hist_spine.sum(), 0)
-
-    vmax = max(density_svd.max(), density_spine.max())
-
-    for ax, density, title in [
-        (ax3, density_svd, "SVD: $(r, z)$ density"),
-        (ax4, density_spine, "Spine: $(r, z)$ density"),
-    ]:
-        im = ax.imshow(
-            density.T,
-            origin="lower",
-            aspect="auto",
-            extent=[
-                radial_edges[0],
-                radial_edges[-1],
-                height_edges[0],
-                height_edges[-1],
-            ],
-            cmap=cmap_heat,
-            vmin=0,
-            vmax=vmax,
+        im = ax.pcolormesh(
+            r_edges, z_edges, density_ma.T,
+            cmap=cmap_heat, norm=PowerNorm(gamma=0.4, vmin=0, vmax=vmax),
+            rasterized=True,
         )
         ax.set_xlabel("Radial distance $r$", fontsize=11)
         ax.set_ylabel("Height $z$", fontsize=11)
-        ax.set_title(title, fontsize=12)
+        ax.set_title(title, fontsize=13, fontweight="bold", pad=8)
+        ax.text(
+            0.02, 0.97, label, transform=ax.transAxes,
+            fontsize=16, fontweight="bold", va="top",
+        )
+        return im
 
-    # Colorbar for heatmaps
-    fig.colorbar(im, ax=[ax3, ax4], shrink=0.8, label="Point density")
+    # -- (c) SVD heatmap --
+    ax3 = fig.add_subplot(223)
+    im_svd = _make_heatmap(ax3, r_svd, z_svd, "SVD: $(r, z)$ density", "(c)")
+
+    # -- (d) Stem tracker heatmap --
+    ax4 = fig.add_subplot(224)
+    im_spine = _make_heatmap(
+        ax4, r_spine, z_spine, "Stem tracker: $(r, z)$ density", "(d)"
+    )
+
+    # Individual colorbars tight to each heatmap
+    for ax_h, im_h in [(ax3, im_svd), (ax4, im_spine)]:
+        cb = fig.colorbar(im_h, ax=ax_h, pad=0.02, fraction=0.046)
+        cb.set_label("Point density", fontsize=9)
+        cb.ax.tick_params(labelsize=8)
 
     species_display = species.replace("_", " ")
     fig.suptitle(
-        f"SVD axis vs Piecewise Spine  —  {species_display}, H = {height_m:.1f} m",
-        fontsize=14,
-        y=1.01,
+        f"SVD axis vs Stem Tracker  \u2014  {species_display}, "
+        f"H = {height_m:.1f} m",
+        fontsize=15,
+        fontweight="bold",
+        y=0.98,
     )
 
-    plt.tight_layout()
+    fig.patch.set_facecolor("white")
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     out_path = output_dir / "figure_spine_comparison.pdf"
     fig.savefig(out_path, format="pdf", bbox_inches="tight", dpi=300)
     plt.close(fig)
