@@ -1571,7 +1571,7 @@ def create_figure_spine_comparison(
     # Shared 3D styling
     for ax3d in [ax1, ax2]:
         max_range = (
-            np.array([cloud[:, 0].ptp(), cloud[:, 1].ptp(), cloud[:, 2].ptp()]).max()
+            np.array([np.ptp(cloud[:, 0]), np.ptp(cloud[:, 1]), np.ptp(cloud[:, 2])]).max()
             / 2.0
         )
         mid = centroid
