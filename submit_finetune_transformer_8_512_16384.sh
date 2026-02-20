@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=umontana_fire_modeling
-#SBATCH --partition=gpu-a100
-#SBATCH --gres=gpu:a100:4
+#SBATCH --partition=gpu-l40s
+#SBATCH --gres=gpu:l40s:4
 #SBATCH --job-name="finetune_tf_512_16k"
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=512G
@@ -28,7 +28,7 @@ accelerate launch --num_processes=4 train.py \
     --rotation_augment \
     --shuffle_augment \
     --num_workers 4 \
-    --num_epochs 2000 \
+    --num_epochs 5000 \
     --resume \
     --lr 5e-5 \
     --min_lr 1e-6 \
