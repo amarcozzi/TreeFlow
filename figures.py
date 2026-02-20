@@ -11,6 +11,8 @@ from scipy.ndimage import gaussian_filter
 from matplotlib.ticker import MaxNLocator
 
 
+from scipy.interpolate import interp1d
+
 from dataset import create_datasets
 
 DOWNSAMPLE_POINTS = 16384
@@ -859,9 +861,7 @@ def create_figure_svd_axes(
     per_pair_csv = str(eval_dir / "per_pair.csv")
 
     # Use same tree as HJSD figure
-    tree_id, _ = _select_median_tree(
-        per_pair_csv, "histogram_jsd", min_height=10.0
-    )
+    tree_id, _ = _select_median_tree(per_pair_csv, "histogram_jsd", min_height=10.0)
 
     # Load real cloud
     data_path = Path(data_path)
@@ -905,8 +905,14 @@ def create_figure_svd_axes(
     pts = cloud[idx]
     colors_z = z_proj[idx]
     sc = ax.scatter(
-        pts[:, 0], pts[:, 1], pts[:, 2],
-        c=colors_z, cmap="viridis", s=1.5, alpha=0.4, rasterized=True,
+        pts[:, 0],
+        pts[:, 1],
+        pts[:, 2],
+        c=colors_z,
+        cmap="viridis",
+        s=1.5,
+        alpha=0.4,
+        rasterized=True,
     )
 
     # Draw SVD axes as arrows from centroid
@@ -923,51 +929,84 @@ def create_figure_svd_axes(
     for i in range(3):
         direction = axes_svd[i] * arrow_len
         ax.quiver(
-            centroid[0], centroid[1], centroid[2],
-            direction[0], direction[1], direction[2],
-            color=axis_colors[i], linewidth=3, arrow_length_ratio=0.08,
+            centroid[0],
+            centroid[1],
+            centroid[2],
+            direction[0],
+            direction[1],
+            direction[2],
+            color=axis_colors[i],
+            linewidth=3,
+            arrow_length_ratio=0.08,
             zorder=10,
         )
         # Label at arrow tip
         tip = centroid + direction * 1.12
         ax.text(
-            tip[0], tip[1], tip[2], axis_labels[i],
-            color=axis_colors[i], fontsize=10, fontweight="bold",
+            tip[0],
+            tip[1],
+            tip[2],
+            axis_labels[i],
+            color=axis_colors[i],
+            fontsize=10,
+            fontweight="bold",
             zorder=11,
         )
 
     # Draw translucent disc in the plane of axes 2-3 at the centroid
     disc_r = arrow_len * 0.55
     theta = np.linspace(0, 2 * np.pi, 60)
-    disc_pts = centroid[None, :] + np.outer(np.cos(theta), axes_svd[1] * disc_r) \
+    disc_pts = (
+        centroid[None, :]
+        + np.outer(np.cos(theta), axes_svd[1] * disc_r)
         + np.outer(np.sin(theta), axes_svd[2] * disc_r)
+    )
     # Fill as polygon
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
     verts = [list(zip(disc_pts[:, 0], disc_pts[:, 1], disc_pts[:, 2]))]
-    disc_poly = Poly3DCollection(verts, alpha=0.15, facecolor="#888888",
-                                  edgecolor="#666666", linewidth=1)
+    disc_poly = Poly3DCollection(
+        verts, alpha=0.15, facecolor="#888888", edgecolor="#666666", linewidth=1
+    )
     ax.add_collection3d(disc_poly)
 
     # Label the disc
     disc_label_pos = centroid + axes_svd[1] * disc_r * 0.7 + axes_svd[2] * disc_r * 0.7
     ax.text(
-        disc_label_pos[0], disc_label_pos[1], disc_label_pos[2],
+        disc_label_pos[0],
+        disc_label_pos[1],
+        disc_label_pos[2],
         "radial plane ($r$)",
-        color="#666666", fontsize=9, fontstyle="italic", zorder=11,
+        color="#666666",
+        fontsize=9,
+        fontstyle="italic",
+        zorder=11,
     )
 
     # Centroid marker
     ax.scatter(
-        [centroid[0]], [centroid[1]], [centroid[2]],
-        color="black", s=60, marker="o", zorder=12, edgecolors="white", linewidths=1.5,
+        [centroid[0]],
+        [centroid[1]],
+        [centroid[2]],
+        color="black",
+        s=60,
+        marker="o",
+        zorder=12,
+        edgecolors="white",
+        linewidths=1.5,
     )
 
     # Set equal aspect ratio
-    max_range = np.array([
-        cloud[:, 0].max() - cloud[:, 0].min(),
-        cloud[:, 1].max() - cloud[:, 1].min(),
-        cloud[:, 2].max() - cloud[:, 2].min(),
-    ]).max() / 2.0
+    max_range = (
+        np.array(
+            [
+                cloud[:, 0].max() - cloud[:, 0].min(),
+                cloud[:, 1].max() - cloud[:, 1].min(),
+                cloud[:, 2].max() - cloud[:, 2].min(),
+            ]
+        ).max()
+        / 2.0
+    )
 
     mid = centroid
     ax.set_xlim(mid[0] - max_range, mid[0] + max_range)
@@ -991,7 +1030,8 @@ def create_figure_svd_axes(
     species_display = species.replace("_", " ")
     ax.set_title(
         f"SVD-aligned coordinate system\n{species_display}, H = {height_m:.1f} m",
-        fontsize=12, pad=15,
+        fontsize=12,
+        pad=15,
     )
 
     fig.patch.set_facecolor("white")
@@ -1249,12 +1289,22 @@ def create_figure_crown_mae(
         idx_g = rng_gen.choice(len(x_gen), n_show, replace=False)
 
         ax.scatter(
-            x_real[idx_r], y_real[idx_r],
-            s=1, alpha=0.25, color="#1f77b4", label="Real", rasterized=True,
+            x_real[idx_r],
+            y_real[idx_r],
+            s=1,
+            alpha=0.25,
+            color="#1f77b4",
+            label="Real",
+            rasterized=True,
         )
         ax.scatter(
-            x_gen[idx_g], y_gen[idx_g],
-            s=1, alpha=0.25, color="#ff7f0e", label="Generated", rasterized=True,
+            x_gen[idx_g],
+            y_gen[idx_g],
+            s=1,
+            alpha=0.25,
+            color="#ff7f0e",
+            label="Generated",
+            rasterized=True,
         )
 
         # Circles for mean per-height-bin percentile radii
@@ -1262,13 +1312,19 @@ def create_figure_crown_mae(
         r_r = real_pcts[pct]
         r_g = gen_pcts[pct]
         ax.plot(
-            r_r * np.cos(theta), r_r * np.sin(theta),
-            color="#1f77b4", linewidth=2, linestyle="-",
+            r_r * np.cos(theta),
+            r_r * np.sin(theta),
+            color="#1f77b4",
+            linewidth=2,
+            linestyle="-",
             label=f"Real {labels[pct]} = {r_r:.3f}",
         )
         ax.plot(
-            r_g * np.cos(theta), r_g * np.sin(theta),
-            color="#ff7f0e", linewidth=2, linestyle="--",
+            r_g * np.cos(theta),
+            r_g * np.sin(theta),
+            color="#ff7f0e",
+            linewidth=2,
+            linestyle="--",
             label=f"Gen {labels[pct]} = {r_g:.3f}",
         )
 
@@ -1324,6 +1380,264 @@ def create_figure_crown_mae(
     print(f"  Saved metadata: {meta_path}")
 
 
+def _compute_rz_spine(
+    cloud: np.ndarray, num_bins: int = 10
+) -> tuple[np.ndarray, np.ndarray]:
+    """Piecewise-spine cylindrical coordinates.
+
+    Slices the tree into horizontal bins, finds the median (X, Y) center
+    of each bin (robust to canopy asymmetry), interpolates a continuous
+    spine, then computes r as horizontal distance to the spine and z as
+    height from the base.
+
+    Returns (r, z) arrays in the original point order.
+    """
+    x, y, z = cloud[:, 0], cloud[:, 1], cloud[:, 2]
+    z_min, z_max = z.min(), z.max()
+
+    bin_edges = np.linspace(z_min, z_max, num_bins + 1)
+
+    spine_z, spine_x, spine_y = [], [], []
+    for i in range(num_bins):
+        mask = (z >= bin_edges[i]) & (z <= bin_edges[i + 1])
+        if mask.sum() < 5:
+            continue
+        spine_x.append(np.median(x[mask]))
+        spine_y.append(np.median(y[mask]))
+        spine_z.append(np.median(z[mask]))
+
+    # Fallback: if too few bins populated, use simple centering
+    if len(spine_z) < 2:
+        cx, cy = np.median(x), np.median(y)
+        r = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+        return r, z - z_min
+
+    # Interpolate a continuous spine
+    fx = interp1d(spine_z, spine_x, kind="linear", fill_value="extrapolate")
+    fy = interp1d(spine_z, spine_y, kind="linear", fill_value="extrapolate")
+
+    center_x = fx(z)
+    center_y = fy(z)
+    r = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+    z_out = z - z_min
+    return r, z_out
+
+
+def create_figure_spine_comparison(
+    experiment_dir: str = "experiments/transformer-8-512-4096",
+    data_path: str = "./data/preprocessed-4096",
+    output_dir: str = "figures",
+    seed: int = 42,
+    n_radial: int = 16,
+    n_height: int = 32,
+    num_spine_bins: int = 10,
+):
+    """Compare SVD-axis vs piecewise-spine cylindrical coordinate systems.
+
+    Produces a 2x2 figure:
+      Top-left:  3D point cloud with SVD axis + centroid
+      Top-right: 3D point cloud with spine segments + bin centers
+      Bottom-left:  (r, z) density heatmap from SVD method
+      Bottom-right: (r, z) density heatmap from spine method
+    """
+    import zarr
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    eval_dir = Path(experiment_dir) / "samples" / "evaluation"
+    per_pair_csv = str(eval_dir / "per_pair.csv")
+
+    # Use same tree as HJSD figure for visual continuity
+    tree_id, _ = _select_median_tree(per_pair_csv, "histogram_jsd", min_height=10.0)
+
+    # Load real cloud
+    data_path = Path(data_path)
+    tree_id_str = f"{int(tree_id):05d}"
+    real_path = data_path / f"{tree_id_str}.zarr"
+    cloud = zarr.load(str(real_path)).astype(np.float32)
+
+    pair_df = pd.read_csv(per_pair_csv)
+    tree_rows = pair_df[pair_df["source_tree_id"] == tree_id]
+    species = tree_rows.iloc[0]["species"]
+    height_m = float(tree_rows.iloc[0]["height_m"])
+
+    print(
+        f"Spine comparison: tree {tree_id}, {species}, H={height_m:.1f}m, "
+        f"{len(cloud)} points"
+    )
+
+    # ---- Compute both coordinate systems ----
+    r_svd, z_svd = _compute_rz(cloud)
+    r_spine, z_spine = _compute_rz_spine(cloud, num_bins=num_spine_bins)
+
+    # ---- SVD decomposition for 3D overlay ----
+    centroid = cloud.mean(axis=0)
+    centered = cloud - centroid
+    _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+    svd_axis = Vt[0]
+    if svd_axis[2] < 0:
+        svd_axis = -svd_axis
+
+    # ---- Spine centers for 3D overlay ----
+    x, y, z = cloud[:, 0], cloud[:, 1], cloud[:, 2]
+    z_min, z_max = z.min(), z.max()
+    bin_edges = np.linspace(z_min, z_max, num_spine_bins + 1)
+    spine_pts = []
+    for i in range(num_spine_bins):
+        mask = (z >= bin_edges[i]) & (z <= bin_edges[i + 1])
+        if mask.sum() < 5:
+            continue
+        spine_pts.append(
+            [np.median(x[mask]), np.median(y[mask]), np.median(z[mask])]
+        )
+    spine_pts = np.array(spine_pts)
+
+    # ---- Subsample for 3D scatter ----
+    rng = np.random.default_rng(seed)
+    n_show = min(4000, len(cloud))
+    idx = rng.choice(len(cloud), n_show, replace=False)
+
+    # ---- Figure ----
+    fig = plt.figure(figsize=(14, 12))
+
+    # -- Top-left: 3D with SVD axis --
+    ax1 = fig.add_subplot(221, projection="3d")
+    ax1.scatter(
+        cloud[idx, 0], cloud[idx, 1], cloud[idx, 2],
+        c=cloud[idx, 2], cmap="viridis", s=1.5, alpha=0.35, rasterized=True,
+    )
+    # Draw SVD axis line through centroid
+    extent = np.linalg.norm(centered, axis=1).max() * 0.5
+    for sign in [-1, 1]:
+        tip = centroid + sign * svd_axis * extent
+        ax1.plot(
+            [centroid[0], tip[0]], [centroid[1], tip[1]], [centroid[2], tip[2]],
+            color="#d62728", linewidth=3, zorder=10,
+        )
+    ax1.scatter(*centroid, color="black", s=80, marker="o", zorder=12,
+                edgecolors="white", linewidths=1.5)
+    ax1.set_title("SVD: single global axis", fontsize=12)
+
+    # -- Top-right: 3D with spine --
+    ax2 = fig.add_subplot(222, projection="3d")
+    ax2.scatter(
+        cloud[idx, 0], cloud[idx, 1], cloud[idx, 2],
+        c=cloud[idx, 2], cmap="viridis", s=1.5, alpha=0.35, rasterized=True,
+    )
+    # Draw spine segments
+    ax2.plot(
+        spine_pts[:, 0], spine_pts[:, 1], spine_pts[:, 2],
+        color="#d62728", linewidth=3, zorder=10,
+    )
+    # Spine node markers
+    ax2.scatter(
+        spine_pts[:, 0], spine_pts[:, 1], spine_pts[:, 2],
+        color="#d62728", s=60, marker="o", zorder=12,
+        edgecolors="white", linewidths=1.5,
+    )
+    ax2.set_title(f"Spine: {num_spine_bins}-bin piecewise medians", fontsize=12)
+
+    # Shared 3D styling
+    for ax3d in [ax1, ax2]:
+        max_range = (
+            np.array([
+                cloud[:, 0].ptp(), cloud[:, 1].ptp(), cloud[:, 2].ptp()
+            ]).max() / 2.0
+        )
+        mid = centroid
+        ax3d.set_xlim(mid[0] - max_range, mid[0] + max_range)
+        ax3d.set_ylim(mid[1] - max_range, mid[1] + max_range)
+        ax3d.set_zlim(mid[2] - max_range, mid[2] + max_range)
+        ax3d.view_init(elev=20, azim=45)
+        ax3d.xaxis.pane.fill = False
+        ax3d.yaxis.pane.fill = False
+        ax3d.zaxis.pane.fill = False
+        ax3d.xaxis.pane.set_edgecolor("lightgray")
+        ax3d.yaxis.pane.set_edgecolor("lightgray")
+        ax3d.zaxis.pane.set_edgecolor("lightgray")
+        ax3d.grid(True, alpha=0.3)
+        ax3d.set_xlabel("X", fontsize=9)
+        ax3d.set_ylabel("Y", fontsize=9)
+        ax3d.set_zlabel("Z", fontsize=9)
+
+    # ---- Shared bin edges for both heatmaps ----
+    eps = 1e-6
+    all_r = np.concatenate([r_svd, r_spine])
+    all_z = np.concatenate([z_svd, z_spine])
+    radial_edges = np.linspace(0, all_r.max() + eps, n_radial + 1)
+    height_edges = np.linspace(all_z.min() - eps, all_z.max() + eps, n_height + 1)
+
+    cmap_heat = plt.cm.Blues.copy()
+    cmap_heat.set_bad(color="white")
+
+    # -- Bottom-left: SVD heatmap --
+    ax3 = fig.add_subplot(223)
+    hist_svd, _, _ = np.histogram2d(r_svd, z_svd, bins=[radial_edges, height_edges])
+    density_svd = np.ma.masked_equal(hist_svd / hist_svd.sum(), 0)
+
+    # -- Bottom-right: Spine heatmap --
+    ax4 = fig.add_subplot(224)
+    hist_spine, _, _ = np.histogram2d(
+        r_spine, z_spine, bins=[radial_edges, height_edges]
+    )
+    density_spine = np.ma.masked_equal(hist_spine / hist_spine.sum(), 0)
+
+    vmax = max(density_svd.max(), density_spine.max())
+
+    for ax, density, title in [
+        (ax3, density_svd, "SVD: $(r, z)$ density"),
+        (ax4, density_spine, "Spine: $(r, z)$ density"),
+    ]:
+        im = ax.imshow(
+            density.T,
+            origin="lower",
+            aspect="auto",
+            extent=[
+                radial_edges[0], radial_edges[-1],
+                height_edges[0], height_edges[-1],
+            ],
+            cmap=cmap_heat,
+            vmin=0,
+            vmax=vmax,
+        )
+        ax.set_xlabel("Radial distance $r$", fontsize=11)
+        ax.set_ylabel("Height $z$", fontsize=11)
+        ax.set_title(title, fontsize=12)
+
+    # Colorbar for heatmaps
+    fig.colorbar(im, ax=[ax3, ax4], shrink=0.8, label="Point density")
+
+    species_display = species.replace("_", " ")
+    fig.suptitle(
+        f"SVD axis vs Piecewise Spine  —  {species_display}, H = {height_m:.1f} m",
+        fontsize=14,
+        y=1.01,
+    )
+
+    plt.tight_layout()
+    out_path = output_dir / "figure_spine_comparison.pdf"
+    fig.savefig(out_path, format="pdf", bbox_inches="tight", dpi=300)
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+    # Save metadata
+    meta = {
+        "source_tree_id": int(tree_id),
+        "species": species,
+        "height_m": height_m,
+        "num_points": len(cloud),
+        "num_spine_bins": num_spine_bins,
+        "r_svd_mean": float(r_svd.mean()),
+        "r_spine_mean": float(r_spine.mean()),
+        "r_svd_std": float(r_svd.std()),
+        "r_spine_std": float(r_spine.std()),
+    }
+    meta_path = output_dir / "figure_spine_comparison.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  Saved metadata: {meta_path}")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -1332,7 +1646,7 @@ if __name__ == "__main__":
         "--figures",
         nargs="+",
         default=["1", "2", "svd_axes", "hjsd", "crown_mae"],
-        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae)",
+        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison)",
     )
     parser.add_argument(
         "--experiment_dir", default="experiments/transformer-8-512-4096"
@@ -1363,6 +1677,13 @@ if __name__ == "__main__":
             )
         elif fig_name == "crown_mae":
             create_figure_crown_mae(
+                experiment_dir=args.experiment_dir,
+                data_path=args.data_path,
+                output_dir=args.output_dir,
+                seed=args.seed,
+            )
+        elif fig_name == "spine_comparison":
+            create_figure_spine_comparison(
                 experiment_dir=args.experiment_dir,
                 data_path=args.data_path,
                 output_dir=args.output_dir,
