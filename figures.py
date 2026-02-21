@@ -1503,9 +1503,9 @@ def _compute_rz_spine(
     num_bins: int = 20,
     sigma_frac: float = 0.10,
     degree: int = 3,
-    density_k: int = 32,
+    density_k: int = 16,
     n_refine: int = 1,
-    max_step_frac: float = 0.02,
+    max_step_frac: float = 0.05,
     outlier_mad_k: float = 2.5,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Robust stem-tracking cylindrical coordinates.
