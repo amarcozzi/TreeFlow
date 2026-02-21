@@ -1446,19 +1446,14 @@ def _track_spine_pass(
         # Local density weights: points in tight clusters (trunk) get upweighted
         n_pts = len(x_bin)
         if n_pts > density_k:
+            from scipy.spatial import cKDTree
+
             xy = np.column_stack([x_bin, y_bin])
-            # For each point, compute mean distance to k nearest neighbors
-            # Use a vectorized pairwise approach for small slices
-            dists_all = np.sqrt(
-                (xy[:, None, 0] - xy[None, :, 0]) ** 2
-                + (xy[:, None, 1] - xy[None, :, 1]) ** 2
-            )
-            # Sort each row ascending and take mean of k nearest (excluding self)
-            dists_sorted = np.sort(dists_all, axis=1)[:, 1 : density_k + 1]
-            mean_knn_dist = dists_sorted.mean(axis=1)
-            # Invert: small distance = high density. Add epsilon to avoid div/0
+            tree = cKDTree(xy)
+            dists, _ = tree.query(xy, k=density_k + 1)  # +1 because self is included
+            mean_knn_dist = dists[:, 1:].mean(axis=1)  # exclude self (dist=0)
             density_w = 1.0 / (mean_knn_dist + 1e-8)
-            density_w /= density_w.max()  # normalize to [0, 1]
+            density_w /= density_w.max()
         else:
             density_w = np.ones(n_pts)
 
