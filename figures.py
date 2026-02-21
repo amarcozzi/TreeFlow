@@ -1501,12 +1501,12 @@ def _track_spine_pass(
 def _compute_rz_spine(
     cloud: np.ndarray,
     num_bins: int = 20,
-    sigma_frac: float = 0.15,
+    sigma_frac: float = 0.10,
     degree: int = 3,
-    density_k: int = 8,
-    n_refine: int = 0,
-    max_step_frac: float = 0.08,
-    outlier_mad_k: float = 3.0,
+    density_k: int = 32,
+    n_refine: int = 1,
+    max_step_frac: float = 0.02,
+    outlier_mad_k: float = 2.5,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Robust stem-tracking cylindrical coordinates.
 
