@@ -1383,7 +1383,9 @@ def create_figure_crown_mae(
     print(f"  Saved metadata: {meta_path}")
 
 
-def _find_trunk_base(x: np.ndarray, y: np.ndarray, bandwidth: float) -> tuple[float, float]:
+def _find_trunk_base(
+    x: np.ndarray, y: np.ndarray, bandwidth: float
+) -> tuple[float, float]:
     """Find the densest horizontal cluster at the trunk base.
 
     Uses iterative mean-shift-style convergence: start at the median,
@@ -1502,7 +1504,7 @@ def _compute_rz_spine(
     sigma_frac: float = 0.15,
     degree: int = 3,
     density_k: int = 8,
-    n_refine: int = 1,
+    n_refine: int = 0,
     max_step_frac: float = 0.08,
     outlier_mad_k: float = 3.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1558,8 +1560,16 @@ def _compute_rz_spine(
 
     # --- 2 & 3. First tracking pass (adaptive sigma + density weighting) ---
     spine_x, spine_y, spine_z = _track_spine_pass(
-        x, y, z, bin_edges, init_x, init_y, sigma_frac, density_k,
-        sigma_cap=sigma_cap, max_step=max_step,
+        x,
+        y,
+        z,
+        bin_edges,
+        init_x,
+        init_y,
+        sigma_frac,
+        density_k,
+        sigma_cap=sigma_cap,
+        max_step=max_step,
     )
 
     # --- 4. Iterative refinement ---
@@ -1578,8 +1588,16 @@ def _compute_rz_spine(
         poly_init_y = float(p_y(bin_mids[0]))
 
         spine_x, spine_y, spine_z = _track_spine_pass(
-            x, y, z, bin_edges, poly_init_x, poly_init_y, sigma_frac, density_k,
-            sigma_cap=sigma_cap, max_step=max_step,
+            x,
+            y,
+            z,
+            bin_edges,
+            poly_init_x,
+            poly_init_y,
+            sigma_frac,
+            density_k,
+            sigma_cap=sigma_cap,
+            max_step=max_step,
         )
 
     # Raw tracked centers (for visualization)
@@ -1965,12 +1983,14 @@ def create_figure_spine_audit(
             .tolist()
         )
         for tree_id in selected_trees:
-            tasks.append({
-                "species": species,
-                "height_bin": height_bin,
-                "tree_id": tree_id,
-                "grp": grp,
-            })
+            tasks.append(
+                {
+                    "species": species,
+                    "height_bin": height_bin,
+                    "tree_id": tree_id,
+                    "grp": grp,
+                }
+            )
 
     audit_dir = output_dir / "spine_audit"
     audit_dir.mkdir(parents=True, exist_ok=True)
@@ -1995,9 +2015,7 @@ def create_figure_spine_audit(
 
         # Compute both coordinate systems
         r_svd, z_svd = _compute_rz(cloud)
-        r_spine, z_spine, spine_raw = _compute_rz_spine(
-            cloud, num_bins=num_spine_bins
-        )
+        r_spine, z_spine, spine_raw = _compute_rz_spine(cloud, num_bins=num_spine_bins)
 
         # SVD axis
         centroid = cloud.mean(axis=0)
@@ -2011,9 +2029,7 @@ def create_figure_spine_audit(
         x, y, z = cloud[:, 0], cloud[:, 1], cloud[:, 2]
         z_min, z_max = z.min(), z.max()
         degree = 3
-        actual_deg = (
-            min(degree, len(spine_raw) - 1) if len(spine_raw) >= 2 else 1
-        )
+        actual_deg = min(degree, len(spine_raw) - 1) if len(spine_raw) >= 2 else 1
         if len(spine_raw) >= 2:
             p_x = Polynomial.fit(spine_raw[:, 2], spine_raw[:, 0], actual_deg)
             p_y = Polynomial.fit(spine_raw[:, 2], spine_raw[:, 1], actual_deg)
@@ -2035,11 +2051,13 @@ def create_figure_spine_audit(
         # Common 3D helper
         def _setup_3d(ax, title, label):
             cloud_range = (
-                np.array([
-                    cloud[:, 0].max() - cloud[:, 0].min(),
-                    cloud[:, 1].max() - cloud[:, 1].min(),
-                    cloud[:, 2].max() - cloud[:, 2].min(),
-                ]).max()
+                np.array(
+                    [
+                        cloud[:, 0].max() - cloud[:, 0].min(),
+                        cloud[:, 1].max() - cloud[:, 1].min(),
+                        cloud[:, 2].max() - cloud[:, 2].min(),
+                    ]
+                ).max()
                 / 2.0
             )
             mid = centroid
@@ -2062,15 +2080,25 @@ def create_figure_spine_audit(
             ax.set_zlabel("")
             ax.set_title(title, fontsize=13, fontweight="bold", pad=8)
             ax.text2D(
-                0.02, 0.95, label, transform=ax.transAxes,
-                fontsize=16, fontweight="bold", va="top",
+                0.02,
+                0.95,
+                label,
+                transform=ax.transAxes,
+                fontsize=16,
+                fontweight="bold",
+                va="top",
             )
 
         # -- (a) 3D with SVD axis --
         ax1 = fig.add_subplot(221, projection="3d")
         ax1.scatter(
-            cloud[idx, 0], cloud[idx, 1], cloud[idx, 2],
-            c=cloud[idx, 2], cmap="viridis", s=0.8, alpha=0.4,
+            cloud[idx, 0],
+            cloud[idx, 1],
+            cloud[idx, 2],
+            c=cloud[idx, 2],
+            cmap="viridis",
+            s=0.8,
+            alpha=0.4,
             rasterized=True,
         )
         extent = np.linalg.norm(centered, axis=1).max() * 0.55
@@ -2080,32 +2108,56 @@ def create_figure_spine_audit(
                 [centroid[0], tip[0]],
                 [centroid[1], tip[1]],
                 [centroid[2], tip[2]],
-                color="#d62728", linewidth=3.5, zorder=10,
+                color="#d62728",
+                linewidth=3.5,
+                zorder=10,
             )
         ax1.scatter(
-            [centroid[0]], [centroid[1]], [centroid[2]],
-            color="black", s=80, marker="o", zorder=12,
-            edgecolors="white", linewidths=1.5,
+            [centroid[0]],
+            [centroid[1]],
+            [centroid[2]],
+            color="black",
+            s=80,
+            marker="o",
+            zorder=12,
+            edgecolors="white",
+            linewidths=1.5,
         )
         _setup_3d(ax1, "SVD: single global axis", "(a)")
 
         # -- (b) 3D with stem tracker --
         ax2 = fig.add_subplot(222, projection="3d")
         ax2.scatter(
-            cloud[idx, 0], cloud[idx, 1], cloud[idx, 2],
-            c=cloud[idx, 2], cmap="viridis", s=0.8, alpha=0.4,
+            cloud[idx, 0],
+            cloud[idx, 1],
+            cloud[idx, 2],
+            c=cloud[idx, 2],
+            cmap="viridis",
+            s=0.8,
+            alpha=0.4,
             rasterized=True,
         )
         if len(spine_curve) > 0:
             ax2.plot(
-                spine_curve[:, 0], spine_curve[:, 1], spine_curve[:, 2],
-                color="#d62728", linewidth=3.5, zorder=10,
+                spine_curve[:, 0],
+                spine_curve[:, 1],
+                spine_curve[:, 2],
+                color="#d62728",
+                linewidth=3.5,
+                zorder=10,
             )
         if len(spine_raw) > 0:
             ax2.scatter(
-                spine_raw[:, 0], spine_raw[:, 1], spine_raw[:, 2],
-                color="#d62728", s=30, marker="o", zorder=12,
-                edgecolors="white", linewidths=0.8, alpha=0.5,
+                spine_raw[:, 0],
+                spine_raw[:, 1],
+                spine_raw[:, 2],
+                color="#d62728",
+                s=30,
+                marker="o",
+                zorder=12,
+                edgecolors="white",
+                linewidths=0.8,
+                alpha=0.5,
             )
         _setup_3d(
             ax2,
@@ -2119,22 +2171,16 @@ def create_figure_spine_audit(
 
         def _make_heatmap(ax, r, z_vals, title, label):
             eps = 1e-6
-            r_edges = np.linspace(
-                0, np.percentile(r, 99.5) + eps, n_radial + 1
-            )
-            z_edges = np.linspace(
-                z_vals.min() - eps, z_vals.max() + eps, n_height + 1
-            )
+            r_edges = np.linspace(0, np.percentile(r, 99.5) + eps, n_radial + 1)
+            z_edges = np.linspace(z_vals.min() - eps, z_vals.max() + eps, n_height + 1)
             hist, _, _ = np.histogram2d(r, z_vals, bins=[r_edges, z_edges])
             density = hist / hist.sum()
             density_ma = np.ma.masked_equal(density, 0)
-            vmax = (
-                np.percentile(density[density > 0], 99)
-                if (density > 0).any()
-                else 1
-            )
+            vmax = np.percentile(density[density > 0], 99) if (density > 0).any() else 1
             im = ax.pcolormesh(
-                r_edges, z_edges, density_ma.T,
+                r_edges,
+                z_edges,
+                density_ma.T,
                 cmap=cmap_heat,
                 norm=PowerNorm(gamma=0.4, vmin=0, vmax=vmax),
                 rasterized=True,
@@ -2143,16 +2189,19 @@ def create_figure_spine_audit(
             ax.set_ylabel("Height $z$", fontsize=11)
             ax.set_title(title, fontsize=13, fontweight="bold", pad=8)
             ax.text(
-                0.02, 0.97, label, transform=ax.transAxes,
-                fontsize=16, fontweight="bold", va="top",
+                0.02,
+                0.97,
+                label,
+                transform=ax.transAxes,
+                fontsize=16,
+                fontweight="bold",
+                va="top",
             )
             return im
 
         # -- (c) SVD heatmap --
         ax3 = fig.add_subplot(223)
-        im_svd = _make_heatmap(
-            ax3, r_svd, z_svd, "SVD: $(r, z)$ density", "(c)"
-        )
+        im_svd = _make_heatmap(ax3, r_svd, z_svd, "SVD: $(r, z)$ density", "(c)")
 
         # -- (d) Stem tracker heatmap --
         ax4 = fig.add_subplot(224)
