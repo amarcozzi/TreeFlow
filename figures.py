@@ -1414,6 +1414,8 @@ def _track_spine_pass(
     init_y: float,
     sigma_frac: float,
     density_k: int,
+    sigma_cap: float | None = None,
+    max_step: float | None = None,
 ) -> tuple[list[float], list[float], list[float]]:
     """Single bottom-up tracking pass with adaptive sigma and density weighting.
 
@@ -1423,6 +1425,12 @@ def _track_spine_pass(
         Gaussian sigma as a fraction of each slice's horizontal extent.
     density_k : int
         Number of nearest neighbors for local density estimation.
+    sigma_cap : float or None
+        Maximum allowed sigma (absolute). Prevents sigma from growing
+        in wide canopy bins. Typically set from the base slice extent.
+    max_step : float or None
+        Maximum allowed horizontal movement between consecutive bins.
+        Prevents jumps to canopy branches.
     """
     num_bins = len(bin_edges) - 1
     current_x, current_y = init_x, init_y
@@ -1438,6 +1446,8 @@ def _track_spine_pass(
         # Adaptive sigma: fraction of this slice's horizontal extent
         extent = max(np.ptp(x_bin), np.ptp(y_bin), 1e-6)
         sigma = sigma_frac * extent
+        if sigma_cap is not None:
+            sigma = min(sigma, sigma_cap)
 
         # Proximity weights (Gaussian centered on previous slice's center)
         dist_sq = (x_bin - current_x) ** 2 + (y_bin - current_y) ** 2
@@ -1467,6 +1477,16 @@ def _track_spine_pass(
             next_x = np.median(x_bin)
             next_y = np.median(y_bin)
 
+        # Enforce max step constraint
+        if max_step is not None:
+            dx = next_x - current_x
+            dy = next_y - current_y
+            step = np.sqrt(dx**2 + dy**2)
+            if step > max_step:
+                scale = max_step / step
+                next_x = current_x + dx * scale
+                next_y = current_y + dy * scale
+
         spine_x.append(next_x)
         spine_y.append(next_y)
         spine_z.append(np.median(z_bin))
@@ -1483,28 +1503,44 @@ def _compute_rz_spine(
     degree: int = 3,
     density_k: int = 8,
     n_refine: int = 1,
+    max_step_frac: float = 0.08,
+    outlier_mad_k: float = 3.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Robust stem-tracking cylindrical coordinates.
 
     Improvements over the basic tracker:
     1. Density-based initialization: mean-shift convergence on the densest
        cluster at the trunk base, instead of a raw median.
-    2. Adaptive sigma: Gaussian bandwidth scales with each slice's horizontal
-       extent (sigma_frac * extent), so it auto-adjusts for tree size.
+    2. Adaptive sigma with cap: Gaussian bandwidth scales with each slice's
+       horizontal extent but is capped by the base slice extent to prevent
+       sigma from growing in wide canopy bins.
     3. Density weighting: points in tight clusters (trunk wood) are upweighted
        relative to diffuse regions (canopy foliage) via k-NN density.
-    4. Two-pass refinement: after polynomial smoothing, re-run tracking using
+    4. Max step constraint: limits horizontal movement between consecutive
+       bins to prevent jumps to canopy branches.
+    5. Two-pass refinement: after polynomial smoothing, re-run tracking using
        the polynomial centers as priors, then re-fit. Repeats n_refine times.
+    6. Outlier rejection: MAD-based removal of wayward spine points before
+       the final polynomial fit, preventing overfitting to errant tracked points.
+
+    Parameters
+    ----------
+    max_step_frac : float
+        Maximum per-bin horizontal movement as a fraction of tree height.
+    outlier_mad_k : float
+        Spine points deviating more than this many MADs from a line fit
+        are rejected before the final polynomial fit.
 
     Returns (r, z, spine_xyz) where spine_xyz is (M, 3) tracked centers
     before the final polynomial smoothing (for visualization).
     """
     x, y, z = cloud[:, 0], cloud[:, 1], cloud[:, 2]
     z_min, z_max = z.min(), z.max()
+    tree_height = z_max - z_min
     bin_edges = np.linspace(z_min, z_max, num_bins + 1)
 
     # --- 1. Density-based initialization at the trunk base ---
-    base_mask = z <= (z_min + (z_max - z_min) * 0.05)
+    base_mask = z <= (z_min + tree_height * 0.05)
     if base_mask.sum() < 5:
         base_mask = (z >= bin_edges[0]) & (z <= bin_edges[1])
 
@@ -1514,9 +1550,16 @@ def _compute_rz_spine(
         x[base_mask], y[base_mask], bandwidth=0.15 * base_extent
     )
 
+    # Sigma cap: prevent sigma from exceeding the base extent scale
+    sigma_cap = sigma_frac * base_extent * 2.0
+
+    # Max step: fraction of tree height per bin
+    max_step = max_step_frac * tree_height
+
     # --- 2 & 3. First tracking pass (adaptive sigma + density weighting) ---
     spine_x, spine_y, spine_z = _track_spine_pass(
-        x, y, z, bin_edges, init_x, init_y, sigma_frac, density_k
+        x, y, z, bin_edges, init_x, init_y, sigma_frac, density_k,
+        sigma_cap=sigma_cap, max_step=max_step,
     )
 
     # --- 4. Iterative refinement ---
@@ -1535,13 +1578,45 @@ def _compute_rz_spine(
         poly_init_y = float(p_y(bin_mids[0]))
 
         spine_x, spine_y, spine_z = _track_spine_pass(
-            x, y, z, bin_edges, poly_init_x, poly_init_y, sigma_frac, density_k
+            x, y, z, bin_edges, poly_init_x, poly_init_y, sigma_frac, density_k,
+            sigma_cap=sigma_cap, max_step=max_step,
         )
 
     # Raw tracked centers (for visualization)
     spine_xyz = (
         np.column_stack([spine_x, spine_y, spine_z]) if spine_z else np.empty((0, 3))
     )
+
+    # --- 5. Outlier rejection before final polynomial fit ---
+    if len(spine_z) >= 4:
+        sz = np.array(spine_z)
+        sx = np.array(spine_x)
+        sy = np.array(spine_y)
+
+        # Fit a line (degree 1) and compute residuals
+        line_x = Polynomial.fit(sz, sx, 1)
+        line_y = Polynomial.fit(sz, sy, 1)
+        resid = np.sqrt((sx - line_x(sz)) ** 2 + (sy - line_y(sz)) ** 2)
+
+        # MAD-based outlier detection
+        med_resid = np.median(resid)
+        mad = np.median(np.abs(resid - med_resid))
+        if mad > 1e-10:
+            keep = resid <= med_resid + outlier_mad_k * mad
+        else:
+            # All residuals nearly identical — keep everything
+            keep = np.ones(len(sz), dtype=bool)
+
+        spine_x = sx[keep].tolist()
+        spine_y = sy[keep].tolist()
+        spine_z = sz[keep].tolist()
+
+        # Update visualization array too
+        spine_xyz = (
+            np.column_stack([spine_x, spine_y, spine_z])
+            if spine_z
+            else np.empty((0, 3))
+        )
 
     # Final polynomial smoothing
     if len(spine_z) >= 2:
