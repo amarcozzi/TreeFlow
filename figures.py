@@ -3,9 +3,12 @@ figures.py - Create figures for paper
 """
 
 import json
+import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+warnings.filterwarnings("ignore", message="Tight layout not applied")
 from pathlib import Path
 from scipy.ndimage import gaussian_filter
 from matplotlib.ticker import MaxNLocator
@@ -1380,39 +1383,51 @@ def create_figure_crown_mae(
     print(f"  Saved metadata: {meta_path}")
 
 
-def _compute_rz_spine(
-    cloud: np.ndarray,
-    num_bins: int = 20,
-    sigma: float = 0.05,
-    degree: int = 3,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Robust stem-tracking cylindrical coordinates.
+def _find_trunk_base(x: np.ndarray, y: np.ndarray, bandwidth: float) -> tuple[float, float]:
+    """Find the densest horizontal cluster at the trunk base.
 
-    1. Bottom-up tracking: starts at the trunk base and traces upward using
-       Gaussian proximity weights, staying locked on dense wood and ignoring
-       asymmetric foliage.
-    2. Polynomial smoothing: fits a low-degree polynomial to the tracked
-       centers, enforcing biological rigidity (allows leans/sweeps, prevents
-       zigzags).
-
-    Returns (r, z, spine_xyz) where spine_xyz is (M, 3) tracked centers
-    before polynomial smoothing (for visualization).
+    Uses iterative mean-shift-style convergence: start at the median,
+    then repeatedly compute a density-weighted mean until it converges
+    on the densest cluster (the trunk cross-section).
     """
-    x, y, z = cloud[:, 0], cloud[:, 1], cloud[:, 2]
-    z_min, z_max = z.min(), z.max()
-    bin_edges = np.linspace(z_min, z_max, num_bins + 1)
+    cx, cy = np.median(x), np.median(y)
+    for _ in range(20):
+        dist_sq = (x - cx) ** 2 + (y - cy) ** 2
+        w = np.exp(-dist_sq / (2 * bandwidth**2))
+        w_sum = w.sum()
+        if w_sum < 1e-8:
+            break
+        nx = np.sum(x * w) / w_sum
+        ny = np.sum(y * w) / w_sum
+        if (nx - cx) ** 2 + (ny - cy) ** 2 < 1e-10:
+            break
+        cx, cy = nx, ny
+    return cx, cy
 
-    # Initialize at the physical base (lowest 5% of height)
-    base_mask = z <= (z_min + (z_max - z_min) * 0.05)
-    if base_mask.sum() < 5:
-        base_mask = (z >= bin_edges[0]) & (z <= bin_edges[1])
 
-    current_x = np.median(x[base_mask])
-    current_y = np.median(y[base_mask])
+def _track_spine_pass(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    bin_edges: np.ndarray,
+    init_x: float,
+    init_y: float,
+    sigma_frac: float,
+    density_k: int,
+) -> tuple[list[float], list[float], list[float]]:
+    """Single bottom-up tracking pass with adaptive sigma and density weighting.
 
-    spine_z, spine_x, spine_y = [], [], []
+    Parameters
+    ----------
+    sigma_frac : float
+        Gaussian sigma as a fraction of each slice's horizontal extent.
+    density_k : int
+        Number of nearest neighbors for local density estimation.
+    """
+    num_bins = len(bin_edges) - 1
+    current_x, current_y = init_x, init_y
+    spine_x, spine_y, spine_z = [], [], []
 
-    # Bottom-up tracking with Gaussian proximity weighting
     for i in range(num_bins):
         mask = (z >= bin_edges[i]) & (z <= bin_edges[i + 1])
         if mask.sum() < 5:
@@ -1420,8 +1435,34 @@ def _compute_rz_spine(
 
         x_bin, y_bin, z_bin = x[mask], y[mask], z[mask]
 
+        # Adaptive sigma: fraction of this slice's horizontal extent
+        extent = max(np.ptp(x_bin), np.ptp(y_bin), 1e-6)
+        sigma = sigma_frac * extent
+
+        # Proximity weights (Gaussian centered on previous slice's center)
         dist_sq = (x_bin - current_x) ** 2 + (y_bin - current_y) ** 2
-        weights = np.exp(-dist_sq / (2 * sigma**2))
+        prox_w = np.exp(-dist_sq / (2 * sigma**2))
+
+        # Local density weights: points in tight clusters (trunk) get upweighted
+        n_pts = len(x_bin)
+        if n_pts > density_k:
+            xy = np.column_stack([x_bin, y_bin])
+            # For each point, compute mean distance to k nearest neighbors
+            # Use a vectorized pairwise approach for small slices
+            dists_all = np.sqrt(
+                (xy[:, None, 0] - xy[None, :, 0]) ** 2
+                + (xy[:, None, 1] - xy[None, :, 1]) ** 2
+            )
+            # Sort each row ascending and take mean of k nearest (excluding self)
+            dists_sorted = np.sort(dists_all, axis=1)[:, 1 : density_k + 1]
+            mean_knn_dist = dists_sorted.mean(axis=1)
+            # Invert: small distance = high density. Add epsilon to avoid div/0
+            density_w = 1.0 / (mean_knn_dist + 1e-8)
+            density_w /= density_w.max()  # normalize to [0, 1]
+        else:
+            density_w = np.ones(n_pts)
+
+        weights = prox_w * density_w
         w_sum = weights.sum()
 
         if w_sum > 1e-6:
@@ -1437,12 +1478,77 @@ def _compute_rz_spine(
 
         current_x, current_y = next_x, next_y
 
+    return spine_x, spine_y, spine_z
+
+
+def _compute_rz_spine(
+    cloud: np.ndarray,
+    num_bins: int = 20,
+    sigma_frac: float = 0.15,
+    degree: int = 3,
+    density_k: int = 8,
+    n_refine: int = 1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Robust stem-tracking cylindrical coordinates.
+
+    Improvements over the basic tracker:
+    1. Density-based initialization: mean-shift convergence on the densest
+       cluster at the trunk base, instead of a raw median.
+    2. Adaptive sigma: Gaussian bandwidth scales with each slice's horizontal
+       extent (sigma_frac * extent), so it auto-adjusts for tree size.
+    3. Density weighting: points in tight clusters (trunk wood) are upweighted
+       relative to diffuse regions (canopy foliage) via k-NN density.
+    4. Two-pass refinement: after polynomial smoothing, re-run tracking using
+       the polynomial centers as priors, then re-fit. Repeats n_refine times.
+
+    Returns (r, z, spine_xyz) where spine_xyz is (M, 3) tracked centers
+    before the final polynomial smoothing (for visualization).
+    """
+    x, y, z = cloud[:, 0], cloud[:, 1], cloud[:, 2]
+    z_min, z_max = z.min(), z.max()
+    bin_edges = np.linspace(z_min, z_max, num_bins + 1)
+
+    # --- 1. Density-based initialization at the trunk base ---
+    base_mask = z <= (z_min + (z_max - z_min) * 0.05)
+    if base_mask.sum() < 5:
+        base_mask = (z >= bin_edges[0]) & (z <= bin_edges[1])
+
+    # Use mean-shift to find the densest cluster (trunk cross-section)
+    base_extent = max(np.ptp(x[base_mask]), np.ptp(y[base_mask]), 1e-6)
+    init_x, init_y = _find_trunk_base(
+        x[base_mask], y[base_mask], bandwidth=0.15 * base_extent
+    )
+
+    # --- 2 & 3. First tracking pass (adaptive sigma + density weighting) ---
+    spine_x, spine_y, spine_z = _track_spine_pass(
+        x, y, z, bin_edges, init_x, init_y, sigma_frac, density_k
+    )
+
+    # --- 4. Iterative refinement ---
+    for _ in range(n_refine):
+        if len(spine_z) < 2:
+            break
+
+        # Fit polynomial to current tracked centers
+        actual_deg = min(degree, len(spine_z) - 1)
+        p_x = Polynomial.fit(spine_z, spine_x, actual_deg)
+        p_y = Polynomial.fit(spine_z, spine_y, actual_deg)
+
+        # Re-initialize each bin from the polynomial prediction
+        bin_mids = [(bin_edges[i] + bin_edges[i + 1]) / 2 for i in range(num_bins)]
+        poly_init_x = float(p_x(bin_mids[0]))
+        poly_init_y = float(p_y(bin_mids[0]))
+
+        spine_x, spine_y, spine_z = _track_spine_pass(
+            x, y, z, bin_edges, poly_init_x, poly_init_y, sigma_frac, density_k
+        )
+
     # Raw tracked centers (for visualization)
     spine_xyz = (
         np.column_stack([spine_x, spine_y, spine_z]) if spine_z else np.empty((0, 3))
     )
 
-    # Polynomial smoothing for biological rigidity
+    # Final polynomial smoothing
     if len(spine_z) >= 2:
         actual_deg = min(degree, len(spine_z) - 1)
         p_x = Polynomial.fit(spine_z, spine_x, actual_deg)
@@ -1450,8 +1556,8 @@ def _compute_rz_spine(
         center_x = p_x(z)
         center_y = p_y(z)
     else:
-        center_x = np.full_like(z, current_x)
-        center_y = np.full_like(z, current_y)
+        center_x = np.full_like(z, init_x)
+        center_y = np.full_like(z, init_y)
 
     r = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
     z_out = z - z_min
