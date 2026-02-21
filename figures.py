@@ -1384,27 +1384,89 @@ def create_figure_crown_mae(
 
 
 def _find_trunk_base(
-    x: np.ndarray, y: np.ndarray, bandwidth: float
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    bandwidth: float,
+    n_sub: int = 6,
 ) -> tuple[float, float]:
-    """Find the densest horizontal cluster at the trunk base.
+    """Find the trunk base using vertical persistence in the lower portion.
 
-    Uses iterative mean-shift-style convergence: start at the median,
-    then repeatedly compute a density-weighted mean until it converges
-    on the densest cluster (the trunk cross-section).
+    Instead of finding the densest cluster in a thin base slab (which can
+    be hijacked by a low branch), this uses the bottom ~30% of the tree
+    split into n_sub sub-slices. For each candidate XY position, it counts
+    how many sub-slices have nearby points. The trunk wins because it
+    persists across all sub-slices; a branch only appears in one or two.
+
+    Algorithm:
+    1. Split the lower 30% of the tree into n_sub horizontal sub-slices.
+    2. In each sub-slice, run mean-shift to find the densest cluster center.
+    3. Build candidate set from all sub-slice centers.
+    4. Score each candidate by how many sub-slices have points within
+       `bandwidth` of it — this is the vertical persistence score.
+    5. Among the highest-scoring candidates, pick the one closest to the
+       overall median (tiebreaker favoring the geometric center).
     """
-    cx, cy = np.median(x), np.median(y)
-    for _ in range(20):
-        dist_sq = (x - cx) ** 2 + (y - cy) ** 2
-        w = np.exp(-dist_sq / (2 * bandwidth**2))
-        w_sum = w.sum()
-        if w_sum < 1e-8:
-            break
-        nx = np.sum(x * w) / w_sum
-        ny = np.sum(y * w) / w_sum
-        if (nx - cx) ** 2 + (ny - cy) ** 2 < 1e-10:
-            break
-        cx, cy = nx, ny
-    return cx, cy
+    z_min, z_max = z.min(), z.max()
+    base_top = z_min + (z_max - z_min) * 0.3
+    base_mask = z <= base_top
+    if base_mask.sum() < 5:
+        return np.median(x), np.median(y)
+
+    xb, yb, zb = x[base_mask], y[base_mask], z[base_mask]
+    sub_edges = np.linspace(zb.min(), zb.max(), n_sub + 1)
+
+    # Collect mean-shift centers from each sub-slice
+    candidates = []
+    for s in range(n_sub):
+        smask = (zb >= sub_edges[s]) & (zb <= sub_edges[s + 1])
+        if smask.sum() < 3:
+            continue
+        xs, ys = xb[smask], yb[smask]
+        # Mean-shift convergence within sub-slice
+        cx, cy = np.median(xs), np.median(ys)
+        for _ in range(20):
+            dist_sq = (xs - cx) ** 2 + (ys - cy) ** 2
+            w = np.exp(-dist_sq / (2 * bandwidth**2))
+            w_sum = w.sum()
+            if w_sum < 1e-8:
+                break
+            nx = np.sum(xs * w) / w_sum
+            ny = np.sum(ys * w) / w_sum
+            if (nx - cx) ** 2 + (ny - cy) ** 2 < 1e-10:
+                break
+            cx, cy = nx, ny
+        candidates.append((cx, cy))
+
+    if not candidates:
+        return np.median(x), np.median(y)
+
+    # Score each candidate by vertical persistence:
+    # how many sub-slices have points within `bandwidth` of this (x,y)?
+    best_score = -1
+    med_x, med_y = np.median(xb), np.median(yb)
+    best_cx, best_cy = candidates[0]
+
+    for cx, cy in candidates:
+        score = 0
+        for s in range(n_sub):
+            smask = (zb >= sub_edges[s]) & (zb <= sub_edges[s + 1])
+            if smask.sum() < 1:
+                continue
+            dists = np.sqrt((xb[smask] - cx) ** 2 + (yb[smask] - cy) ** 2)
+            if np.any(dists <= bandwidth):
+                score += 1
+
+        # Tiebreak: prefer candidate closest to median (geometric center)
+        tie = -np.sqrt((cx - med_x) ** 2 + (cy - med_y) ** 2)
+
+        if score > best_score or (score == best_score and tie > -np.sqrt(
+            (best_cx - med_x) ** 2 + (best_cy - med_y) ** 2
+        )):
+            best_score = score
+            best_cx, best_cy = cx, cy
+
+    return best_cx, best_cy
 
 
 def _track_spine_pass(
@@ -1541,15 +1603,18 @@ def _compute_rz_spine(
     tree_height = z_max - z_min
     bin_edges = np.linspace(z_min, z_max, num_bins + 1)
 
-    # --- 1. Density-based initialization at the trunk base ---
-    base_mask = z <= (z_min + tree_height * 0.05)
+    # --- 1. Density-based initialization via vertical persistence ---
+    # Use the bottom 30% split into sub-slices to find the most
+    # vertically persistent XY position (trunk, not a low branch).
+    base_top = z_min + tree_height * 0.3
+    base_mask = z <= base_top
     if base_mask.sum() < 5:
         base_mask = (z >= bin_edges[0]) & (z <= bin_edges[1])
 
-    # Use mean-shift to find the densest cluster (trunk cross-section)
     base_extent = max(np.ptp(x[base_mask]), np.ptp(y[base_mask]), 1e-6)
     init_x, init_y = _find_trunk_base(
-        x[base_mask], y[base_mask], bandwidth=0.15 * base_extent
+        x[base_mask], y[base_mask], z[base_mask],
+        bandwidth=0.15 * base_extent,
     )
 
     # Sigma cap: prevent sigma from exceeding the base extent scale
