@@ -695,82 +695,120 @@ def build_df_per_tree(df_pairs: pd.DataFrame, df_real: pd.DataFrame) -> pd.DataF
 # =============================================================================
 
 
-def _compute_baseline_scores(
-    tree_id: str,
-    neighbor_ids: list[str],
+def _build_baseline(
     df_real: pd.DataFrame,
     real_clouds: dict,
-) -> dict:
-    """Compute pairwise scores between one tree and its neighbors."""
-    if tree_id not in df_real.index:
-        return {}
+    neighbor_map: dict[str, list[str]],
+    num_workers: int = 40,
+    label: str = "Baseline",
+) -> pd.DataFrame:
+    """Shared baseline builder: compute JSD/deltas inline, parallelize CD.
 
-    anchor = df_real.loc[tree_id]
-    anchor_kde = np.array(anchor["vert_kde"])
-    anchor_hist = np.array(anchor["hist_2d"])
+    neighbor_map: {tree_id: [neighbor_id, ...]} — pre-computed neighbor assignments.
+    """
+    real_index = set(df_real.index)
+    cloud_keys = set(real_clouds.keys())
 
-    scores = {m: [] for m in PAIR_METRICS}
+    # Collect per-pair JSD/deltas (cheap) and CD tasks (expensive)
+    # Structure: pair_data[tree_id] = list of per-neighbor dicts (without CD)
+    pair_data: dict[str, list[dict]] = {}
+    cd_tasks = []  # (tree_id, neighbor_idx, real_cloud, neighbor_cloud)
 
-    for nid in neighbor_ids:
-        if nid not in df_real.index or nid not in real_clouds:
+    for tid, neighbors in neighbor_map.items():
+        if tid not in real_index:
             continue
-        if tree_id not in real_clouds:
-            continue
+        anchor = df_real.loc[tid]
+        anchor_kde = np.array(anchor["vert_kde"])
+        anchor_hist = np.array(anchor["hist_2d"])
 
-        neighbor = df_real.loc[nid]
+        pairs = []
+        for nid in neighbors:
+            if nid not in real_index:
+                continue
 
-        cd = chamfer_distance(real_clouds[tree_id], real_clouds[nid])
-        vkj = jsd(anchor_kde, np.array(neighbor["vert_kde"]))
-        h2j = jsd(anchor_hist, np.array(neighbor["hist_2d"]))
-        dcv = abs(anchor["crown_volume"] - neighbor["crown_volume"])
-        dmcr = abs(anchor["max_crown_r"] - neighbor["max_crown_r"])
-        dmcrs = abs(anchor["max_crown_r_rel_s"] - neighbor["max_crown_r_rel_s"])
-        dhcb = abs(anchor["hcb"] - neighbor["hcb"])
+            neighbor = df_real.loc[nid]
+            pair = {
+                "vert_kde_jsd": jsd(anchor_kde, np.array(neighbor["vert_kde"])),
+                "hist_2d_jsd": jsd(anchor_hist, np.array(neighbor["hist_2d"])),
+                "delta_crown_vol": abs(anchor["crown_volume"] - neighbor["crown_volume"]),
+                "delta_max_crown_r": abs(anchor["max_crown_r"] - neighbor["max_crown_r"]),
+                "delta_max_crown_r_rel_s": abs(anchor["max_crown_r_rel_s"] - neighbor["max_crown_r_rel_s"]),
+                "delta_hcb": abs(anchor["hcb"] - neighbor["hcb"]),
+                "reconstruction_cd": float("nan"),
+            }
+            pairs.append(pair)
 
-        scores["reconstruction_cd"].append(cd)
-        scores["vert_kde_jsd"].append(vkj)
-        scores["hist_2d_jsd"].append(h2j)
-        scores["delta_crown_vol"].append(dcv)
-        scores["delta_max_crown_r"].append(dmcr)
-        scores["delta_max_crown_r_rel_s"].append(dmcrs)
-        scores["delta_hcb"].append(dhcb)
+            if tid in cloud_keys and nid in cloud_keys:
+                cd_tasks.append((len(cd_tasks), tid, len(pairs) - 1,
+                                 real_clouds[tid], real_clouds[nid]))
 
-    if not scores["reconstruction_cd"]:
-        return {}
+        if pairs:
+            pair_data[tid] = pairs
 
-    result = {"tree_id": tree_id}
-    for m in PAIR_METRICS:
-        vals = scores[m]
-        result[f"{m}_mean"] = float(np.nanmean(vals))
-        result[f"{m}_std"] = float(np.nanstd(vals))
+    # Parallel CD computation
+    if cd_tasks:
+        print(f"  Computing {len(cd_tasks)} baseline CDs with {num_workers} workers...")
+        t0 = time.time()
 
-    return result
+        # Repack for _cd_worker: (index, cloud_a, cloud_b)
+        cd_worker_tasks = [(t[0], t[3], t[4]) for t in cd_tasks]
+
+        if num_workers <= 1:
+            cd_results = [_cd_worker(t) for t in tqdm(cd_worker_tasks, desc=f"{label} CD")]
+        else:
+            with mp.Pool(num_workers) as pool:
+                cd_results = list(tqdm(
+                    pool.imap_unordered(_cd_worker, cd_worker_tasks, chunksize=64),
+                    total=len(cd_worker_tasks), desc=f"{label} CD",
+                ))
+
+        # Map results back: cd_tasks[task_idx] has (_, tree_id, pair_idx, ...)
+        cd_lookup = {task_idx: cd for task_idx, cd in cd_results}
+        for task_idx, (_, tid, pair_idx, _, _) in enumerate(cd_tasks):
+            if task_idx in cd_lookup:
+                pair_data[tid][pair_idx]["reconstruction_cd"] = cd_lookup[task_idx]
+
+        print(f"  {label} CD computation: {time.time() - t0:.1f}s")
+
+    # Aggregate per-tree: mean/std across neighbors
+    rows = []
+    for tid, pairs in pair_data.items():
+        result = {"tree_id": tid}
+        for m in PAIR_METRICS:
+            vals = [p[m] for p in pairs]
+            result[f"{m}_mean"] = float(np.nanmean(vals))
+            result[f"{m}_std"] = float(np.nanstd(vals))
+        rows.append(result)
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.set_index("tree_id")
+    return df
 
 
 def build_intra_baseline(
     df_real: pd.DataFrame,
     real_clouds: dict,
     n_neighbors: int = 32,
+    num_workers: int = 40,
     seed: int = 42,
 ) -> pd.DataFrame:
     """Intra-class baseline: each real tree vs N trees from same (genus, scan_type, height_bin)."""
     rng = np.random.default_rng(seed)
-    rows = []
 
-    # Group by stratum
     strat_cols = ["genus", "scan_type", "height_bin"]
     available = [c for c in strat_cols if c in df_real.columns]
     if not available:
         print("  Warning: no stratification columns available for intra baseline")
         return pd.DataFrame()
 
+    # Build neighbor map
+    neighbor_map = {}
     grouped = df_real.groupby(available)
-
-    for _, group in tqdm(grouped, desc="Intra baseline"):
+    for _, group in grouped:
         tree_ids = list(group.index)
         if len(tree_ids) < 2:
             continue
-
         for tid in tree_ids:
             others = [t for t in tree_ids if t != tid]
             if not others:
@@ -779,18 +817,17 @@ def build_intra_baseline(
                 neighbors = rng.choice(others, size=n_neighbors, replace=False).tolist()
             else:
                 neighbors = rng.choice(others, size=n_neighbors, replace=True).tolist()
+            neighbor_map[tid] = neighbors
 
-            result = _compute_baseline_scores(tid, neighbors, df_real, real_clouds)
-            if result:
-                # Add stratification
-                row_data = df_real.loc[tid]
-                for c in available:
-                    result[c] = row_data[c]
-                rows.append(result)
+    print(f"  Intra baseline: {len(neighbor_map)} trees, {sum(len(v) for v in neighbor_map.values())} pairs")
+    df_intra = _build_baseline(df_real, real_clouds, neighbor_map,
+                               num_workers=num_workers, label="Intra")
 
-    df_intra = pd.DataFrame(rows)
+    # Add stratification columns
     if not df_intra.empty:
-        df_intra = df_intra.set_index("tree_id")
+        for c in available:
+            df_intra[c] = df_real.loc[df_intra.index, c]
+
     print(f"  Built intra baseline: {len(df_intra)} trees")
     return df_intra
 
@@ -799,32 +836,31 @@ def build_inter_baseline(
     df_real: pd.DataFrame,
     real_clouds: dict,
     n_neighbors: int = 32,
+    num_workers: int = 40,
     seed: int = 42,
 ) -> pd.DataFrame:
     """Inter-class baseline: each real tree vs N trees from different genus."""
     rng = np.random.default_rng(seed)
-    rows = []
 
+    # Pre-build genus lookup to avoid repeated df_real.loc[].get() calls
+    genus_map = df_real["genus"].to_dict() if "genus" in df_real.columns else {}
     all_ids = list(df_real.index)
 
-    for tid in tqdm(all_ids, desc="Inter baseline"):
-        tree_genus = df_real.loc[tid].get("genus", "unknown")
-        others = [t for t in all_ids if t != tid and df_real.loc[t].get("genus", "unknown") != tree_genus]
+    neighbor_map = {}
+    for tid in all_ids:
+        tree_genus = genus_map.get(tid, "unknown")
+        others = [t for t in all_ids if t != tid and genus_map.get(t, "unknown") != tree_genus]
         if not others:
             continue
-
         if len(others) >= n_neighbors:
             neighbors = rng.choice(others, size=n_neighbors, replace=False).tolist()
         else:
             neighbors = rng.choice(others, size=n_neighbors, replace=True).tolist()
+        neighbor_map[tid] = neighbors
 
-        result = _compute_baseline_scores(tid, neighbors, df_real, real_clouds)
-        if result:
-            rows.append(result)
-
-    df_inter = pd.DataFrame(rows)
-    if not df_inter.empty:
-        df_inter = df_inter.set_index("tree_id")
+    print(f"  Inter baseline: {len(neighbor_map)} trees, {sum(len(v) for v in neighbor_map.values())} pairs")
+    df_inter = _build_baseline(df_real, real_clouds, neighbor_map,
+                               num_workers=num_workers, label="Inter")
     print(f"  Built inter baseline: {len(df_inter)} trees")
     return df_inter
 
@@ -1438,8 +1474,10 @@ def main():
     print("BASELINES")
     print("=" * 60)
 
-    df_intra = build_intra_baseline(df_real, real_clouds, seed=args.seed + 1000)
-    df_inter = build_inter_baseline(df_real, real_clouds, seed=args.seed + 2000)
+    df_intra = build_intra_baseline(df_real, real_clouds,
+                                    num_workers=args.num_workers, seed=args.seed + 1000)
+    df_inter = build_inter_baseline(df_real, real_clouds,
+                                    num_workers=args.num_workers, seed=args.seed + 2000)
 
     # =========================================================================
     # 7. Population metrics
