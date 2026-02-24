@@ -20,7 +20,7 @@ from scipy.spatial.distance import cdist
 from scipy.stats import gaussian_kde, wasserstein_distance, ks_2samp
 from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
-import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
 
 from stem_tracker import compute_rs_spine
 
@@ -433,9 +433,9 @@ def build_df_real(
     if num_workers <= 1:
         results = [_real_tree_worker(t) for t in tqdm(tasks, desc="Real trees")]
     else:
-        with mp.Pool(num_workers) as pool:
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
             results = list(tqdm(
-                pool.imap_unordered(_real_tree_worker, tasks),
+                executor.map(_real_tree_worker, tasks, chunksize=4),
                 total=len(tasks), desc="Real trees",
             ))
 
@@ -541,9 +541,9 @@ def build_df_gen(
     if num_workers <= 1:
         results = [_gen_tree_worker(t) for t in tqdm(tasks, desc="Gen trees")]
     else:
-        with mp.Pool(num_workers) as pool:
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
             results = list(tqdm(
-                pool.imap_unordered(_gen_tree_worker, tasks),
+                executor.map(_gen_tree_worker, tasks, chunksize=16),
                 total=len(tasks), desc="Gen trees",
             ))
 
@@ -648,9 +648,9 @@ def build_df_pairs(
         if num_workers <= 1:
             cd_results = [_cd_worker(t) for t in tqdm(cd_tasks, desc="CD")]
         else:
-            with mp.Pool(num_workers) as pool:
+            with ProcessPoolExecutor(max_workers=num_workers) as executor:
                 cd_results = list(tqdm(
-                    pool.imap_unordered(_cd_worker, cd_tasks, chunksize=64),
+                    executor.map(_cd_worker, cd_tasks, chunksize=64),
                     total=len(cd_tasks), desc="CD",
                 ))
         cd_vals = df_pairs["reconstruction_cd"].values.copy()
@@ -756,9 +756,9 @@ def _build_baseline(
         if num_workers <= 1:
             cd_results = [_cd_worker(t) for t in tqdm(cd_worker_tasks, desc=f"{label} CD")]
         else:
-            with mp.Pool(num_workers) as pool:
+            with ProcessPoolExecutor(max_workers=num_workers) as executor:
                 cd_results = list(tqdm(
-                    pool.imap_unordered(_cd_worker, cd_worker_tasks, chunksize=64),
+                    executor.map(_cd_worker, cd_worker_tasks, chunksize=64),
                     total=len(cd_worker_tasks), desc=f"{label} CD",
                 ))
 
