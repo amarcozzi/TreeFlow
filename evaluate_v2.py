@@ -875,13 +875,27 @@ def build_inter_baseline(
 # =============================================================================
 
 
-def compute_cd_matrix(clouds_a: list[np.ndarray], clouds_b: list[np.ndarray]) -> np.ndarray:
+def compute_cd_matrix(
+    clouds_a: list[np.ndarray],
+    clouds_b: list[np.ndarray],
+    num_workers: int = 1,
+) -> np.ndarray:
     """Pairwise CD matrix (len_a × len_b)."""
     n_a, n_b = len(clouds_a), len(clouds_b)
-    mat = np.zeros((n_a, n_b))
+    tasks = []
     for i in range(n_a):
         for j in range(n_b):
-            mat[i, j] = chamfer_distance(clouds_a[i], clouds_b[j])
+            tasks.append((i * n_b + j, clouds_a[i], clouds_b[j]))
+
+    if num_workers <= 1 or len(tasks) < 100:
+        cd_results = [_cd_worker(t) for t in tasks]
+    else:
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            cd_results = list(executor.map(_cd_worker, tasks, chunksize=64))
+
+    mat = np.zeros((n_a, n_b))
+    for idx, cd in cd_results:
+        mat[idx // n_b, idx % n_b] = cd
     return mat
 
 
@@ -902,6 +916,7 @@ def compute_population_metrics(
     real_clouds: dict,
     gen_clouds: dict,
     max_per_stratum: int = 200,
+    num_workers: int = 40,
     seed: int = 42,
 ) -> dict:
     """COV, MMD, Voxel JSD — globally and per stratum."""
@@ -917,20 +932,25 @@ def compute_population_metrics(
         real_ids = [i for i in real_ids if i in real_clouds]
         gen_ids = [i for i in gen_ids if i in gen_clouds]
         if len(real_ids) < 2 or len(gen_ids) < 2:
+            print(f"    {label}: skipped (n_real={len(real_ids)}, n_gen={len(gen_ids)})")
             return None
 
         real_ids = _subsample_ids(real_ids, max_per_stratum)
         gen_ids = _subsample_ids(gen_ids, max_per_stratum)
 
+        n_cds = len(real_ids) * len(gen_ids)
+        print(f"    {label}: {len(real_ids)} real × {len(gen_ids)} gen = {n_cds} CDs...")
+
         rc = [real_clouds[i] for i in real_ids]
         gc = [gen_clouds[i] for i in gen_ids]
 
-        mat = compute_cd_matrix(rc, gc)
+        mat = compute_cd_matrix(rc, gc, num_workers=num_workers)
         cov = coverage(mat)
         mmd_val = mmd(mat)
 
         voxel_jsd = compute_jsd_3d(rc, gc)
 
+        print(f"    {label}: COV={cov:.4f}, MMD={mmd_val:.6f}, JSD={voxel_jsd:.6f}")
         return {"coverage": cov, "mmd": mmd_val, "voxel_jsd": voxel_jsd,
                 "n_real": len(real_ids), "n_gen": len(gen_ids)}
 
@@ -938,50 +958,50 @@ def compute_population_metrics(
     all_real_ids = list(df_real.index)
     # For gen, pick one per real tree to avoid duplicates dominating
     gen_by_real = df_gen.groupby("real_id").nth(0).index.tolist()
-    print(f"  Population metrics: {len(all_real_ids)} real, {len(gen_by_real)} gen (1 per tree)")
+    print(f"  {len(all_real_ids)} real, {len(gen_by_real)} gen (1 per tree)")
 
     results["global"] = _compute_for_ids(all_real_ids, gen_by_real, "global")
+
+    # Pre-build gen lookups to avoid repeated per-gid DataFrame access
+    gen_genus = df_gen.loc[df_gen.index.isin(gen_by_real), "genus"].to_dict() if "genus" in df_gen.columns else {}
+    gen_real_id = df_gen.loc[df_gen.index.isin(gen_by_real), "real_id"].to_dict()
 
     # By genus
     results["by_genus"] = {}
     if "genus" in df_real.columns:
-        for genus, grp in df_real.groupby("genus"):
+        genus_groups = list(df_real.groupby("genus"))
+        for genus, grp in tqdm(genus_groups, desc="Pop genus"):
             real_ids = list(grp.index)
-            gen_ids = [
-                gid for gid in gen_by_real
-                if gid in df_gen.index and df_gen.loc[gid].get("genus") == genus
-            ]
-            val = _compute_for_ids(real_ids, gen_ids)
+            gen_ids = [gid for gid in gen_by_real if gen_genus.get(gid) == genus]
+            val = _compute_for_ids(real_ids, gen_ids, f"genus={genus}")
             if val is not None:
                 results["by_genus"][genus] = val
+
+    # Pre-build real lookups for height_bin and scan_type
+    real_height_bin = df_real["height_bin"].to_dict() if "height_bin" in df_real.columns else {}
+    real_scan_type = df_real["scan_type"].to_dict() if "scan_type" in df_real.columns else {}
 
     # By height_bin
     results["by_height_bin"] = {}
     if "height_bin" in df_real.columns:
-        for hb, grp in df_real.groupby("height_bin"):
+        hb_groups = list(df_real.groupby("height_bin"))
+        for hb, grp in tqdm(hb_groups, desc="Pop height"):
             real_ids = list(grp.index)
-            gen_ids = []
-            for gid in gen_by_real:
-                if gid in df_gen.index:
-                    rid = df_gen.loc[gid]["real_id"]
-                    if rid in df_real.index and df_real.loc[rid].get("height_bin") == hb:
-                        gen_ids.append(gid)
-            val = _compute_for_ids(real_ids, gen_ids)
+            gen_ids = [gid for gid in gen_by_real
+                       if real_height_bin.get(gen_real_id.get(gid)) == hb]
+            val = _compute_for_ids(real_ids, gen_ids, f"height={hb}")
             if val is not None:
                 results["by_height_bin"][str(hb)] = val
 
     # By scan_type
     results["by_scan_type"] = {}
     if "scan_type" in df_real.columns:
-        for st, grp in df_real.groupby("scan_type"):
+        st_groups = list(df_real.groupby("scan_type"))
+        for st, grp in tqdm(st_groups, desc="Pop scan"):
             real_ids = list(grp.index)
-            gen_ids = []
-            for gid in gen_by_real:
-                if gid in df_gen.index:
-                    rid = df_gen.loc[gid]["real_id"]
-                    if rid in df_real.index and df_real.loc[rid].get("scan_type") == st:
-                        gen_ids.append(gid)
-            val = _compute_for_ids(real_ids, gen_ids)
+            gen_ids = [gid for gid in gen_by_real
+                       if real_scan_type.get(gen_real_id.get(gid)) == st]
+            val = _compute_for_ids(real_ids, gen_ids, f"scan={st}")
             if val is not None:
                 results["by_scan_type"][str(st)] = val
 
@@ -1497,7 +1517,7 @@ def main():
 
         population_metrics = compute_population_metrics(
             df_real, df_gen, real_clouds, gen_clouds,
-            seed=args.seed,
+            num_workers=args.num_workers, seed=args.seed,
         )
 
         glob = population_metrics.get("global")
