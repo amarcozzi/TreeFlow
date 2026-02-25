@@ -6,7 +6,7 @@ Replaces evaluate.py with:
   - Dataframe-first architecture (df_real, df_gen, df_pairs, df_per_tree)
   - Per-tree anchored baselines (intra-class, inter-class)
   - Population metrics (Coverage, MMD, Voxel JSD)
-  - Statistical tests (Wasserstein, KS, Cohen's d)
+  - Statistical tests (Wasserstein)
 """
 
 import sys
@@ -22,7 +22,7 @@ import pandas as pd
 import zarr
 from pathlib import Path
 from scipy.spatial.distance import cdist
-from scipy.stats import gaussian_kde, wasserstein_distance, ks_2samp
+from scipy.stats import gaussian_kde, wasserstein_distance
 from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
@@ -49,6 +49,18 @@ PAIR_METRICS = [
     "delta_max_crown_r_rel_s",
     "delta_hcb",
 ]
+
+PAIR_METRIC_UNITS = {
+    "reconstruction_cd": "",
+    "vert_kde_jsd": "",
+    "hist_2d_jsd": "",
+    "delta_crown_vol": "m\u00b3",
+    "delta_max_crown_r": "m",
+    "delta_max_crown_r_rel_s": "",
+    "delta_hcb": "m",
+}
+
+EVAL_VERSION = 2
 
 
 # =============================================================================
@@ -83,7 +95,7 @@ def load_point_cloud(
 
 
 def chamfer_distance(p1: np.ndarray, p2: np.ndarray) -> float:
-    """Chamfer Distance between two point clouds (squared L2)."""
+    """Chamfer Distance between two point clouds (squared L2, not L1-CD)."""
     dist_matrix = cdist(p1, p2, metric="sqeuclidean")
     min_p1_to_p2 = dist_matrix.min(axis=1).mean()
     min_p2_to_p1 = dist_matrix.min(axis=0).mean()
@@ -173,6 +185,7 @@ def jsd(p: np.ndarray, q: np.ndarray, eps: float = 1e-10) -> float:
 
 def extract_stem_metrics(
     cloud: np.ndarray,
+    height_m: float = 1.0,
     kde_bins: int = 64,
     hist_r_bins: int = 16,
     hist_s_bins: int = 32,
@@ -222,6 +235,10 @@ def extract_stem_metrics(
         vert_kde = np.ones(kde_bins) / kde_bins
 
     # --- c. 2D (r, s) histogram ---
+    # NOTE: Bin edges are tree-specific (based on each tree's r_max, s_max).
+    # This means hist_2d_jsd compares normalized radial-arc-length profile shapes
+    # rather than absolute spatial distributions. This is intentional: absolute
+    # scale differences are captured by delta_crown_vol and delta_max_crown_r.
     eps = 1e-6
     r_max = r.max() + eps
     s_max = s.max() + eps if s.max() > 0 else eps
@@ -288,13 +305,17 @@ def extract_stem_metrics(
         except Exception:
             hcb_val = float("nan")
 
+    # Convert from normalized space to metric units
+    # Normalization: normalized = (raw - center) / height_m * 2.0
+    # So: metric_distance = normalized_distance * (height_m / 2.0)
+    scale = height_m / 2.0
     return {
-        "vert_kde": vert_kde,
-        "hist_2d": hist_2d_flat,
-        "crown_volume": float(crown_volume),
-        "max_crown_r": float(max_crown_r),
-        "max_crown_r_rel_s": float(max_crown_r_rel_s),
-        "hcb": hcb_val,
+        "vert_kde": vert_kde,                                    # probability — no conversion
+        "hist_2d": hist_2d_flat,                                 # probability — no conversion
+        "crown_volume": float(crown_volume * scale**3),          # normalized³ → m³
+        "max_crown_r": float(max_crown_r * scale),               # normalized → m
+        "max_crown_r_rel_s": float(max_crown_r_rel_s),           # unitless [0,1]
+        "hcb": float(hcb_val * height_m),                        # fraction × height → m
     }
 
 
@@ -375,6 +396,7 @@ def _real_tree_worker(task: dict) -> dict | None:
         canon_cloud = canonicalize(cloud)
         metrics = extract_stem_metrics(
             cloud,
+            height_m=task["height_m"],
             skip_hcb=task.get("skip_hcb", False),
             spine_num_bins=task.get("spine_bins", 20),
         )
@@ -477,8 +499,13 @@ def _gen_tree_worker(task: dict) -> dict | None:
         rng = np.random.default_rng(task.get("seed", 42))
         cloud = load_point_cloud(task["zarr_path"], max_points=task.get("max_points"), rng=rng)
         canon_cloud = canonicalize(cloud)
+        height_m = task.get("height_m")
+        if height_m is None or height_m <= 0:
+            return {"gen_id": task.get("gen_id", "?"), "_error": f"invalid height_m={height_m}"}
+
         metrics = extract_stem_metrics(
             cloud,
+            height_m=height_m,
             skip_hcb=task.get("skip_hcb", False),
             spine_num_bins=task.get("spine_bins", 20),
         )
@@ -531,7 +558,7 @@ def build_df_gen(
             "species": row.get("species", "unknown"),
             "genus": row.get("genus", "unknown"),
             "scan_type": row.get("scan_type", "unknown"),
-            "height_m": float(row.get("height_m", 0.0)),
+            "height_m": float(row["height_m"]) if pd.notna(row.get("height_m")) and float(row.get("height_m", 0)) > 0 else None,
             "zarr_path": str(zarr_dir / sample_file),
             "max_points": max_points,
             "seed": seed,
@@ -797,10 +824,10 @@ def build_intra_baseline(
     num_workers: int = 40,
     seed: int = 42,
 ) -> pd.DataFrame:
-    """Intra-class baseline: each real tree vs N trees from same (genus, scan_type, height_bin)."""
+    """Intra-class baseline: each real tree vs N trees from same (species, height_bin)."""
     rng = np.random.default_rng(seed)
 
-    strat_cols = ["genus", "scan_type", "height_bin"]
+    strat_cols = ["species", "height_bin"]
     available = [c for c in strat_cols if c in df_real.columns]
     if not available:
         print("  Warning: no stratification columns available for intra baseline")
@@ -843,17 +870,16 @@ def build_inter_baseline(
     num_workers: int = 40,
     seed: int = 42,
 ) -> pd.DataFrame:
-    """Inter-class baseline: each real tree vs N trees from different genus."""
+    """Inter-class baseline: each real tree vs N trees from different species."""
     rng = np.random.default_rng(seed)
 
-    # Pre-build genus lookup to avoid repeated df_real.loc[].get() calls
-    genus_map = df_real["genus"].to_dict() if "genus" in df_real.columns else {}
+    species_map = df_real["species"].to_dict() if "species" in df_real.columns else {}
     all_ids = list(df_real.index)
 
     neighbor_map = {}
     for tid in all_ids:
-        tree_genus = genus_map.get(tid, "unknown")
-        others = [t for t in all_ids if t != tid and genus_map.get(t, "unknown") != tree_genus]
+        tree_species = species_map.get(tid, "unknown")
+        others = [t for t in all_ids if t != tid and species_map.get(t, "unknown") != tree_species]
         if not others:
             continue
         if len(others) >= n_neighbors:
@@ -909,100 +935,194 @@ def mmd(dist_matrix: np.ndarray) -> float:
     return float(dist_matrix.min(axis=1).mean())
 
 
+def one_nn_accuracy(real_real: np.ndarray, gen_gen: np.ndarray, real_gen: np.ndarray) -> float:
+    """1-Nearest Neighbor classification accuracy from three distance sub-matrices.
+
+    Pool real and gen points. For each point, find its NN among all OTHER points.
+    If the NN has the same label (real/gen), it's a correct classification.
+    50% = distributions are indistinguishable. 100% = completely separable.
+    """
+    n_r, n_g = real_gen.shape
+    correct = 0
+    total = n_r + n_g
+
+    for i in range(n_r):
+        rr = real_real[i].copy()
+        rr[i] = np.inf  # exclude self
+        nn_real_dist = rr.min()
+        nn_gen_dist = real_gen[i].min()
+        if nn_real_dist <= nn_gen_dist:
+            correct += 1
+
+    for j in range(n_g):
+        gg = gen_gen[j].copy()
+        gg[j] = np.inf
+        nn_gen_dist = gg.min()
+        nn_real_dist = real_gen[:, j].min()
+        if nn_gen_dist <= nn_real_dist:
+            correct += 1
+
+    return correct / total
+
+
 def compute_population_metrics(
     df_real: pd.DataFrame,
     df_gen: pd.DataFrame,
     real_clouds: dict,
     gen_clouds: dict,
     max_per_stratum: int = 200,
+    max_per_nna: int = 50,
+    min_per_stratum: int = 10,
     num_workers: int = 40,
     seed: int = 42,
 ) -> dict:
-    """COV, MMD, Voxel JSD — globally and per stratum."""
+    """COV, MMD, 1-NNA, Voxel JSD — computed at atomic (species, height_bin) strata, then aggregated.
+
+    max_per_stratum: max trees per side for COV/MMD (cross matrix only).
+    max_per_nna: max trees per side for 1-NNA (requires rr + gg + cross matrices, ~4× cost).
+    """
     rng = np.random.default_rng(seed)
-    results = {}
+    results = {"by_species_height": {}, "by_species": {}, "by_height_bin": {}, "global": None}
 
     def _subsample_ids(ids, max_n):
         if len(ids) <= max_n:
             return ids
         return rng.choice(ids, size=max_n, replace=False).tolist()
 
-    def _compute_for_ids(real_ids, gen_ids, label=""):
-        real_ids = [i for i in real_ids if i in real_clouds]
-        gen_ids = [i for i in gen_ids if i in gen_clouds]
-        if len(real_ids) < 2 or len(gen_ids) < 2:
-            print(f"    {label}: skipped (n_real={len(real_ids)}, n_gen={len(gen_ids)})")
-            return None
+    # For gen, pick one per real tree to avoid duplicates dominating
+    gen_by_real = df_gen.groupby("real_id").nth(0)
+    gen_real_id_map = gen_by_real["real_id"].to_dict() if "real_id" in gen_by_real.columns else {}
+    if not gen_real_id_map:
+        raise ValueError("gen_by_real has no 'real_id' column — cannot map gen trees to real trees")
+    gen_by_real_ids = set(gen_by_real.index)
+
+    # Build lookup: real_id → gen_id (first gen per real tree)
+    real_to_gen = {}
+    for gid in gen_by_real_ids:
+        rid = gen_real_id_map.get(gid)
+        if rid is not None:
+            real_to_gen[rid] = gid
+
+    # Step 1: Compute atomic (species, height_bin) strata
+    if "species" not in df_real.columns or "height_bin" not in df_real.columns:
+        print("  Warning: missing species or height_bin columns for population metrics")
+        return results
+
+    atomic_results = {}
+    groups = list(df_real.groupby(["species", "height_bin"]))
+    print(f"  Computing population metrics for {len(groups)} (species, height_bin) strata...")
+
+    for (species, hb), grp in tqdm(groups, desc="Pop strata"):
+        real_ids = [i for i in grp.index if i in real_clouds]
+        gen_ids = [real_to_gen[i] for i in real_ids if i in real_to_gen and real_to_gen[i] in gen_clouds]
+        real_ids = [i for i in real_ids if i in real_to_gen and real_to_gen[i] in gen_clouds]
+
+        if len(real_ids) < min_per_stratum or len(gen_ids) < min_per_stratum:
+            print(f"    ({species}, {hb}): skipped (n_real={len(real_ids)}, n_gen={len(gen_ids)})")
+            continue
 
         real_ids = _subsample_ids(real_ids, max_per_stratum)
-        gen_ids = _subsample_ids(gen_ids, max_per_stratum)
+        gen_ids = [real_to_gen[i] for i in real_ids if real_to_gen[i] in gen_clouds]
+        real_ids = [i for i in real_ids if real_to_gen.get(i) in gen_clouds]
 
-        n_cds = len(real_ids) * len(gen_ids)
-        print(f"    {label}: {len(real_ids)} real × {len(gen_ids)} gen = {n_cds} CDs...")
+        if len(real_ids) < min_per_stratum or len(gen_ids) < min_per_stratum:
+            continue
+
+        label = f"({species}, {hb})"
+        n_r, n_g = len(real_ids), len(gen_ids)
+        print(f"    {label}: {n_r} real × {n_g} gen")
 
         rc = [real_clouds[i] for i in real_ids]
         gc = [gen_clouds[i] for i in gen_ids]
 
-        mat = compute_cd_matrix(rc, gc, num_workers=num_workers)
-        cov = coverage(mat)
-        mmd_val = mmd(mat)
+        # Cross matrix (real × gen) — used for COV, MMD
+        cross_mat = compute_cd_matrix(rc, gc, num_workers=num_workers)
+        cov = coverage(cross_mat)
+        mmd_val = mmd(cross_mat)
+
+        # 1-NNA on subsampled sets (rr + gg + cross matrices are expensive)
+        nna_n_r = min(n_r, max_per_nna)
+        nna_n_g = min(n_g, max_per_nna)
+        if nna_n_r < n_r or nna_n_g < n_g:
+            nna_r_idx = sorted(rng.choice(n_r, size=nna_n_r, replace=False).tolist())
+            nna_g_idx = sorted(rng.choice(n_g, size=nna_n_g, replace=False).tolist())
+            nna_rc = [rc[i] for i in nna_r_idx]
+            nna_gc = [gc[i] for i in nna_g_idx]
+            nna_cross = compute_cd_matrix(nna_rc, nna_gc, num_workers=num_workers)
+        else:
+            nna_rc, nna_gc, nna_cross = rc, gc, cross_mat
+        rr_mat = compute_cd_matrix(nna_rc, nna_rc, num_workers=num_workers)
+        gg_mat = compute_cd_matrix(nna_gc, nna_gc, num_workers=num_workers)
+        nna = one_nn_accuracy(rr_mat, gg_mat, nna_cross)
 
         voxel_jsd = compute_jsd_3d(rc, gc)
 
-        print(f"    {label}: COV={cov:.4f}, MMD={mmd_val:.6f}, JSD={voxel_jsd:.6f}")
-        return {"coverage": cov, "mmd": mmd_val, "voxel_jsd": voxel_jsd,
-                "n_real": len(real_ids), "n_gen": len(gen_ids)}
+        print(f"    {label}: COV={cov:.4f}, MMD={mmd_val:.6f}, 1-NNA={nna:.4f}, JSD={voxel_jsd:.6f}")
 
-    # Global
-    all_real_ids = list(df_real.index)
-    # For gen, pick one per real tree to avoid duplicates dominating
-    gen_by_real = df_gen.groupby("real_id").nth(0).index.tolist()
-    print(f"  {len(all_real_ids)} real, {len(gen_by_real)} gen (1 per tree)")
+        key = f"{species}|{hb}"
+        atomic_results[key] = {
+            "species": species, "height_bin": hb,
+            "coverage": cov, "mmd": mmd_val, "one_nna": nna, "voxel_jsd": voxel_jsd,
+            "n_real": n_r, "n_gen": n_g,
+        }
 
-    results["global"] = _compute_for_ids(all_real_ids, gen_by_real, "global")
+    results["by_species_height"] = atomic_results
 
-    # Pre-build gen lookups to avoid repeated per-gid DataFrame access
-    gen_genus = df_gen.loc[df_gen.index.isin(gen_by_real), "genus"].to_dict() if "genus" in df_gen.columns else {}
-    gen_real_id = df_gen.loc[df_gen.index.isin(gen_by_real), "real_id"].to_dict()
+    if not atomic_results:
+        print("  Warning: no valid (species, height_bin) strata for population metrics")
+        return results
 
-    # By genus
-    results["by_genus"] = {}
-    if "genus" in df_real.columns:
-        genus_groups = list(df_real.groupby("genus"))
-        for genus, grp in tqdm(genus_groups, desc="Pop genus"):
-            real_ids = list(grp.index)
-            gen_ids = [gid for gid in gen_by_real if gen_genus.get(gid) == genus]
-            val = _compute_for_ids(real_ids, gen_ids, f"genus={genus}")
-            if val is not None:
-                results["by_genus"][genus] = val
+    # Step 2: Aggregate by species (weighted mean by n_real)
+    species_groups: dict[str, list] = {}
+    for v in atomic_results.values():
+        species_groups.setdefault(v["species"], []).append(v)
 
-    # Pre-build real lookups for height_bin and scan_type
-    real_height_bin = df_real["height_bin"].to_dict() if "height_bin" in df_real.columns else {}
-    real_scan_type = df_real["scan_type"].to_dict() if "scan_type" in df_real.columns else {}
+    for sp, items in species_groups.items():
+        weights = np.array([it["n_real"] for it in items], dtype=np.float64)
+        w_sum = weights.sum()
+        results["by_species"][sp] = {
+            "coverage": float(np.average([it["coverage"] for it in items], weights=weights)),
+            "mmd": float(np.average([it["mmd"] for it in items], weights=weights)),
+            "one_nna": float(np.average([it["one_nna"] for it in items], weights=weights)),
+            "voxel_jsd": float(np.average([it["voxel_jsd"] for it in items], weights=weights)),
+            "n_real": int(w_sum),
+            "n_strata": len(items),
+        }
 
-    # By height_bin
-    results["by_height_bin"] = {}
-    if "height_bin" in df_real.columns:
-        hb_groups = list(df_real.groupby("height_bin"))
-        for hb, grp in tqdm(hb_groups, desc="Pop height"):
-            real_ids = list(grp.index)
-            gen_ids = [gid for gid in gen_by_real
-                       if real_height_bin.get(gen_real_id.get(gid)) == hb]
-            val = _compute_for_ids(real_ids, gen_ids, f"height={hb}")
-            if val is not None:
-                results["by_height_bin"][str(hb)] = val
+    # Step 3: Aggregate by height_bin
+    hb_groups: dict[str, list] = {}
+    for v in atomic_results.values():
+        hb_groups.setdefault(v["height_bin"], []).append(v)
 
-    # By scan_type
-    results["by_scan_type"] = {}
-    if "scan_type" in df_real.columns:
-        st_groups = list(df_real.groupby("scan_type"))
-        for st, grp in tqdm(st_groups, desc="Pop scan"):
-            real_ids = list(grp.index)
-            gen_ids = [gid for gid in gen_by_real
-                       if real_scan_type.get(gen_real_id.get(gid)) == st]
-            val = _compute_for_ids(real_ids, gen_ids, f"scan={st}")
-            if val is not None:
-                results["by_scan_type"][str(st)] = val
+    for hb, items in hb_groups.items():
+        weights = np.array([it["n_real"] for it in items], dtype=np.float64)
+        w_sum = weights.sum()
+        results["by_height_bin"][str(hb)] = {
+            "coverage": float(np.average([it["coverage"] for it in items], weights=weights)),
+            "mmd": float(np.average([it["mmd"] for it in items], weights=weights)),
+            "one_nna": float(np.average([it["one_nna"] for it in items], weights=weights)),
+            "voxel_jsd": float(np.average([it["voxel_jsd"] for it in items], weights=weights)),
+            "n_real": int(w_sum),
+            "n_strata": len(items),
+        }
+
+    # Step 4: Global aggregate
+    all_items = list(atomic_results.values())
+    weights = np.array([it["n_real"] for it in all_items], dtype=np.float64)
+    w_sum = weights.sum()
+    results["global"] = {
+        "coverage": float(np.average([it["coverage"] for it in all_items], weights=weights)),
+        "mmd": float(np.average([it["mmd"] for it in all_items], weights=weights)),
+        "one_nna": float(np.average([it["one_nna"] for it in all_items], weights=weights)),
+        "voxel_jsd": float(np.average([it["voxel_jsd"] for it in all_items], weights=weights)),
+        "n_real": int(w_sum),
+        "n_strata": len(all_items),
+    }
+
+    glob = results["global"]
+    print(f"  Global — COV: {glob['coverage']:.4f}, MMD: {glob['mmd']:.6f}, "
+          f"1-NNA: {glob['one_nna']:.4f}, Voxel JSD: {glob['voxel_jsd']:.6f} "
+          f"({glob['n_strata']} strata, {glob['n_real']} trees)")
 
     return results
 
@@ -1016,7 +1136,7 @@ def compute_statistical_tests(
     df_per_tree: pd.DataFrame,
     df_intra: pd.DataFrame,
 ) -> dict:
-    """Wasserstein distance (primary), KS test, Cohen's d per metric."""
+    """Wasserstein distance per metric (gen vs intra)."""
     results = {}
 
     for m in PAIR_METRICS:
@@ -1030,22 +1150,8 @@ def compute_statistical_tests(
         if len(gen_scores) < 2 or len(intra_scores) < 2:
             continue
 
-        wd = wasserstein_distance(gen_scores, intra_scores)
-        ks_stat, ks_pval = ks_2samp(gen_scores, intra_scores)
-
-        # Cohen's d
-        pooled_std = np.sqrt(
-            (np.var(gen_scores) * (len(gen_scores) - 1)
-             + np.var(intra_scores) * (len(intra_scores) - 1))
-            / (len(gen_scores) + len(intra_scores) - 2)
-        )
-        cohens_d = (np.mean(gen_scores) - np.mean(intra_scores)) / (pooled_std + 1e-30)
-
         results[m] = {
-            "wasserstein": float(wd),
-            "ks_stat": float(ks_stat),
-            "ks_pvalue": float(ks_pval),
-            "cohens_d": float(cohens_d),
+            "wasserstein": float(wasserstein_distance(gen_scores, intra_scores)),
         }
 
     return results
@@ -1106,7 +1212,7 @@ def build_table_a(
     # Population metrics
     glob = population_metrics.get("global")
     if glob:
-        for pop_m in ["voxel_jsd", "coverage", "mmd"]:
+        for pop_m in ["voxel_jsd", "coverage", "mmd", "one_nna"]:
             rows.append({
                 "layer": "1 (population)",
                 "metric": pop_m,
@@ -1122,7 +1228,7 @@ def build_table_a(
         gen_med = df_per_tree[mean_col].median() if mean_col in df_per_tree.columns else float("nan")
         intra_med = df_intra[mean_col].median() if mean_col in df_intra.columns else float("nan")
         inter_med = df_inter[mean_col].median() if mean_col in df_inter.columns else float("nan")
-        ratio = gen_med / intra_med if intra_med > 0 else float("nan")
+        ratio = gen_med / intra_med if pd.notna(intra_med) and intra_med > 0 else float("nan")
 
         layer = "1 (paired)" if m == "reconstruction_cd" else "2 (paired)"
         rows.append({
@@ -1157,7 +1263,7 @@ def _build_stratified_table(
             mean_col = f"{m}_mean"
             gen_med = gen_grp[mean_col].median() if mean_col in gen_grp.columns else float("nan")
             intra_med = intra_grp[mean_col].median() if mean_col in intra_grp.columns else float("nan")
-            ratio = gen_med / intra_med if intra_med and intra_med > 0 else float("nan")
+            ratio = gen_med / intra_med if pd.notna(intra_med) and intra_med > 0 else float("nan")
             row[f"{m}_gen"] = gen_med
             row[f"{m}_intra"] = intra_med
             row[f"{m}_ratio"] = ratio
@@ -1167,18 +1273,13 @@ def _build_stratified_table(
 
 
 def build_table_b(df_per_tree, df_intra, df_inter):
-    """Table B: By Genus."""
-    return _build_stratified_table(df_per_tree, df_intra, df_inter, "genus")
+    """Table B: By Species."""
+    return _build_stratified_table(df_per_tree, df_intra, df_inter, "species")
 
 
 def build_table_c(df_per_tree, df_intra, df_inter):
     """Table C: By Height Bin."""
     return _build_stratified_table(df_per_tree, df_intra, df_inter, "height_bin")
-
-
-def build_table_d(df_per_tree, df_intra, df_inter):
-    """Table D: By Scan Type."""
-    return _build_stratified_table(df_per_tree, df_intra, df_inter, "scan_type")
 
 
 def build_table_e(df_pairs: pd.DataFrame) -> pd.DataFrame:
@@ -1264,6 +1365,7 @@ def save_results(
 
     # Summary JSON
     summary = {
+        "eval_version": EVAL_VERSION,
         "n_real": len(df_real),
         "n_gen": len(df_gen),
         "n_pairs": len(df_pairs),
@@ -1303,23 +1405,26 @@ def print_results(
         print(header)
         print("-" * 80)
         for _, row in table_a.iterrows():
+            metric_name = row['metric']
+            unit = PAIR_METRIC_UNITS.get(metric_name, "")
+            display_name = f"{metric_name} ({unit})" if unit else metric_name
             gen_v = f"{row['gen_vs_real']:.6f}" if pd.notna(row['gen_vs_real']) else "--"
             intra_v = f"{row['intra_class']:.6f}" if pd.notna(row['intra_class']) else "--"
             inter_v = f"{row['inter_class']:.6f}" if pd.notna(row['inter_class']) else "--"
             ratio_v = f"{row['ratio']:.2f}" if pd.notna(row['ratio']) else "--"
-            print(f"{row['layer']:<16s} {row['metric']:<28s} {gen_v:>12s} {intra_v:>12s} {inter_v:>12s} {ratio_v:>8s}")
+            print(f"{row['layer']:<16s} {display_name:<28s} {gen_v:>12s} {intra_v:>12s} {inter_v:>12s} {ratio_v:>8s}")
 
     # Statistical tests
     if stat_tests:
         print(f"\nSTATISTICAL TESTS (gen vs intra)")
         print("-" * 80)
-        header = f"{'Metric':<28s} {'Wasserstein':>12s} {'KS stat':>10s} {'KS p':>10s} {'Cohen d':>10s}"
+        header = f"{'Metric':<28s} {'Wasserstein':>12s}"
         print(header)
         for m, vals in stat_tests.items():
-            print(f"{m:<28s} {vals['wasserstein']:>12.6f} {vals['ks_stat']:>10.4f} {vals['ks_pvalue']:>10.4f} {vals['cohens_d']:>10.4f}")
+            print(f"{m:<28s} {vals['wasserstein']:>12.6f}")
 
     # Stratified tables summary
-    for name in ["table_b_genus", "table_c_height", "table_d_scan_type"]:
+    for name in ["table_b_species", "table_c_height"]:
         df = tables.get(name)
         if df is not None and not df.empty:
             key_col = df.columns[0]
@@ -1403,7 +1508,24 @@ def main():
     real_parquet = output_dir / "df_real.parquet"
     gen_parquet = output_dir / "df_gen.parquet"
 
+    # Check resume compatibility via eval version in summary JSON
+    summary_json = output_dir / "evaluation_v2_summary.json"
+    can_resume = False
     if args.resume and real_parquet.exists() and gen_parquet.exists():
+        if summary_json.exists():
+            try:
+                with open(summary_json) as f:
+                    prev = json.load(f)
+                if prev.get("eval_version") == EVAL_VERSION:
+                    can_resume = True
+                else:
+                    print(f"  Resume skipped: version mismatch (saved={prev.get('eval_version')}, current={EVAL_VERSION})")
+            except Exception:
+                print("  Resume skipped: could not read summary JSON")
+        else:
+            print("  Resume skipped: no summary JSON found (fresh run required for metric-space values)")
+
+    if can_resume:
         print("\n" + "=" * 60)
         print("RESUMING: Loading pre-computed DataFrames")
         print("=" * 60)
@@ -1511,18 +1633,13 @@ def main():
         population_metrics = {}
     else:
         print("\n" + "=" * 60)
-        print("POPULATION METRICS (COV / MMD / Voxel JSD)")
+        print("POPULATION METRICS (COV / MMD / 1-NNA / Voxel JSD)")
         print("=" * 60)
 
         population_metrics = compute_population_metrics(
             df_real, df_gen, real_clouds, gen_clouds,
             num_workers=args.num_workers, seed=args.seed,
         )
-
-        glob = population_metrics.get("global")
-        if glob:
-            print(f"  Global — COV: {glob['coverage']:.4f}, MMD: {glob['mmd']:.6f}, "
-                  f"Voxel JSD: {glob['voxel_jsd']:.6f}")
 
     # =========================================================================
     # 8. Statistical tests
@@ -1542,9 +1659,8 @@ def main():
 
     tables = {
         "table_a_global": build_table_a(df_per_tree, df_intra, df_inter, population_metrics),
-        "table_b_genus": build_table_b(df_per_tree, df_intra, df_inter),
+        "table_b_species": build_table_b(df_per_tree, df_intra, df_inter),
         "table_c_height": build_table_c(df_per_tree, df_intra, df_inter),
-        "table_d_scan_type": build_table_d(df_per_tree, df_intra, df_inter),
         "table_e_cfg": build_table_e(df_pairs),
     }
 
