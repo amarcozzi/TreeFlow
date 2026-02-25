@@ -154,14 +154,13 @@ def canonicalize(points: np.ndarray) -> np.ndarray:
 # =============================================================================
 
 
-def jsd(p: np.ndarray, q: np.ndarray) -> float:
-    """Jensen-Shannon divergence with Laplace smoothing (add 1 to all bins)."""
-    p = p.astype(np.float64) + 1.0
-    q = q.astype(np.float64) + 1.0
+def jsd(p: np.ndarray, q: np.ndarray, eps: float = 1e-10) -> float:
+    """Jensen-Shannon divergence between two probability distributions."""
+    p = np.asarray(p, dtype=np.float64) + eps
+    q = np.asarray(q, dtype=np.float64) + eps
     p = p / p.sum()
     q = q / q.sum()
     m = 0.5 * (p + q)
-    # Avoid log(0) — m > 0 everywhere due to Laplace smoothing
     kl_pm = np.sum(p * np.log(p / m))
     kl_qm = np.sum(q * np.log(q / m))
     return float(0.5 * kl_pm + 0.5 * kl_qm)
