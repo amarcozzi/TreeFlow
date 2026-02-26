@@ -76,15 +76,18 @@ def sample_conditional(
             return x_final[0]
         return x_final
 
+    # Infer dtype from model parameters
+    model_dtype = next(model.parameters()).dtype
+
     # Prepare batch (all samples share same conditioning except CFG)
-    x_init = torch.randn(num_samples, num_points, 3, device=device)
+    x_init = torch.randn(num_samples, num_points, 3, device=device, dtype=model_dtype)
     s_tensor = torch.full((num_samples,), species_idx, device=device, dtype=torch.long)
     t_tensor = torch.full((num_samples,), type_idx, device=device, dtype=torch.long)
     h_val_log = np.log(target_height + 1e-6)
-    h_tensor = torch.full((num_samples,), h_val_log, device=device, dtype=torch.float32)
+    h_tensor = torch.full((num_samples,), h_val_log, device=device, dtype=model_dtype)
 
     # Convert cfg_values to tensor for vectorized operations
-    cfg_tensor = torch.tensor(cfg_values, device=device, dtype=torch.float32)
+    cfg_tensor = torch.tensor(cfg_values, device=device, dtype=model_dtype)
 
     # Check if we can skip conditional pass (all cfg values are 0)
     all_cfg_zero = (cfg_tensor == 0).all().item()
