@@ -848,7 +848,7 @@ def build_intra_baseline(
     """Intra-class baseline: each real tree vs N trees from same (species, height_bin)."""
     rng = np.random.default_rng(seed)
 
-    strat_cols = ["species", "height_bin"]
+    strat_cols = ["species", "genus", "height_bin"]
     available = [c for c in strat_cols if c in df_real.columns]
     if not available:
         print("  Warning: no stratification columns available for intra baseline")
@@ -997,13 +997,13 @@ def compute_population_metrics(
     num_workers: int = 40,
     seed: int = 42,
 ) -> dict:
-    """COV, MMD, 1-NNA, Voxel JSD — computed at atomic (species, height_bin) strata, then aggregated.
+    """COV, MMD, 1-NNA, Voxel JSD — computed at atomic (genus, height_bin) strata, then aggregated.
 
     max_per_stratum: max trees per side for COV/MMD (cross matrix only).
     max_per_nna: max trees per side for 1-NNA (requires rr + gg + cross matrices, ~4× cost).
     """
     rng = np.random.default_rng(seed)
-    results = {"by_species_height": {}, "by_species": {}, "by_height_bin": {}, "global": None}
+    results = {"by_genus_height": {}, "by_genus": {}, "by_height_bin": {}, "global": None}
 
     def _subsample_ids(ids, max_n):
         if len(ids) <= max_n:
@@ -1024,22 +1024,22 @@ def compute_population_metrics(
         if rid is not None:
             real_to_gen[rid] = gid
 
-    # Step 1: Compute atomic (species, height_bin) strata
-    if "species" not in df_real.columns or "height_bin" not in df_real.columns:
-        print("  Warning: missing species or height_bin columns for population metrics")
+    # Step 1: Compute atomic (genus, height_bin) strata
+    if "genus" not in df_real.columns or "height_bin" not in df_real.columns:
+        print("  Warning: missing genus or height_bin columns for population metrics")
         return results
 
     atomic_results = {}
-    groups = list(df_real.groupby(["species", "height_bin"]))
-    print(f"  Computing population metrics for {len(groups)} (species, height_bin) strata...")
+    groups = list(df_real.groupby(["genus", "height_bin"]))
+    print(f"  Computing population metrics for {len(groups)} (genus, height_bin) strata...")
 
-    for (species, hb), grp in tqdm(groups, desc="Pop strata"):
+    for (genus, hb), grp in tqdm(groups, desc="Pop strata"):
         real_ids = [i for i in grp.index if i in real_clouds]
         gen_ids = [real_to_gen[i] for i in real_ids if i in real_to_gen and real_to_gen[i] in gen_clouds]
         real_ids = [i for i in real_ids if i in real_to_gen and real_to_gen[i] in gen_clouds]
 
         if len(real_ids) < min_per_stratum or len(gen_ids) < min_per_stratum:
-            print(f"    ({species}, {hb}): skipped (n_real={len(real_ids)}, n_gen={len(gen_ids)})")
+            print(f"    ({genus}, {hb}): skipped (n_real={len(real_ids)}, n_gen={len(gen_ids)})")
             continue
 
         real_ids = _subsample_ids(real_ids, max_per_stratum)
@@ -1049,7 +1049,7 @@ def compute_population_metrics(
         if len(real_ids) < min_per_stratum or len(gen_ids) < min_per_stratum:
             continue
 
-        label = f"({species}, {hb})"
+        label = f"({genus}, {hb})"
         n_r, n_g = len(real_ids), len(gen_ids)
         print(f"    {label}: {n_r} real × {n_g} gen")
 
@@ -1088,9 +1088,9 @@ def compute_population_metrics(
         print(f"    {label}: COV={cov:.4f}, MMD={mmd_val:.6f}, 1-NNA={nna:.4f}, "
               f"Div={diversity_ratio:.4f}, JSD={voxel_jsd:.6f}")
 
-        key = f"{species}|{hb}"
+        key = f"{genus}|{hb}"
         atomic_results[key] = {
-            "species": species, "height_bin": hb,
+            "genus": genus, "height_bin": hb,
             "coverage": cov, "mmd": mmd_val, "one_nna": nna,
             "diversity_ratio": diversity_ratio,
             "real_real_cd": real_real_cd, "gen_gen_cd": gen_gen_cd,
@@ -1098,21 +1098,21 @@ def compute_population_metrics(
             "n_real": n_r, "n_gen": n_g,
         }
 
-    results["by_species_height"] = atomic_results
+    results["by_genus_height"] = atomic_results
 
     if not atomic_results:
-        print("  Warning: no valid (species, height_bin) strata for population metrics")
+        print("  Warning: no valid (genus, height_bin) strata for population metrics")
         return results
 
-    # Step 2: Aggregate by species (weighted mean by n_real)
-    species_groups: dict[str, list] = {}
+    # Step 2: Aggregate by genus (weighted mean by n_real)
+    genus_groups: dict[str, list] = {}
     for v in atomic_results.values():
-        species_groups.setdefault(v["species"], []).append(v)
+        genus_groups.setdefault(v["genus"], []).append(v)
 
-    for sp, items in species_groups.items():
+    for g, items in genus_groups.items():
         weights = np.array([it["n_real"] for it in items], dtype=np.float64)
         w_sum = weights.sum()
-        results["by_species"][sp] = {
+        results["by_genus"][g] = {
             "coverage": float(np.average([it["coverage"] for it in items], weights=weights)),
             "mmd": float(np.average([it["mmd"] for it in items], weights=weights)),
             "one_nna": float(np.average([it["one_nna"] for it in items], weights=weights)),
@@ -1169,12 +1169,11 @@ def compute_population_metrics(
 
 
 def compute_wasserstein_clipped(gen_scores, intra_scores, clip_percentile=99):
-    """Wasserstein distance with percentile clipping for residual outlier robustness.
+    """Wasserstein distance with percentile clipping for paired-delta robustness.
 
-    Primary outlier removal happens at metric extraction (crown_volume and
-    max_crown_r capped at P99 of real distribution). This secondary clip
-    at P99 of the pooled gen+intra distribution handles residual heavy tails
-    across all metrics uniformly.
+    Primary outlier removal uses hard physical caps (50,000 m³ / 25 m) to catch
+    stem tracker failures. This secondary P99 clip on the pooled gen+intra
+    paired-delta distribution handles residual heavy tails in the delta scores.
     """
     combined = np.concatenate([gen_scores, intra_scores])
     cap = np.percentile(combined, clip_percentile)
@@ -1515,7 +1514,7 @@ def _build_stratified_table(
     groups = sorted(df_per_tree[group_col].dropna().unique())
 
     # Map group_col to population_metrics key
-    pop_key_map = {"species": "by_species", "height_bin": "by_height_bin"}
+    pop_key_map = {"genus": "by_genus", "height_bin": "by_height_bin"}
     pop_dict = {}
     if population_metrics and pop_key_map.get(group_col) in population_metrics:
         pop_dict = population_metrics[pop_key_map[group_col]]
@@ -1559,8 +1558,8 @@ def _build_stratified_table(
 
 
 def build_table_b(df_per_tree, df_intra, df_inter, population_metrics=None, morph_w1=None):
-    """Table 2: By genus (using species column, which contains genus-level grouping)."""
-    return _build_stratified_table(df_per_tree, df_intra, df_inter, "species",
+    """Table 2: By genus."""
+    return _build_stratified_table(df_per_tree, df_intra, df_inter, "genus",
                                    population_metrics=population_metrics, morph_w1=morph_w1)
 
 
@@ -1728,22 +1727,10 @@ def print_results(
             print(f"  {row['display_name']:<32s} {gen_v:>8s} {intra_v:>8s} {inter_v:>8s} {ratio_v:>6s}")
         print("\u2500" * 72)
 
-    # ── Statistical tests (Wasserstein) ──
-    if stat_tests:
-        print(f"\nWASSERSTEIN DISTANCES (gen vs intra, P99-clipped)")
-        print("-" * 50)
-        for m, vals in stat_tests.items():
-            display = METRIC_DISPLAY.get(m, m)
-            if isinstance(display, tuple):
-                name = f"{display[0]} ({display[1]})" if display[1] else display[0]
-            else:
-                name = display
-            print(f"  {name:<34s} {vals['wasserstein']:>10.4f}")
-
-    # ── Table 2 (by genus/species) ──
-    table_b = tables.get("table_b_species")
+    # ── Table 2 (by genus) ──
+    table_b = tables.get("table_b_genus")
     if table_b is not None and not table_b.empty:
-        _print_stratified_table(table_b, "TABLE 2: BY GENUS", "species")
+        _print_stratified_table(table_b, "TABLE 2: BY GENUS", "genus")
 
     # ── Table 3 (by height bin) ──
     table_c = tables.get("table_c_height")
@@ -2007,50 +1994,44 @@ def main():
     # =========================================================================
     # 3.5. Outlier clipping (must precede all downstream computation)
     # =========================================================================
-    # Crown volume and max_crown_r outlier cap: P99 of real tree distributions.
-    # Stem tracker polynomial spine can diverge on trees with complex branching
-    # (e.g., large broadleaves), producing crown volumes orders of magnitude
-    # beyond physical plausibility (e.g., 500,000 m³ for a 40m tree whose true
-    # crown volume is ~2,000 m³). We cap at P99 of the real distribution, which
-    # is robust to the small number of failures. This cap is applied identically
-    # to real and generated metrics before any downstream computation (deltas,
-    # baselines, Wasserstein, tables).
-    # Affected metrics: crown_volume, max_crown_r, and their downstream deltas.
-    # NOT affected: CD, JSD, vert_kde — computed from raw point clouds.
-    # See paper Section X.X for full discussion.
+    # Hard physical caps for stem tracker failures.
+    # The polynomial spine can diverge on trees with complex branching,
+    # producing crown volumes orders of magnitude beyond physical plausibility
+    # (e.g., 500,000 m³). These caps catch genuine failures only — normal large
+    # trees (crown_volume ~700 m³, crown_r ~6 m) are left untouched.
+    # The full gen distribution (including its upper tail) must be preserved
+    # for honest morphological W₁ and population metrics.
+    HARD_CAP_CROWN_VOL = 50_000  # m³ — no real tree exceeds this
+    HARD_CAP_CROWN_R = 25.0       # m — no real crown radius exceeds this
+
     print("\n" + "=" * 60)
-    print("OUTLIER CLIPPING")
+    print("OUTLIER CLIPPING (hard physical caps)")
     print("=" * 60)
 
-    crown_vol_cap = float(df_real["crown_volume"].quantile(0.99))
-    print(f"  Crown volume cap (P99 of real): {crown_vol_cap:.1f} m³")
+    n_clipped_real_vol = int((df_real["crown_volume"] > HARD_CAP_CROWN_VOL).sum())
+    n_clipped_gen_vol = int((df_gen["crown_volume"] > HARD_CAP_CROWN_VOL).sum())
+    df_real["crown_volume"] = df_real["crown_volume"].clip(upper=HARD_CAP_CROWN_VOL)
+    df_gen["crown_volume"] = df_gen["crown_volume"].clip(upper=HARD_CAP_CROWN_VOL)
+    print(f"  Crown volume cap: {HARD_CAP_CROWN_VOL:,} m³")
+    print(f"  Clipped {n_clipped_real_vol} real + {n_clipped_gen_vol} gen trees")
 
-    n_clipped_real_vol = int((df_real["crown_volume"] > crown_vol_cap).sum())
-    n_clipped_gen_vol = int((df_gen["crown_volume"] > crown_vol_cap).sum())
-    df_real["crown_volume"] = df_real["crown_volume"].clip(upper=crown_vol_cap)
-    df_gen["crown_volume"] = df_gen["crown_volume"].clip(upper=crown_vol_cap)
-    print(f"  Clipped {n_clipped_real_vol} real + {n_clipped_gen_vol} gen trees "
-          f"to crown_vol_cap={crown_vol_cap:.1f} m³")
-
-    crown_r_cap = float(df_real["max_crown_r"].quantile(0.99))
-    n_clipped_real_r = int((df_real["max_crown_r"] > crown_r_cap).sum())
-    n_clipped_gen_r = int((df_gen["max_crown_r"] > crown_r_cap).sum())
-    df_real["max_crown_r"] = df_real["max_crown_r"].clip(upper=crown_r_cap)
-    df_gen["max_crown_r"] = df_gen["max_crown_r"].clip(upper=crown_r_cap)
-    print(f"  Clipped {n_clipped_real_r} real + {n_clipped_gen_r} gen trees "
-          f"to crown_r_cap={crown_r_cap:.2f} m")
+    n_clipped_real_r = int((df_real["max_crown_r"] > HARD_CAP_CROWN_R).sum())
+    n_clipped_gen_r = int((df_gen["max_crown_r"] > HARD_CAP_CROWN_R).sum())
+    df_real["max_crown_r"] = df_real["max_crown_r"].clip(upper=HARD_CAP_CROWN_R)
+    df_gen["max_crown_r"] = df_gen["max_crown_r"].clip(upper=HARD_CAP_CROWN_R)
+    print(f"  Crown radius cap: {HARD_CAP_CROWN_R:.1f} m")
+    print(f"  Clipped {n_clipped_real_r} real + {n_clipped_gen_r} gen trees")
 
     outlier_clipping_info = {
-        "crown_vol_cap_m3": crown_vol_cap,
-        "crown_r_cap_m": crown_r_cap,
+        "crown_vol_cap_m3": HARD_CAP_CROWN_VOL,
+        "crown_r_cap_m": HARD_CAP_CROWN_R,
         "n_real_clipped_vol": n_clipped_real_vol,
         "n_gen_clipped_vol": n_clipped_gen_vol,
         "n_real_clipped_r": n_clipped_real_r,
         "n_gen_clipped_r": n_clipped_gen_r,
-        "method": "P99 of real tree distribution, applied identically to real and gen",
-        "rationale": "Stem tracker polynomial spine diverges on trees with complex "
-                     "branching, producing crown volumes orders of magnitude beyond "
-                     "physical plausibility. Affects <2% of trees.",
+        "method": "Hard physical caps, applied identically to real and gen",
+        "rationale": "Catches stem tracker polynomial spine divergence only. "
+                     "Normal large trees are preserved for honest distributional metrics.",
     }
 
     # =========================================================================
@@ -2140,7 +2121,7 @@ def main():
 
     # Compute morphological W1 at global and per-stratum levels
     morph_w1_global = compute_morphological_wasserstein(df_real, df_gen, stratum_cols=None)
-    morph_w1_species = compute_morphological_wasserstein(df_real, df_gen, stratum_cols=["species"])
+    morph_w1_genus = compute_morphological_wasserstein(df_real, df_gen, stratum_cols=["genus"])
     morph_w1_height = compute_morphological_wasserstein(df_real, df_gen, stratum_cols=["height_bin"])
 
     if not morph_w1_global.empty:
@@ -2156,9 +2137,9 @@ def main():
     tables = {
         "table_1a": build_table_1a(population_metrics, morph_w1_global),
         "table_1b": build_table_1b(df_per_tree, df_intra, df_inter),
-        "table_b_species": build_table_b(df_per_tree, df_intra, df_inter,
-                                          population_metrics=population_metrics,
-                                          morph_w1=morph_w1_species),
+        "table_b_genus": build_table_b(df_per_tree, df_intra, df_inter,
+                                       population_metrics=population_metrics,
+                                       morph_w1=morph_w1_genus),
         "table_c_height": build_table_c(df_per_tree, df_intra, df_inter,
                                          population_metrics=population_metrics,
                                          morph_w1=morph_w1_height),
