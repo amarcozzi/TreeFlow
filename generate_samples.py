@@ -418,6 +418,7 @@ def generate_samples(args):
                 cfg_values=cfg_values_needed,
                 num_steps=args.num_ode_steps,
                 solver_method=args.solver_method,
+                batch_size=args.batch_size,
             )
             generation_time = time.time() - start_time
             time_per_sample = generation_time / len(needed_indices)
@@ -563,6 +564,12 @@ def main():
         default="dopri5",
         choices=["euler", "midpoint", "dopri5"],
         help="ODE solver method",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=4,
+        help="Max samples per ODE solve to limit GPU memory usage (0 = all at once)",
     )
     parser.add_argument(
         "--seed",

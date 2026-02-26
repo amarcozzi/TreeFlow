@@ -31,6 +31,7 @@ python generate_samples.py \
     --num_samples_per_tree 16 \
     --cfg_scale "1.0 4.5" \
     --solver_method dopri5 \
+    --batch_size 4 \
     --resume \
     --start_idx $START_IDX \
     --end_idx $END_IDX
