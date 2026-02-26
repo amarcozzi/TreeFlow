@@ -1811,19 +1811,24 @@ def print_results(
 
 def _print_stratified_table(df: pd.DataFrame, title: str, key_col: str):
     """Print a stratified table with population + conditioning columns."""
+    w1 = "W\u2081"
+    sep = "\u2500" * 110
     print(f"\n{title}")
-    print("\u2500" * 110)
+    print(sep)
     # Header
+    w1_crv = f"{w1} CrV"
+    w1_hcb_h = f"{w1} HCB"
+    w1_section = f"--- {w1} ---"
     header = (f"  {key_col:<15s} {'n':>4s} "
               f"{'COV':>6s} {'1-NNA':>6s} {'Div.':>6s} "
-              f"{'W\u2081 CrV':>8s} {'W\u2081 HCB':>8s} "
+              f"{w1_crv:>8s} {w1_hcb_h:>8s} "
               f"{'CD':>6s} {'Vert.':>6s} {'Hist.':>6s}")
     print(header)
     print(f"  {'':>15s} {'':>4s} "
           f"{'--- Population ---':^20s} "
-          f"{'--- W\u2081 ---':^18s} "
+          f"{w1_section:^18s} "
           f"{'-- G/I ratio --':^20s}")
-    print("\u2500" * 110)
+    print(sep)
 
     for _, row in df.iterrows():
         n = int(row.get("n_trees", 0))
