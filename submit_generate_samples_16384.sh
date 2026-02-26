@@ -25,7 +25,7 @@ echo "Task $SLURM_ARRAY_TASK_ID: Processing trees [$START_IDX, $END_IDX)"
 
 python generate_samples.py \
     --experiment_name finetune-8-512-16384 \
-    --checkpoint epoch_3300.pt \
+    --checkpoint epoch_3400.pt \
     --data_path ./data/preprocessed-16384 \
     --max_points 16384 \
     --num_samples_per_tree 16 \
