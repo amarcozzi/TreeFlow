@@ -60,6 +60,27 @@ PAIR_METRIC_UNITS = {
     "delta_hcb": "m",
 }
 
+METRIC_DISPLAY = {
+    # Panel (a) — population: point-cloud space
+    "coverage": "Coverage",
+    "mmd": "MMD (CD)",
+    "one_nna": "1-NNA",
+    "diversity_ratio": "Diversity ratio",
+    "voxel_jsd": "Voxel JSD",
+    # Panel (a) — population: morphological marginals
+    "w1_crown_volume": ("Crown volume", "m\u00b3"),
+    "w1_max_crown_r": ("Max crown radius", "m"),
+    "w1_hcb": ("Height to crown base", "m"),
+    # Panel (b) — conditioning fidelity
+    "reconstruction_cd": "Chamfer distance",
+    "vert_kde_jsd": "Vertical KDE JSD",
+    "hist_2d_jsd": "2D histogram JSD",
+    "delta_crown_vol": ("\u0394 Crown volume", "m\u00b3"),
+    "delta_max_crown_r": ("\u0394 Max crown radius", "m"),
+    "delta_max_crown_r_rel_s": ("\u0394 Crown radius / stem rad.", ""),
+    "delta_hcb": ("\u0394 Height to crown base", "m"),
+}
+
 EVAL_VERSION = 2
 
 
@@ -971,7 +992,7 @@ def compute_population_metrics(
     real_clouds: dict,
     gen_clouds: dict,
     max_per_stratum: int = 200,
-    max_per_nna: int = 50,
+    max_per_nna: int = 100,
     min_per_stratum: int = 10,
     num_workers: int = 40,
     seed: int = 42,
@@ -1055,14 +1076,25 @@ def compute_population_metrics(
         gg_mat = compute_cd_matrix(nna_gc, nna_gc, num_workers=num_workers)
         nna = one_nn_accuracy(rr_mat, gg_mat, nna_cross)
 
+        # Diversity diagnostic: gen-gen vs real-real pairwise CD
+        rr_upper = rr_mat[np.triu_indices_from(rr_mat, k=1)]
+        gg_upper = gg_mat[np.triu_indices_from(gg_mat, k=1)]
+        real_real_cd = float(rr_upper.mean()) if len(rr_upper) > 0 else float("nan")
+        gen_gen_cd = float(gg_upper.mean()) if len(gg_upper) > 0 else float("nan")
+        diversity_ratio = gen_gen_cd / real_real_cd if real_real_cd > 0 else float("nan")
+
         voxel_jsd = compute_jsd_3d(rc, gc)
 
-        print(f"    {label}: COV={cov:.4f}, MMD={mmd_val:.6f}, 1-NNA={nna:.4f}, JSD={voxel_jsd:.6f}")
+        print(f"    {label}: COV={cov:.4f}, MMD={mmd_val:.6f}, 1-NNA={nna:.4f}, "
+              f"Div={diversity_ratio:.4f}, JSD={voxel_jsd:.6f}")
 
         key = f"{species}|{hb}"
         atomic_results[key] = {
             "species": species, "height_bin": hb,
-            "coverage": cov, "mmd": mmd_val, "one_nna": nna, "voxel_jsd": voxel_jsd,
+            "coverage": cov, "mmd": mmd_val, "one_nna": nna,
+            "diversity_ratio": diversity_ratio,
+            "real_real_cd": real_real_cd, "gen_gen_cd": gen_gen_cd,
+            "voxel_jsd": voxel_jsd,
             "n_real": n_r, "n_gen": n_g,
         }
 
@@ -1084,6 +1116,7 @@ def compute_population_metrics(
             "coverage": float(np.average([it["coverage"] for it in items], weights=weights)),
             "mmd": float(np.average([it["mmd"] for it in items], weights=weights)),
             "one_nna": float(np.average([it["one_nna"] for it in items], weights=weights)),
+            "diversity_ratio": float(np.average([it["diversity_ratio"] for it in items], weights=weights)),
             "voxel_jsd": float(np.average([it["voxel_jsd"] for it in items], weights=weights)),
             "n_real": int(w_sum),
             "n_strata": len(items),
@@ -1101,6 +1134,7 @@ def compute_population_metrics(
             "coverage": float(np.average([it["coverage"] for it in items], weights=weights)),
             "mmd": float(np.average([it["mmd"] for it in items], weights=weights)),
             "one_nna": float(np.average([it["one_nna"] for it in items], weights=weights)),
+            "diversity_ratio": float(np.average([it["diversity_ratio"] for it in items], weights=weights)),
             "voxel_jsd": float(np.average([it["voxel_jsd"] for it in items], weights=weights)),
             "n_real": int(w_sum),
             "n_strata": len(items),
@@ -1114,6 +1148,7 @@ def compute_population_metrics(
         "coverage": float(np.average([it["coverage"] for it in all_items], weights=weights)),
         "mmd": float(np.average([it["mmd"] for it in all_items], weights=weights)),
         "one_nna": float(np.average([it["one_nna"] for it in all_items], weights=weights)),
+        "diversity_ratio": float(np.average([it["diversity_ratio"] for it in all_items], weights=weights)),
         "voxel_jsd": float(np.average([it["voxel_jsd"] for it in all_items], weights=weights)),
         "n_real": int(w_sum),
         "n_strata": len(all_items),
@@ -1121,7 +1156,8 @@ def compute_population_metrics(
 
     glob = results["global"]
     print(f"  Global — COV: {glob['coverage']:.4f}, MMD: {glob['mmd']:.6f}, "
-          f"1-NNA: {glob['one_nna']:.4f}, Voxel JSD: {glob['voxel_jsd']:.6f} "
+          f"1-NNA: {glob['one_nna']:.4f}, Div: {glob['diversity_ratio']:.4f}, "
+          f"Voxel JSD: {glob['voxel_jsd']:.6f} "
           f"({glob['n_strata']} strata, {glob['n_real']} trees)")
 
     return results
@@ -1132,11 +1168,26 @@ def compute_population_metrics(
 # =============================================================================
 
 
+def compute_wasserstein_clipped(gen_scores, intra_scores, clip_percentile=99):
+    """Wasserstein distance with percentile clipping for residual outlier robustness.
+
+    Primary outlier removal happens at metric extraction (crown_volume and
+    max_crown_r capped at P99 of real distribution). This secondary clip
+    at P99 of the pooled gen+intra distribution handles residual heavy tails
+    across all metrics uniformly.
+    """
+    combined = np.concatenate([gen_scores, intra_scores])
+    cap = np.percentile(combined, clip_percentile)
+    gen_clipped = np.clip(gen_scores, 0, cap)
+    intra_clipped = np.clip(intra_scores, 0, cap)
+    return float(wasserstein_distance(gen_clipped, intra_clipped))
+
+
 def compute_statistical_tests(
     df_per_tree: pd.DataFrame,
     df_intra: pd.DataFrame,
 ) -> dict:
-    """Wasserstein distance per metric (gen vs intra)."""
+    """Wasserstein distance per metric (gen vs intra), with P99 clipping."""
     results = {}
 
     for m in PAIR_METRICS:
@@ -1151,7 +1202,7 @@ def compute_statistical_tests(
             continue
 
         results[m] = {
-            "wasserstein": float(wasserstein_distance(gen_scores, intra_scores)),
+            "wasserstein": compute_wasserstein_clipped(gen_scores, intra_scores),
         }
 
     return results
@@ -1196,33 +1247,233 @@ def compute_ratios(
 
 
 # =============================================================================
+# Scan-type confound diagnostic
+# =============================================================================
+
+
+def compute_scan_type_diagnostic(
+    df_real: pd.DataFrame,
+    real_clouds: dict,
+    num_workers: int = 40,
+    seed: int = 42,
+    max_pairs_per_stratum: int = 200,
+) -> dict:
+    """One-off diagnostic: does mixing scan types inflate intra distances?
+
+    For strata with both TLS and ULS trees, compares within-scan-type
+    CD to cross-scan-type CD. If cross/within ratio is < 1.1, scan type
+    mixing has negligible effect on baselines.
+    """
+    rng = np.random.default_rng(seed)
+    results = {"strata": [], "summary": {}}
+
+    if "scan_type" not in df_real.columns:
+        print("  Scan diagnostic: no scan_type column, skipping")
+        return results
+
+    groups = df_real.groupby(["species", "height_bin"])
+    qualifying_strata = 0
+    all_ratios = []
+
+    for (species, hb), grp in groups:
+        scan_types = grp["scan_type"].value_counts()
+        # Need both TLS and ULS with >= 5 trees each
+        if len(scan_types) < 2:
+            continue
+        eligible_types = [st for st, n in scan_types.items() if n >= 5]
+        if len(eligible_types) < 2:
+            continue
+
+        qualifying_strata += 1
+        type_ids = {}
+        for st in eligible_types:
+            ids = [i for i in grp[grp["scan_type"] == st].index if i in real_clouds]
+            type_ids[st] = ids
+
+        # Within-type pairs
+        within_cd_vals = []
+        for st, ids in type_ids.items():
+            if len(ids) < 2:
+                continue
+            n_pairs = min(max_pairs_per_stratum // len(eligible_types), len(ids) * (len(ids) - 1) // 2)
+            pairs_sampled = 0
+            cd_tasks = []
+            attempts = 0
+            while pairs_sampled < n_pairs and attempts < n_pairs * 3:
+                i, j = rng.choice(len(ids), size=2, replace=False)
+                cd_tasks.append((pairs_sampled, real_clouds[ids[i]], real_clouds[ids[j]]))
+                pairs_sampled += 1
+                attempts += 1
+            if cd_tasks:
+                if num_workers <= 1 or len(cd_tasks) < 50:
+                    cd_results = [_cd_worker(t) for t in cd_tasks]
+                else:
+                    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                        cd_results = list(executor.map(_cd_worker, cd_tasks, chunksize=16))
+                within_cd_vals.extend([cd for _, cd in cd_results])
+
+        # Cross-type pairs
+        cross_cd_vals = []
+        types_list = list(type_ids.keys())
+        if len(types_list) >= 2:
+            ids_a = type_ids[types_list[0]]
+            ids_b = type_ids[types_list[1]]
+            n_pairs = min(max_pairs_per_stratum, len(ids_a) * len(ids_b))
+            cd_tasks = []
+            for p in range(n_pairs):
+                i = rng.integers(len(ids_a))
+                j = rng.integers(len(ids_b))
+                cd_tasks.append((p, real_clouds[ids_a[i]], real_clouds[ids_b[j]]))
+            if cd_tasks:
+                if num_workers <= 1 or len(cd_tasks) < 50:
+                    cd_results = [_cd_worker(t) for t in cd_tasks]
+                else:
+                    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                        cd_results = list(executor.map(_cd_worker, cd_tasks, chunksize=16))
+                cross_cd_vals.extend([cd for _, cd in cd_results])
+
+        if within_cd_vals and cross_cd_vals:
+            within_mean = float(np.mean(within_cd_vals))
+            cross_mean = float(np.mean(cross_cd_vals))
+            ratio = cross_mean / within_mean if within_mean > 0 else float("nan")
+            all_ratios.append(ratio)
+            results["strata"].append({
+                "species": species, "height_bin": hb,
+                "scan_types": eligible_types,
+                "within_cd": within_mean,
+                "cross_cd": cross_mean,
+                "ratio": ratio,
+                "n_within_pairs": len(within_cd_vals),
+                "n_cross_pairs": len(cross_cd_vals),
+            })
+
+    if all_ratios:
+        median_ratio = float(np.median(all_ratios))
+        results["summary"] = {
+            "n_qualifying_strata": qualifying_strata,
+            "n_tested_strata": len(all_ratios),
+            "median_cross_within_ratio": median_ratio,
+            "mean_cross_within_ratio": float(np.mean(all_ratios)),
+        }
+        print(f"  Scan-type diagnostic: {len(all_ratios)} strata tested, "
+              f"median cross/within ratio = {median_ratio:.4f}")
+    else:
+        print("  Scan-type diagnostic: no qualifying strata found")
+
+    return results
+
+
+# =============================================================================
+# Morphological Wasserstein (population-level marginal comparison)
+# =============================================================================
+
+
+def compute_morphological_wasserstein(
+    df_real: pd.DataFrame,
+    df_gen: pd.DataFrame,
+    stratum_cols: list[str] | None = None,
+    properties: list[str] = ("crown_volume", "max_crown_r", "hcb"),
+) -> pd.DataFrame:
+    """W1 between gen and real marginal distributions per stratum.
+
+    For each stratum (e.g., species x height_bin) and each morphological
+    property, computes the 1-Wasserstein distance between the generated
+    and real marginal distributions. This answers: "does the generated
+    population in this stratum have the right distribution of crown
+    volumes?" — a direct population-level test.
+
+    If stratum_cols is None, computes a single global row.
+    Returns a DataFrame with columns: [*stratum_cols, property, wasserstein].
+    """
+    rows = []
+
+    if stratum_cols is None:
+        # Global: single stratum
+        for prop in properties:
+            vals_real = df_real[prop].dropna().values
+            vals_gen = df_gen[prop].dropna().values
+            if len(vals_real) >= 5 and len(vals_gen) >= 5:
+                w1 = wasserstein_distance(vals_real, vals_gen)
+                rows.append({"property": prop, "wasserstein": float(w1)})
+        return pd.DataFrame(rows)
+
+    for keys, grp_real in df_real.groupby(stratum_cols):
+        try:
+            grp_gen = df_gen.groupby(stratum_cols).get_group(keys)
+        except KeyError:
+            continue
+        for prop in properties:
+            vals_real = grp_real[prop].dropna().values
+            vals_gen = grp_gen[prop].dropna().values
+            if len(vals_real) >= 5 and len(vals_gen) >= 5:
+                w1 = wasserstein_distance(vals_real, vals_gen)
+                row = dict(zip(stratum_cols, keys if isinstance(keys, tuple) else (keys,)))
+                row["property"] = prop
+                row["wasserstein"] = float(w1)
+                rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# =============================================================================
 # Output tables
 # =============================================================================
 
 
-def build_table_a(
+def build_table_1a(
+    population_metrics: dict,
+    morph_w1_global: pd.DataFrame,
+) -> pd.DataFrame:
+    """Table 1(a): Population metrics — point-cloud distribution + morphological marginals."""
+    rows = []
+    glob = population_metrics.get("global") or {}
+
+    # Point-cloud distribution metrics
+    pop_metrics = [
+        ("coverage", "Coverage", 0.63),
+        ("mmd", "MMD (CD)", 0),
+        ("one_nna", "1-NNA", 0.50),
+        ("diversity_ratio", "Diversity ratio", 1.00),
+        ("voxel_jsd", "Voxel JSD", 0),
+    ]
+    for key, name, ideal in pop_metrics:
+        rows.append({
+            "section": "Point-cloud distribution",
+            "metric": key,
+            "display_name": name,
+            "value": glob.get(key, float("nan")),
+            "ideal": ideal,
+        })
+
+    # Morphological marginals (W1)
+    morph_props = [
+        ("crown_volume", "Crown volume (m\u00b3)"),
+        ("max_crown_r", "Max crown radius (m)"),
+        ("hcb", "Height to crown base (m)"),
+    ]
+    for prop, name in morph_props:
+        w1_val = float("nan")
+        if not morph_w1_global.empty:
+            match = morph_w1_global[morph_w1_global["property"] == prop]
+            if not match.empty:
+                w1_val = float(match.iloc[0]["wasserstein"])
+        rows.append({
+            "section": "Morphological marginals (W\u2081)",
+            "metric": f"w1_{prop}",
+            "display_name": name,
+            "value": w1_val,
+            "ideal": 0,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def build_table_1b(
     df_per_tree: pd.DataFrame,
     df_intra: pd.DataFrame,
     df_inter: pd.DataFrame,
-    population_metrics: dict,
 ) -> pd.DataFrame:
-    """Table A: Global summary — all metrics with Gen/Intra/Inter/Ratio columns."""
+    """Table 1(b): Conditioning fidelity — stratum medians with Gen/Intra/Inter/Ratio."""
     rows = []
-
-    # Population metrics
-    glob = population_metrics.get("global")
-    if glob:
-        for pop_m in ["voxel_jsd", "coverage", "mmd", "one_nna"]:
-            rows.append({
-                "layer": "1 (population)",
-                "metric": pop_m,
-                "gen_vs_real": glob.get(pop_m, float("nan")),
-                "intra_class": float("nan"),
-                "inter_class": float("nan"),
-                "ratio": float("nan"),
-            })
-
-    # Paired metrics
     for m in PAIR_METRICS:
         mean_col = f"{m}_mean"
         gen_med = df_per_tree[mean_col].median() if mean_col in df_per_tree.columns else float("nan")
@@ -1230,16 +1481,20 @@ def build_table_a(
         inter_med = df_inter[mean_col].median() if mean_col in df_inter.columns else float("nan")
         ratio = gen_med / intra_med if pd.notna(intra_med) and intra_med > 0 else float("nan")
 
-        layer = "1 (paired)" if m == "reconstruction_cd" else "2 (paired)"
+        display = METRIC_DISPLAY.get(m, m)
+        if isinstance(display, tuple):
+            display_name = f"{display[0]} ({display[1]})" if display[1] else display[0]
+        else:
+            display_name = display
+
         rows.append({
-            "layer": layer,
             "metric": m,
-            "gen_vs_real": gen_med,
-            "intra_class": intra_med,
-            "inter_class": inter_med,
+            "display_name": display_name,
+            "gen": gen_med,
+            "intra": intra_med,
+            "inter": inter_med,
             "ratio": ratio,
         })
-
     return pd.DataFrame(rows)
 
 
@@ -1248,10 +1503,28 @@ def _build_stratified_table(
     df_intra: pd.DataFrame,
     df_inter: pd.DataFrame,
     group_col: str,
+    population_metrics: dict | None = None,
+    morph_w1: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Build stratified table for a given grouping column."""
+    """Build stratified table with population + conditioning fidelity columns.
+
+    Population side: COV, 1-NNA, Diversity ratio, W1 crown_volume, W1 hcb.
+    Conditioning side: CD ratio, Vert KDE ratio, Hist 2D ratio.
+    """
     rows = []
     groups = sorted(df_per_tree[group_col].dropna().unique())
+
+    # Map group_col to population_metrics key
+    pop_key_map = {"species": "by_species", "height_bin": "by_height_bin"}
+    pop_dict = {}
+    if population_metrics and pop_key_map.get(group_col) in population_metrics:
+        pop_dict = population_metrics[pop_key_map[group_col]]
+
+    # Map morph W1 by group
+    morph_w1_map = {}
+    if morph_w1 is not None and not morph_w1.empty and group_col in morph_w1.columns:
+        for g_val, grp in morph_w1.groupby(group_col):
+            morph_w1_map[g_val] = {r["property"]: r["wasserstein"] for _, r in grp.iterrows()}
 
     for g in groups:
         gen_grp = df_per_tree[df_per_tree[group_col] == g]
@@ -1259,27 +1532,42 @@ def _build_stratified_table(
         n_trees = len(gen_grp)
 
         row = {group_col: g, "n_trees": n_trees}
-        for m in PAIR_METRICS:
+
+        # Population metrics for this stratum
+        pop = pop_dict.get(str(g), {})
+        row["coverage"] = pop.get("coverage", float("nan"))
+        row["one_nna"] = pop.get("one_nna", float("nan"))
+        row["diversity_ratio"] = pop.get("diversity_ratio", float("nan"))
+
+        # Morphological W1
+        mw1 = morph_w1_map.get(g, {})
+        row["w1_crown_volume"] = mw1.get("crown_volume", float("nan"))
+        row["w1_hcb"] = mw1.get("hcb", float("nan"))
+
+        # Conditioning fidelity ratios (CD, Vert KDE, Hist 2D only)
+        cond_metrics = ["reconstruction_cd", "vert_kde_jsd", "hist_2d_jsd"]
+        for m in cond_metrics:
             mean_col = f"{m}_mean"
             gen_med = gen_grp[mean_col].median() if mean_col in gen_grp.columns else float("nan")
             intra_med = intra_grp[mean_col].median() if mean_col in intra_grp.columns else float("nan")
             ratio = gen_med / intra_med if pd.notna(intra_med) and intra_med > 0 else float("nan")
-            row[f"{m}_gen"] = gen_med
-            row[f"{m}_intra"] = intra_med
             row[f"{m}_ratio"] = ratio
+
         rows.append(row)
 
     return pd.DataFrame(rows)
 
 
-def build_table_b(df_per_tree, df_intra, df_inter):
-    """Table B: By Species."""
-    return _build_stratified_table(df_per_tree, df_intra, df_inter, "species")
+def build_table_b(df_per_tree, df_intra, df_inter, population_metrics=None, morph_w1=None):
+    """Table 2: By genus (using species column, which contains genus-level grouping)."""
+    return _build_stratified_table(df_per_tree, df_intra, df_inter, "species",
+                                   population_metrics=population_metrics, morph_w1=morph_w1)
 
 
-def build_table_c(df_per_tree, df_intra, df_inter):
-    """Table C: By Height Bin."""
-    return _build_stratified_table(df_per_tree, df_intra, df_inter, "height_bin")
+def build_table_c(df_per_tree, df_intra, df_inter, population_metrics=None, morph_w1=None):
+    """Table 3: By Height Bin."""
+    return _build_stratified_table(df_per_tree, df_intra, df_inter, "height_bin",
+                                   population_metrics=population_metrics, morph_w1=morph_w1)
 
 
 def build_table_e(df_pairs: pd.DataFrame) -> pd.DataFrame:
@@ -1321,6 +1609,7 @@ def save_results(
     population_metrics: dict,
     stat_tests: dict,
     tables: dict,
+    outlier_clipping_info: dict | None = None,
 ):
     """Save all evaluation results."""
     output_dir = Path(output_dir)
@@ -1373,6 +1662,8 @@ def save_results(
         "population_metrics": population_metrics,
         "statistical_tests": stat_tests,
     }
+    if outlier_clipping_info:
+        summary["outlier_clipping"] = outlier_clipping_info
     with open(output_dir / "evaluation_v2_summary.json", "w") as f:
         json.dump(summary, f, indent=2, default=str)
     print("  Saved evaluation_v2_summary.json")
@@ -1396,50 +1687,162 @@ def print_results(
     print("EVALUATION v2 RESULTS")
     print("=" * 80)
 
-    # Table A
-    table_a = tables.get("table_a_global")
-    if table_a is not None and not table_a.empty:
-        print("\nTABLE A: GLOBAL SUMMARY")
-        print("-" * 80)
-        header = f"{'Layer':<16s} {'Metric':<28s} {'Gen vs Real':>12s} {'Intra':>12s} {'Inter':>12s} {'Ratio':>8s}"
+    # ── Table 1(a): Population metrics ──
+    table_1a = tables.get("table_1a")
+    if table_1a is not None and not table_1a.empty:
+        print("\nTABLE 1: GLOBAL EVALUATION SUMMARY")
+        print("\n(a) Population metrics")
+        print("\u2500" * 60)
+        header = f"  {'':>34s} {'Value':>10s}  {'Ideal':>8s}"
         print(header)
-        print("-" * 80)
-        for _, row in table_a.iterrows():
-            metric_name = row['metric']
-            unit = PAIR_METRIC_UNITS.get(metric_name, "")
-            display_name = f"{metric_name} ({unit})" if unit else metric_name
-            gen_v = f"{row['gen_vs_real']:.6f}" if pd.notna(row['gen_vs_real']) else "--"
-            intra_v = f"{row['intra_class']:.6f}" if pd.notna(row['intra_class']) else "--"
-            inter_v = f"{row['inter_class']:.6f}" if pd.notna(row['inter_class']) else "--"
+        print("\u2500" * 60)
+        prev_section = None
+        for _, row in table_1a.iterrows():
+            if row["section"] != prev_section:
+                print(f"  {row['section']}")
+                prev_section = row["section"]
+            val = f"{row['value']:.4f}" if pd.notna(row["value"]) else "--"
+            ideal = row["ideal"]
+            if ideal == 0.63:
+                ideal_s = "0.63\u2020"
+            elif ideal == 0:
+                ideal_s = "0"
+            else:
+                ideal_s = f"{ideal:.2f}"
+            print(f"    {row['display_name']:<30s} {val:>10s}  {ideal_s:>8s}")
+        print("\u2500" * 60)
+
+    # ── Table 1(b): Conditioning fidelity ──
+    table_1b = tables.get("table_1b")
+    if table_1b is not None and not table_1b.empty:
+        print("\n(b) Conditioning fidelity \u2014 stratum medians")
+        print("\u2500" * 72)
+        header = f"  {'Metric':<32s} {'Gen':>8s} {'Intra':>8s} {'Inter':>8s} {'G/I':>6s}"
+        print(header)
+        print("\u2500" * 72)
+        for _, row in table_1b.iterrows():
+            gen_v = f"{row['gen']:.4f}" if pd.notna(row['gen']) else "--"
+            intra_v = f"{row['intra']:.4f}" if pd.notna(row['intra']) else "--"
+            inter_v = f"{row['inter']:.4f}" if pd.notna(row['inter']) else "--"
             ratio_v = f"{row['ratio']:.2f}" if pd.notna(row['ratio']) else "--"
-            print(f"{row['layer']:<16s} {display_name:<28s} {gen_v:>12s} {intra_v:>12s} {inter_v:>12s} {ratio_v:>8s}")
+            print(f"  {row['display_name']:<32s} {gen_v:>8s} {intra_v:>8s} {inter_v:>8s} {ratio_v:>6s}")
+        print("\u2500" * 72)
 
-    # Statistical tests
+    # ── Statistical tests (Wasserstein) ──
     if stat_tests:
-        print(f"\nSTATISTICAL TESTS (gen vs intra)")
-        print("-" * 80)
-        header = f"{'Metric':<28s} {'Wasserstein':>12s}"
-        print(header)
+        print(f"\nWASSERSTEIN DISTANCES (gen vs intra, P99-clipped)")
+        print("-" * 50)
         for m, vals in stat_tests.items():
-            print(f"{m:<28s} {vals['wasserstein']:>12.6f}")
+            display = METRIC_DISPLAY.get(m, m)
+            if isinstance(display, tuple):
+                name = f"{display[0]} ({display[1]})" if display[1] else display[0]
+            else:
+                name = display
+            print(f"  {name:<34s} {vals['wasserstein']:>10.4f}")
 
-    # Stratified tables summary
-    for name in ["table_b_species", "table_c_height"]:
-        df = tables.get(name)
-        if df is not None and not df.empty:
-            key_col = df.columns[0]
-            print(f"\n{name.upper().replace('_', ' ')}:")
-            print(f"  {len(df)} strata, key column: {key_col}")
-            # Print first metric ratio
-            ratio_col = f"{PAIR_METRICS[0]}_ratio"
-            if ratio_col in df.columns:
-                for _, row in df.iterrows():
-                    n = row.get("n_trees", 0)
-                    ratio = row.get(ratio_col, float("nan"))
-                    ratio_str = f"{ratio:.2f}" if pd.notna(ratio) else "--"
-                    print(f"    {str(row[key_col]):<25s}  n={int(n):>5d}  CD ratio={ratio_str}")
+    # ── Table 2 (by genus/species) ──
+    table_b = tables.get("table_b_species")
+    if table_b is not None and not table_b.empty:
+        _print_stratified_table(table_b, "TABLE 2: BY GENUS", "species")
+
+    # ── Table 3 (by height bin) ──
+    table_c = tables.get("table_c_height")
+    if table_c is not None and not table_c.empty:
+        _print_stratified_table(table_c, "TABLE 3: BY HEIGHT BIN", "height_bin")
+
+    # ── Interpretive flags (Change 5) ──
+    if table_1b is not None and not table_1b.empty:
+        flags = []
+        for _, row in table_1b.iterrows():
+            if pd.isna(row.get("ratio")):
+                continue
+            r = row["ratio"]
+            m = row["display_name"]
+            if r < 0.75:
+                flags.append(f"  * {m}: ratio={r:.2f} — gen substantially below intra. "
+                             f"May indicate reduced diversity in this metric.")
+            elif r > 1.20:
+                flags.append(f"  * {m}: ratio={r:.2f} — gen exceeds intra. "
+                             f"Model struggles with this metric.")
+        if flags:
+            print("\nInterpretation notes:")
+            for f in flags:
+                print(f)
+
+    # ── Synthesis (Change 6) ──
+    glob = population_metrics.get("global", {})
+    cov = glob.get("coverage", float("nan"))
+    nna = glob.get("one_nna", float("nan"))
+    div_r = glob.get("diversity_ratio", float("nan"))
+
+    ratios = []
+    if table_1b is not None and not table_1b.empty:
+        ratios = [row["ratio"] for _, row in table_1b.iterrows()
+                  if pd.notna(row.get("ratio"))]
+    median_ratio = float(np.median(ratios)) if ratios else float("nan")
 
     print("\n" + "=" * 80)
+    print("SYNTHESIS")
+    print("=" * 80)
+    print(f"  Median conditioning fidelity ratio: {median_ratio:.2f}")
+    print(f"  Population coverage: {cov:.2f} (ideal ~ 0.63)")
+    print(f"  1-NNA accuracy: {nna:.2f} (ideal = 0.50)")
+    print(f"  Diversity ratio: {div_r:.2f} (ideal = 1.00)")
+    for prop in ["crown_volume", "max_crown_r", "hcb"]:
+        w1_key = f"w1_{prop}"
+        w1_val = glob.get(w1_key, float("nan"))
+        if pd.notna(w1_val):
+            print(f"  W\u2081 {prop}: {w1_val:.2f}")
+
+    if pd.notna(median_ratio) and pd.notna(cov):
+        if median_ratio < 1.0 and cov < 0.55:
+            print(f"\n  Assessment: Model captures class-conditional structure "
+                  f"(median ratio {median_ratio:.2f}) but underrepresents")
+            print(f"  morphological diversity (COV {cov:.2f}, diversity ratio {div_r:.2f}).")
+            print(f"  Generated trees are plausible but less variable than real populations.")
+        elif median_ratio < 1.0 and cov >= 0.55:
+            print(f"\n  Assessment: Model faithfully captures both structure and diversity.")
+        else:
+            print(f"\n  Assessment: Model shows conditioning-dependent quality variation.")
+            print(f"  See per-stratum tables for detailed breakdown.")
+
+    print("\n" + "=" * 80)
+
+
+def _print_stratified_table(df: pd.DataFrame, title: str, key_col: str):
+    """Print a stratified table with population + conditioning columns."""
+    print(f"\n{title}")
+    print("\u2500" * 110)
+    # Header
+    header = (f"  {key_col:<15s} {'n':>4s} "
+              f"{'COV':>6s} {'1-NNA':>6s} {'Div.':>6s} "
+              f"{'W\u2081 CrV':>8s} {'W\u2081 HCB':>8s} "
+              f"{'CD':>6s} {'Vert.':>6s} {'Hist.':>6s}")
+    print(header)
+    print(f"  {'':>15s} {'':>4s} "
+          f"{'--- Population ---':^20s} "
+          f"{'--- W\u2081 ---':^18s} "
+          f"{'-- G/I ratio --':^20s}")
+    print("\u2500" * 110)
+
+    for _, row in df.iterrows():
+        n = int(row.get("n_trees", 0))
+        cov = f"{row['coverage']:.2f}" if pd.notna(row.get('coverage')) else "--"
+        nna = f"{row['one_nna']:.2f}" if pd.notna(row.get('one_nna')) else "--"
+        div_r = f"{row['diversity_ratio']:.2f}" if pd.notna(row.get('diversity_ratio')) else "--"
+        w1_cv = f"{row['w1_crown_volume']:.1f}" if pd.notna(row.get('w1_crown_volume')) else "--"
+        w1_hcb = f"{row['w1_hcb']:.2f}" if pd.notna(row.get('w1_hcb')) else "--"
+        cd_r = f"{row['reconstruction_cd_ratio']:.2f}" if pd.notna(row.get('reconstruction_cd_ratio')) else "--"
+        vert_r = f"{row['vert_kde_jsd_ratio']:.2f}" if pd.notna(row.get('vert_kde_jsd_ratio')) else "--"
+        hist_r = f"{row['hist_2d_jsd_ratio']:.2f}" if pd.notna(row.get('hist_2d_jsd_ratio')) else "--"
+
+        label = str(row[key_col])[:15]
+        print(f"  {label:<15s} {n:>4d} "
+              f"{cov:>6s} {nna:>6s} {div_r:>6s} "
+              f"{w1_cv:>8s} {w1_hcb:>8s} "
+              f"{cd_r:>6s} {vert_r:>6s} {hist_r:>6s}")
+
+    print("\u2500" * 110)
 
 
 # =============================================================================
@@ -1465,6 +1868,8 @@ def main():
                         help="Stem tracker height bins")
     parser.add_argument("--resume", action="store_true",
                         help="Skip metric extraction if parquet files exist")
+    parser.add_argument("--scan_diagnostic", action="store_true",
+                        help="Run scan-type confound diagnostic (one-off)")
 
     args = parser.parse_args()
 
@@ -1590,6 +1995,59 @@ def main():
             spine_bins=args.spine_bins,
         )
 
+    # Ensure df_gen has height_bin for stratified morphological W1
+    if "height_bin" not in df_gen.columns and "height_m" in df_gen.columns:
+        df_gen["height_bin"] = df_gen["height_m"].apply(get_height_bin)
+
+    # =========================================================================
+    # 3.5. Outlier clipping (must precede all downstream computation)
+    # =========================================================================
+    # Crown volume and max_crown_r outlier cap: P99 of real tree distributions.
+    # Stem tracker polynomial spine can diverge on trees with complex branching
+    # (e.g., large broadleaves), producing crown volumes orders of magnitude
+    # beyond physical plausibility (e.g., 500,000 m³ for a 40m tree whose true
+    # crown volume is ~2,000 m³). We cap at P99 of the real distribution, which
+    # is robust to the small number of failures. This cap is applied identically
+    # to real and generated metrics before any downstream computation (deltas,
+    # baselines, Wasserstein, tables).
+    # Affected metrics: crown_volume, max_crown_r, and their downstream deltas.
+    # NOT affected: CD, JSD, vert_kde — computed from raw point clouds.
+    # See paper Section X.X for full discussion.
+    print("\n" + "=" * 60)
+    print("OUTLIER CLIPPING")
+    print("=" * 60)
+
+    crown_vol_cap = float(df_real["crown_volume"].quantile(0.99))
+    print(f"  Crown volume cap (P99 of real): {crown_vol_cap:.1f} m³")
+
+    n_clipped_real_vol = int((df_real["crown_volume"] > crown_vol_cap).sum())
+    n_clipped_gen_vol = int((df_gen["crown_volume"] > crown_vol_cap).sum())
+    df_real["crown_volume"] = df_real["crown_volume"].clip(upper=crown_vol_cap)
+    df_gen["crown_volume"] = df_gen["crown_volume"].clip(upper=crown_vol_cap)
+    print(f"  Clipped {n_clipped_real_vol} real + {n_clipped_gen_vol} gen trees "
+          f"to crown_vol_cap={crown_vol_cap:.1f} m³")
+
+    crown_r_cap = float(df_real["max_crown_r"].quantile(0.99))
+    n_clipped_real_r = int((df_real["max_crown_r"] > crown_r_cap).sum())
+    n_clipped_gen_r = int((df_gen["max_crown_r"] > crown_r_cap).sum())
+    df_real["max_crown_r"] = df_real["max_crown_r"].clip(upper=crown_r_cap)
+    df_gen["max_crown_r"] = df_gen["max_crown_r"].clip(upper=crown_r_cap)
+    print(f"  Clipped {n_clipped_real_r} real + {n_clipped_gen_r} gen trees "
+          f"to crown_r_cap={crown_r_cap:.2f} m")
+
+    outlier_clipping_info = {
+        "crown_vol_cap_m3": crown_vol_cap,
+        "crown_r_cap_m": crown_r_cap,
+        "n_real_clipped_vol": n_clipped_real_vol,
+        "n_gen_clipped_vol": n_clipped_gen_vol,
+        "n_real_clipped_r": n_clipped_real_r,
+        "n_gen_clipped_r": n_clipped_gen_r,
+        "method": "P99 of real tree distribution, applied identically to real and gen",
+        "rationale": "Stem tracker polynomial spine diverges on trees with complex "
+                     "branching, producing crown volumes orders of magnitude beyond "
+                     "physical plausibility. Affects <2% of trees.",
+    }
+
     # =========================================================================
     # 4. Build df_pairs
     # =========================================================================
@@ -1626,6 +2084,24 @@ def main():
                                     num_workers=args.num_workers, seed=args.seed + 2000)
 
     # =========================================================================
+    # 6.5. Scan-type confound diagnostic (optional, one-off)
+    # =========================================================================
+    if args.scan_diagnostic:
+        print("\n" + "=" * 60)
+        print("SCAN-TYPE CONFOUND DIAGNOSTIC")
+        print("=" * 60)
+
+        scan_diag = compute_scan_type_diagnostic(
+            df_real, real_clouds,
+            num_workers=args.num_workers, seed=args.seed,
+        )
+        scan_diag_path = output_dir / "scan_type_diagnostic.json"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with open(scan_diag_path, "w") as f:
+            json.dump(scan_diag, f, indent=2, default=str)
+        print(f"  Saved {scan_diag_path}")
+
+    # =========================================================================
     # 7. Population metrics
     # =========================================================================
     if args.skip_layer1:
@@ -1651,16 +2127,36 @@ def main():
     stat_tests = compute_statistical_tests(df_per_tree, df_intra)
 
     # =========================================================================
-    # 9. Build tables
+    # 9. Morphological Wasserstein + Build tables
     # =========================================================================
     print("\n" + "=" * 60)
-    print("BUILDING TABLES")
+    print("MORPHOLOGICAL WASSERSTEIN + BUILDING TABLES")
     print("=" * 60)
 
+    # Compute morphological W1 at global and per-stratum levels
+    morph_w1_global = compute_morphological_wasserstein(df_real, df_gen, stratum_cols=None)
+    morph_w1_species = compute_morphological_wasserstein(df_real, df_gen, stratum_cols=["species"])
+    morph_w1_height = compute_morphological_wasserstein(df_real, df_gen, stratum_cols=["height_bin"])
+
+    if not morph_w1_global.empty:
+        print("  Morphological W\u2081 (global):")
+        for _, row in morph_w1_global.iterrows():
+            print(f"    {row['property']}: {row['wasserstein']:.4f}")
+
+    # Store global W1 values in population_metrics for downstream access
+    if population_metrics.get("global") and not morph_w1_global.empty:
+        for _, row in morph_w1_global.iterrows():
+            population_metrics["global"][f"w1_{row['property']}"] = row["wasserstein"]
+
     tables = {
-        "table_a_global": build_table_a(df_per_tree, df_intra, df_inter, population_metrics),
-        "table_b_species": build_table_b(df_per_tree, df_intra, df_inter),
-        "table_c_height": build_table_c(df_per_tree, df_intra, df_inter),
+        "table_1a": build_table_1a(population_metrics, morph_w1_global),
+        "table_1b": build_table_1b(df_per_tree, df_intra, df_inter),
+        "table_b_species": build_table_b(df_per_tree, df_intra, df_inter,
+                                          population_metrics=population_metrics,
+                                          morph_w1=morph_w1_species),
+        "table_c_height": build_table_c(df_per_tree, df_intra, df_inter,
+                                         population_metrics=population_metrics,
+                                         morph_w1=morph_w1_height),
         "table_e_cfg": build_table_e(df_pairs),
     }
 
@@ -1674,6 +2170,7 @@ def main():
     save_results(
         output_dir, df_real, df_gen, df_pairs, df_per_tree,
         df_intra, df_inter, population_metrics, stat_tests, tables,
+        outlier_clipping_info=outlier_clipping_info,
     )
 
     print_results(df_per_tree, df_intra, df_inter, population_metrics, stat_tests, tables)
