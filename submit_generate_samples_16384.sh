@@ -14,7 +14,7 @@ module load cuda
 source /project/umontana_fire_modeling/anthony.marcozzi/miniforge3/etc/profile.d/conda.sh
 conda activate treeflow
 
-TOTAL_TREES=1631
+TOTAL_TREES=1271
 NUM_TASKS=8
 TREES_PER_TASK=$(( (TOTAL_TREES + NUM_TASKS - 1) / NUM_TASKS ))
 START_IDX=$(( SLURM_ARRAY_TASK_ID * TREES_PER_TASK ))
