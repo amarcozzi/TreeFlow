@@ -306,7 +306,6 @@ def generate_samples(args):
         checkpoint_path = checkpoint_dir / args.checkpoint
     model = load_checkpoint(checkpoint_path, model, device)
     model.eval()
-    model = model.to(dtype=torch.bfloat16)
 
     # Create output directories
     zarr_dir = output_dir / "zarr"

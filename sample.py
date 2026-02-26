@@ -76,41 +76,42 @@ def sample_conditional(
             return x_final[0]
         return x_final
 
-    # Infer dtype from model parameters
-    model_dtype = next(model.parameters()).dtype
-
     # Prepare batch (all samples share same conditioning except CFG)
-    x_init = torch.randn(num_samples, num_points, 3, device=device, dtype=model_dtype)
+    x_init = torch.randn(num_samples, num_points, 3, device=device)
     s_tensor = torch.full((num_samples,), species_idx, device=device, dtype=torch.long)
     t_tensor = torch.full((num_samples,), type_idx, device=device, dtype=torch.long)
     h_val_log = np.log(target_height + 1e-6)
-    h_tensor = torch.full((num_samples,), h_val_log, device=device, dtype=model_dtype)
+    h_tensor = torch.full((num_samples,), h_val_log, device=device, dtype=torch.float32)
 
     # Convert cfg_values to tensor for vectorized operations
-    cfg_tensor = torch.tensor(cfg_values, device=device, dtype=model_dtype)
+    cfg_tensor = torch.tensor(cfg_values, device=device, dtype=torch.float32)
 
     # Check if we can skip conditional pass (all cfg values are 0)
     all_cfg_zero = (cfg_tensor == 0).all().item()
+
+    # Detect if CUDA is available for autocast
+    use_autocast = device.type == "cuda"
 
     # ODE Function with per-sample CFG
     def ode_fn(t, x):
         bs = x.shape[0]
         t_batch = torch.full((bs,), t, device=device, dtype=x.dtype)
 
-        # 1. Unconditional Pass
-        drop_mask_uncond = torch.ones(bs, dtype=torch.bool, device=device)
-        v_uncond = model(
-            x, t_batch, s_tensor, t_tensor, h_tensor, drop_mask=drop_mask_uncond
-        )
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_autocast):
+            # 1. Unconditional Pass
+            drop_mask_uncond = torch.ones(bs, dtype=torch.bool, device=device)
+            v_uncond = model(
+                x, t_batch, s_tensor, t_tensor, h_tensor, drop_mask=drop_mask_uncond
+            )
 
-        # 2. Conditional Pass (skip if all CFG values are 0)
-        if all_cfg_zero:
-            return v_uncond
+            # 2. Conditional Pass (skip if all CFG values are 0)
+            if all_cfg_zero:
+                return v_uncond
 
-        drop_mask_cond = torch.zeros(bs, dtype=torch.bool, device=device)
-        v_cond = model(
-            x, t_batch, s_tensor, t_tensor, h_tensor, drop_mask=drop_mask_cond
-        )
+            drop_mask_cond = torch.zeros(bs, dtype=torch.bool, device=device)
+            v_cond = model(
+                x, t_batch, s_tensor, t_tensor, h_tensor, drop_mask=drop_mask_cond
+            )
 
         # Apply per-sample CFG scaling: v = v_uncond + cfg * (v_cond - v_uncond)
         # cfg_tensor shape: (num_samples,) -> (num_samples, 1, 1)
