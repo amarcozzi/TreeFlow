@@ -29,6 +29,7 @@ from pathlib import Path
 from scipy.spatial import ConvexHull
 from scipy.spatial.distance import cdist
 from scipy.stats import gaussian_kde, wasserstein_distance
+from kneed import KneeLocator
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 
@@ -207,9 +208,9 @@ def extract_features(cloud: np.ndarray, height_m: float) -> dict:
         cumr = np.cumsum(mean_r_per_slice)
         x_norm = (slice_centers - slice_centers[0]) / (slice_centers[-1] - slice_centers[0])
         y_norm = (cumr - cumr[0]) / (cumr[-1] - cumr[0])
-        d = x_norm - y_norm
-        knee_idx = int(np.argmax(d))
-        hcb_val = slice_centers[knee_idx] / s_max
+        kl = KneeLocator(x_norm, y_norm, curve="convex", direction="increasing", S=1.0)
+        if kl.knee is not None:
+            hcb_val = kl.knee  # already in [0, 1] normalized arc-length
 
     return {
         "hull_volume":  hull_volume,
