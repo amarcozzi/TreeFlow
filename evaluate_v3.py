@@ -247,21 +247,42 @@ def load_metadata(data_path: Path, experiment_dir: Path) -> tuple[pd.DataFrame, 
 
 # ── Build the core dataframe ─────────────────────────────────────────────────
 
+def _clip_features(feats: dict) -> dict:
+    """Apply hard physical caps to extracted features in-place.
+
+    Catches stem tracker failures (polynomial spine divergence) that produce
+    crown volumes or radii orders of magnitude beyond physical plausibility.
+    """
+    n_vol = n_r = 0
+    for f in feats.values():
+        if f["crown_volume"] > HARD_CAP_CROWN_VOL:
+            f["crown_volume"] = HARD_CAP_CROWN_VOL
+            n_vol += 1
+        if f["max_crown_r"] > HARD_CAP_CROWN_R:
+            f["max_crown_r"] = HARD_CAP_CROWN_R
+            n_r += 1
+    if n_vol + n_r > 0:
+        print(f"    Clipped {n_vol} crown_volume, {n_r} max_crown_r")
+    return {"n_clipped_vol": n_vol, "n_clipped_r": n_r}
+
+
 def build_pair_dataframe(
     real_meta: pd.DataFrame,
     gen_meta: pd.DataFrame,
-    data_path: Path,
     zarr_dir: Path,
     max_points: int,
     num_workers: int,
     seed: int,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
     """Extract features for all trees and build the pair dataframe.
 
-    Returns (df_pairs, df_real_feats, df_gen_feats).
+    Hard physical caps are applied to features BEFORE computing deltas,
+    so all downstream consumers (pairs, baselines, W₁) see clipped values.
+
+    Returns (df_pairs, df_real_feats, df_gen_feats, clip_info).
     df_pairs has one row per generated tree with columns:
-        real_id, gen_id, genus, species, height_bin, scan_type,
-        delta_crown_vol, delta_max_crown_r, delta_hcb,
+        real_id, gen_id, genus, species, height_bin, scan_type, height_m,
+        cfg_scale, delta_crown_vol, delta_max_crown_r, delta_hcb,
         vert_kde_jsd, hist_2d_jsd
     """
     # Extract real features
@@ -276,8 +297,7 @@ def build_pair_dataframe(
     # Build real feature lookup
     real_feats = {}
     for r in real_results:
-        tid = r["tree_id"]
-        real_feats[tid] = r
+        real_feats[r["tree_id"]] = r
 
     # Extract generated features
     gen_tasks = [
@@ -294,13 +314,27 @@ def build_pair_dataframe(
     for r in gen_results:
         gen_feats[r["tree_id"]] = r
 
+    # Apply hard physical caps BEFORE computing deltas
+    print("  Applying hard caps (real)...")
+    clip_real = _clip_features(real_feats)
+    print("  Applying hard caps (gen)...")
+    clip_gen = _clip_features(gen_feats)
+    clip_info = {
+        "real_clipped_vol": clip_real["n_clipped_vol"],
+        "real_clipped_r": clip_real["n_clipped_r"],
+        "gen_clipped_vol": clip_gen["n_clipped_vol"],
+        "gen_clipped_r": clip_gen["n_clipped_r"],
+        "crown_vol_cap_m3": HARD_CAP_CROWN_VOL,
+        "crown_r_cap_m": HARD_CAP_CROWN_R,
+    }
+
     # Build gen_id → metadata lookup
     gen_id_to_meta = {}
     for _, row in gen_meta.iterrows():
         gid = Path(row["sample_file"]).stem
         gen_id_to_meta[gid] = row
 
-    # Build pair rows
+    # Build pair rows (deltas computed from already-clipped features)
     rows = []
     for gid, gf in gen_feats.items():
         meta = gen_id_to_meta.get(gid)
@@ -318,6 +352,8 @@ def build_pair_dataframe(
             "species": meta.get("species", "unknown"),
             "height_bin": meta.get("height_bin", "unknown"),
             "scan_type": meta.get("scan_type", "unknown"),
+            "height_m": float(meta.get("height_m", 0)),
+            "cfg_scale": float(meta.get("cfg_scale", 0)),
             "delta_crown_vol":   abs(gf["crown_volume"] - rf["crown_volume"]),
             "delta_max_crown_r": abs(gf["max_crown_r"]  - rf["max_crown_r"]),
             "delta_hcb":         abs(gf["hcb"]          - rf["hcb"]),
@@ -330,6 +366,7 @@ def build_pair_dataframe(
           f"{df_pairs['real_id'].nunique()} unique real trees")
 
     # Build feature dataframes for downstream (W₁, baselines)
+    # These use already-clipped values from real_feats / gen_feats.
     df_real_feats = pd.DataFrame([
         {"tree_id": tid, "crown_volume": r["crown_volume"],
          "max_crown_r": r["max_crown_r"], "hcb": r["hcb"],
@@ -356,34 +393,7 @@ def build_pair_dataframe(
             lambda x, c=col: id_to_row.loc[x, c] if x in id_to_row.index else "unknown"
         )
 
-    return df_pairs, df_real_feats, df_gen_feats
-
-
-# ── Outlier clipping ─────────────────────────────────────────────────────────
-
-def apply_hard_caps(df_pairs: pd.DataFrame, df_real: pd.DataFrame, df_gen: pd.DataFrame):
-    """Apply hard physical caps in-place. Returns clipping summary dict."""
-    info = {}
-    for df, label in [(df_real, "real"), (df_gen, "gen")]:
-        n_vol = int((df["crown_volume"] > HARD_CAP_CROWN_VOL).sum())
-        n_r   = int((df["max_crown_r"]  > HARD_CAP_CROWN_R).sum())
-        df["crown_volume"] = df["crown_volume"].clip(upper=HARD_CAP_CROWN_VOL)
-        df["max_crown_r"]  = df["max_crown_r"].clip(upper=HARD_CAP_CROWN_R)
-        info[f"{label}_clipped_vol"] = n_vol
-        info[f"{label}_clipped_r"] = n_r
-        if n_vol + n_r > 0:
-            print(f"  Clipped {label}: {n_vol} crown_volume, {n_r} max_crown_r")
-
-    # Re-derive deltas in df_pairs from clipped feature values
-    # (simpler to just clip the deltas directly — same effect since
-    #  |clip(a) - clip(b)| ≤ |a - b|, and we cap the features not deltas)
-    # Actually, the deltas were computed before clipping, so recompute
-    # is the honest approach. But that requires re-joining. Instead,
-    # just cap the delta columns at the cap values.
-    df_pairs["delta_crown_vol"]   = df_pairs["delta_crown_vol"].clip(upper=HARD_CAP_CROWN_VOL)
-    df_pairs["delta_max_crown_r"] = df_pairs["delta_max_crown_r"].clip(upper=HARD_CAP_CROWN_R)
-
-    return info
+    return df_pairs, df_real_feats, df_gen_feats, clip_info
 
 
 # ── Baselines ────────────────────────────────────────────────────────────────
@@ -502,7 +512,13 @@ def compute_population_w1(
 # ── Table building ───────────────────────────────────────────────────────────
 
 def _median_per_tree(df_pairs: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate pairs to per-tree medians, then return those medians."""
+    """Median of each metric across the K generations per conditioning tree.
+
+    Returns a DataFrame indexed by real_id with one row per conditioning tree.
+    Downstream tables then take the median of these per-tree medians, so each
+    conditioning tree contributes equally regardless of how many generations
+    survived filtering.
+    """
     return df_pairs.groupby("real_id")[METRICS].median()
 
 
@@ -666,6 +682,7 @@ def save_results(
     w1_genus: pd.DataFrame,
     w1_height: pd.DataFrame,
     clip_info: dict,
+    run_args: dict | None = None,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -698,6 +715,8 @@ def save_results(
         "n_gen_trees": len(df_pairs),
         "outlier_clipping": clip_info,
     }
+    if run_args:
+        summary["args"] = run_args
     with open(output_dir / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
     print(f"  Saved summary.json")
@@ -738,32 +757,28 @@ def main():
     # 1. Load metadata
     real_meta, gen_meta = load_metadata(data_path, experiment_dir)
 
-    # 2. Extract features and build pair dataframe
-    df_pairs, df_real_feats, df_gen_feats = build_pair_dataframe(
-        real_meta, gen_meta, data_path, zarr_dir,
+    # 2. Extract features, apply hard caps, build pair dataframe
+    df_pairs, df_real_feats, df_gen_feats, clip_info = build_pair_dataframe(
+        real_meta, gen_meta, zarr_dir,
         max_points=args.max_points, num_workers=args.num_workers, seed=args.seed,
     )
     if df_pairs.empty:
         print("ERROR: No valid pairs. Check data paths.")
         return
 
-    # 3. Outlier clipping
-    print("\nApplying hard physical caps...")
-    clip_info = apply_hard_caps(df_pairs, df_real_feats, df_gen_feats)
-
-    # 4. Baselines
+    # 3. Baselines
     print()
     df_intra, df_inter = build_baselines(
         df_real_feats, seed=args.seed + 1000,
     )
 
-    # 5. Population W₁
+    # 4. Population W₁
     print("\nComputing population W₁...")
     w1_global = compute_population_w1(df_real_feats, df_gen_feats)
     w1_genus  = compute_population_w1(df_real_feats, df_gen_feats, group_col="genus")
     w1_height = compute_population_w1(df_real_feats, df_gen_feats, group_col="height_bin")
 
-    # 6. Build tables
+    # 5. Build tables
     print("\nBuilding tables...")
     # Add group columns to df_pairs for stratified tables
     id_to_genus = df_real_feats["genus"].to_dict()
@@ -794,7 +809,8 @@ def main():
     # 8. Save
     print(f"\nSaving results to {output_dir}...")
     save_results(output_dir, df_pairs, df_real_feats, df_gen_feats,
-                 tables, w1_global, w1_genus, w1_height, clip_info)
+                 tables, w1_global, w1_genus, w1_height, clip_info,
+                 run_args=vars(args))
 
     elapsed = time.time() - t_start
     print(f"\nDone in {elapsed:.1f}s ({elapsed / 60:.1f} min)")
