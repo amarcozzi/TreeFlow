@@ -2104,12 +2104,12 @@ def create_figure_crown_audit(
         if mean_r_per_slice.max() > 0 and not np.allclose(
             mean_r_per_slice, mean_r_per_slice[0]
         ):
-            cumr = np.cumsum(mean_r_per_slice**2)
+            cumr = np.cumsum(mean_r_per_slice)
             x_norm = (slice_centers - slice_centers[0]) / (
                 slice_centers[-1] - slice_centers[0]
             )
             y_norm = (cumr - cumr[0]) / (cumr[-1] - cumr[0])
-            d = x_norm - y_norm
+            d = (x_norm - y_norm) * (1 - x_norm)
             knee_idx = int(np.argmax(d))
             hcb_val = slice_centers[knee_idx] / s_max
             kneedle_data = {
