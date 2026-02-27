@@ -1689,12 +1689,13 @@ def create_figure_spine_audit(
     from evaluate_v3 import get_height_bin
 
     output_dir = Path(output_dir)
-    eval_dir = Path(experiment_dir) / "samples" / "evaluation"
-    per_pair_csv = eval_dir / "per_pair.csv"
+    eval_dir = Path(experiment_dir) / "samples" / "evaluation_v3"
+    pair_csv = eval_dir / "df_pairs.csv"
     data_path = Path(data_path)
 
-    pair_df = pd.read_csv(per_pair_csv)
-    pair_df["height_bin"] = pair_df["height_m"].apply(get_height_bin)
+    pair_df = pd.read_csv(pair_csv)
+    if "height_bin" not in pair_df.columns:
+        pair_df["height_bin"] = pair_df["height_m"].apply(get_height_bin)
 
     from tqdm import tqdm
 
@@ -1706,10 +1707,10 @@ def create_figure_spine_audit(
     tasks = []
     for (species, height_bin), grp in groups:
         selected_trees = (
-            grp["source_tree_id"]
+            grp["real_id"]
             .drop_duplicates()
             .sample(
-                n=min(trees_per_group, grp["source_tree_id"].nunique()),
+                n=min(trees_per_group, grp["real_id"].nunique()),
                 random_state=seed,
             )
             .tolist()
@@ -1746,7 +1747,7 @@ def create_figure_spine_audit(
             ds_rng = np.random.default_rng(seed)
             ds_idx = ds_rng.choice(len(cloud), size=DOWNSAMPLE_POINTS, replace=False)
             cloud = cloud[ds_idx]
-        tree_row = grp[grp["source_tree_id"] == tree_id].iloc[0]
+        tree_row = grp[grp["real_id"] == tree_id].iloc[0]
         height_m = float(tree_row["height_m"])
 
         # Compute both coordinate systems
@@ -2003,12 +2004,13 @@ def create_figure_crown_audit(
     from evaluate_v3 import get_height_bin
 
     output_dir = Path(output_dir)
-    eval_dir = Path(experiment_dir) / "samples" / "evaluation"
-    per_pair_csv = eval_dir / "per_pair.csv"
+    eval_dir = Path(experiment_dir) / "samples" / "evaluation_v3"
+    pair_csv = eval_dir / "df_pairs.csv"
     data_path = Path(data_path)
 
-    pair_df = pd.read_csv(per_pair_csv)
-    pair_df["height_bin"] = pair_df["height_m"].apply(get_height_bin)
+    pair_df = pd.read_csv(pair_csv)
+    if "height_bin" not in pair_df.columns:
+        pair_df["height_bin"] = pair_df["height_m"].apply(get_height_bin)
 
     from tqdm import tqdm
 
@@ -2018,10 +2020,10 @@ def create_figure_crown_audit(
     tasks = []
     for (species, height_bin), grp in groups:
         selected_trees = (
-            grp["source_tree_id"]
+            grp["real_id"]
             .drop_duplicates()
             .sample(
-                n=min(trees_per_group, grp["source_tree_id"].nunique()),
+                n=min(trees_per_group, grp["real_id"].nunique()),
                 random_state=seed,
             )
             .tolist()
@@ -2058,7 +2060,7 @@ def create_figure_crown_audit(
             ds_rng = np.random.default_rng(seed)
             ds_idx = ds_rng.choice(len(cloud), size=DOWNSAMPLE_POINTS, replace=False)
             cloud = cloud[ds_idx]
-        tree_row = grp[grp["source_tree_id"] == tree_id].iloc[0]
+        tree_row = grp[grp["real_id"] == tree_id].iloc[0]
         height_m = float(tree_row["height_m"])
         scale = height_m / 2.0
 
