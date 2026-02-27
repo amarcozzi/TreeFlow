@@ -10,8 +10,8 @@ Per-pair metrics:
 
 Tables:
   1. Global summary with gen / intra-class / inter-class baselines + W₁
-  2. By genus (G/I ratios + W₁)
-  3. By height bin (G/I ratios + W₁)
+  2. By genus (gen / intra / inter medians + W₁)
+  3. By height bin (gen / intra / inter medians + W₁)
 """
 
 import sys
@@ -494,7 +494,7 @@ def build_table_1(
     """Table 1: Global summary.
 
     For each metric: median across generated trees, intra-class median,
-    inter-class median, Gen/Intra ratio. Plus population W₁.
+    inter-class median. Plus population W₁.
     """
     # Per-tree medians, then global median
     gen_medians = _median_per_tree(df_pairs).median()
@@ -504,15 +504,15 @@ def build_table_1(
 
     lines = []
     lines.append("TABLE 1: GLOBAL SUMMARY")
-    lines.append("=" * 78)
+    lines.append("=" * 72)
 
     # Part A: Conditioning fidelity
     lines.append("")
     lines.append("(a) Conditioning fidelity — median across test trees")
-    lines.append("─" * 78)
-    header = f"  {'Metric':<35s} {'Gen':>8s} {'Intra':>8s} {'Inter':>8s} {'G/I':>7s}"
+    lines.append("─" * 72)
+    header = f"  {'Metric':<35s} {'Gen':>8s} {'Intra':>8s} {'Inter':>8s}"
     lines.append(header)
-    lines.append("─" * 78)
+    lines.append("─" * 72)
 
     for m in METRICS:
         display, unit = METRIC_DISPLAY[m]
@@ -520,26 +520,25 @@ def build_table_1(
         g = gen_medians[m]
         i = intra_medians[m]
         x = inter_medians[m]
-        ratio = g / i if pd.notna(i) and i > 0 else float("nan")
         lines.append(
             f"  {label:<35s} {_format_val(g):>8s} {_format_val(i):>8s} "
-            f"{_format_val(x):>8s} {_format_val(ratio, '.2f'):>7s}"
+            f"{_format_val(x):>8s}"
         )
-    lines.append("─" * 78)
+    lines.append("─" * 72)
 
     # Part B: Population distributions
     lines.append("")
     lines.append("(b) Population distributions — W₁ distance (real vs generated)")
-    lines.append("─" * 78)
+    lines.append("─" * 72)
     header = f"  {'Property':<35s} {'W₁':>10s} {'Unit':>6s} {'n_real':>7s} {'n_gen':>7s}"
     lines.append(header)
-    lines.append("─" * 78)
+    lines.append("─" * 72)
     for _, row in w1_global.iterrows():
         lines.append(
             f"  {row['display']:<35s} {row['w1']:>10.4f} {row['unit']:>6s} "
             f"{int(row['n_real']):>7d} {int(row['n_gen']):>7d}"
         )
-    lines.append("─" * 78)
+    lines.append("─" * 72)
 
     return "\n".join(lines)
 
@@ -547,6 +546,7 @@ def build_table_1(
 def build_stratified_table(
     df_pairs: pd.DataFrame,
     df_intra: pd.DataFrame,
+    df_inter: pd.DataFrame,
     df_real_feats: pd.DataFrame,
     w1_df: pd.DataFrame,
     group_col: str,
@@ -554,46 +554,17 @@ def build_stratified_table(
 ) -> str:
     """Tables 2/3: By genus or height bin.
 
-    For each stratum: n, conditioning fidelity ratios, population W₁.
+    Two sub-tables per stratum:
+      (a) Conditioning fidelity — gen / intra / inter medians for
+          Δ hull volume and vertical KDE JSD.
+      (b) Population W₁ per morphological property.
     """
-    # Add group_col to intra via anchor → real metadata
-    intra_with_group = df_intra.copy()
+    # Add group_col to baselines via anchor → real metadata
     group_map = df_real_feats[group_col].to_dict()
+    intra_with_group = df_intra.copy()
     intra_with_group[group_col] = intra_with_group["anchor_id"].map(group_map)
-
-    lines = []
-    lines.append(title)
-    lines.append("=" * 110)
-
-    # Select a compact set of metrics for the stratified table
-    cond_metrics = ["vert_kde_jsd", "hist_2d_jsd", "delta_hull_vol",
-                    "delta_max_crown_r", "delta_hcb"]
-
-    # Header row
-    header_parts = [f"  {group_col:<15s}", f"{'n':>5s}"]
-    for m in cond_metrics:
-        display, _ = METRIC_DISPLAY[m]
-        short = display.replace("Δ ", "Δ").replace("Vertical KDE ", "V-KDE ")
-        short = short.replace("2D histogram ", "H2D ")
-        short = short.replace("Hull volume", "HuV")
-        short = short.replace("Max crown radius", "CrR")
-        short = short.replace("Height to crown base", "HCB")
-        header_parts.append(f"{short:>9s}")
-    # W₁ columns
-    for prop in MORPH_PROPERTIES:
-        _, unit = MORPH_DISPLAY[prop]
-        short = {"hull_volume": "W₁ HuV", "max_crown_r": "W₁ CrR", "hcb": "W₁ HCB"}[prop]
-        header_parts.append(f"{short:>9s}")
-    lines.append("".join(header_parts))
-
-    sub_parts = [f"  {'':>15s}", f"{'':>5s}"]
-    for _ in cond_metrics:
-        sub_parts.append(f"{'G/I':>9s}")
-    for prop in MORPH_PROPERTIES:
-        _, unit = MORPH_DISPLAY[prop]
-        sub_parts.append(f"{'(' + unit + ')':>9s}" if unit else f"{'':>9s}")
-    lines.append("".join(sub_parts))
-    lines.append("─" * 110)
+    inter_with_group = df_inter.copy()
+    inter_with_group[group_col] = inter_with_group["anchor_id"].map(group_map)
 
     groups = sorted(df_pairs[group_col].dropna().unique(),
                     key=lambda x: (HEIGHT_BIN_LABELS.index(x)
@@ -605,27 +576,70 @@ def build_stratified_table(
         for _, row in w1_df.iterrows():
             w1_lookup[(row[group_col], row["property"])] = row["w1"]
 
+    # Compact metric set for conditioning sub-table
+    cond_metrics = ["delta_hull_vol", "vert_kde_jsd"]
+    cond_short = {"delta_hull_vol": "Δ HuV", "vert_kde_jsd": "V-KDE JSD"}
+
+    lines = []
+    lines.append(title)
+    lines.append("=" * 100)
+
+    # (a) Conditioning fidelity
+    lines.append("")
+    lines.append("(a) Conditioning fidelity — median across test trees")
+    lines.append("─" * 100)
+
+    # Header: group | n | metric1 Gen Intra Inter | metric2 Gen Intra Inter
+    h_parts = [f"  {group_col:<15s} {'n':>5s}"]
+    for m in cond_metrics:
+        label = cond_short[m]
+        h_parts.append(f"  {label + ' Gen':>10s} {'Intra':>8s} {'Inter':>8s}")
+    lines.append("".join(h_parts))
+    lines.append("─" * 100)
+
     for g in groups:
         g_pairs = df_pairs[df_pairs[group_col] == g]
         g_intra = intra_with_group[intra_with_group[group_col] == g]
+        g_inter = inter_with_group[inter_with_group[group_col] == g]
         n = g_pairs["real_id"].nunique()
 
         gen_med = _median_per_tree(g_pairs).median()
-        intra_med = g_intra.groupby("anchor_id")[METRICS].median().median() \
-            if not g_intra.empty else pd.Series({m: float("nan") for m in METRICS})
+        intra_med = g_intra.groupby("anchor_id")[cond_metrics].median().median() \
+            if not g_intra.empty else pd.Series({m: float("nan") for m in cond_metrics})
+        inter_med = g_inter.groupby("anchor_id")[cond_metrics].median().median() \
+            if not g_inter.empty else pd.Series({m: float("nan") for m in cond_metrics})
 
-        parts = [f"  {str(g)[:15]:<15s}", f"{n:>5d}"]
+        parts = [f"  {str(g)[:15]:<15s} {n:>5d}"]
         for m in cond_metrics:
             gv = gen_med.get(m, float("nan"))
             iv = intra_med.get(m, float("nan"))
-            ratio = gv / iv if pd.notna(iv) and iv > 0 else float("nan")
-            parts.append(f"{_format_val(ratio, '.2f'):>9s}")
+            xv = inter_med.get(m, float("nan"))
+            parts.append(f"  {_format_val(gv):>10s} {_format_val(iv):>8s} {_format_val(xv):>8s}")
+        lines.append("".join(parts))
+    lines.append("─" * 100)
+
+    # (b) Population W₁
+    lines.append("")
+    lines.append("(b) Population W₁ (real vs generated)")
+    lines.append("─" * 100)
+
+    w1_h_parts = [f"  {group_col:<15s} {'n':>5s}"]
+    for prop in MORPH_PROPERTIES:
+        _, unit = MORPH_DISPLAY[prop]
+        short = {"hull_volume": "W₁ HuV", "max_crown_r": "W₁ CrR", "hcb": "W₁ HCB"}[prop]
+        w1_h_parts.append(f"{short + (' (' + unit + ')' if unit else ''):>16s}")
+    lines.append("".join(w1_h_parts))
+    lines.append("─" * 100)
+
+    for g in groups:
+        n = df_pairs[df_pairs[group_col] == g]["real_id"].nunique()
+        parts = [f"  {str(g)[:15]:<15s} {n:>5d}"]
         for prop in MORPH_PROPERTIES:
             w1 = w1_lookup.get((g, prop), float("nan"))
-            parts.append(f"{_format_val(w1, '.2f'):>9s}")
+            parts.append(f"{_format_val(w1, '.2f'):>16s}")
         lines.append("".join(parts))
+    lines.append("─" * 100)
 
-    lines.append("─" * 110)
     return "\n".join(lines)
 
 
@@ -747,11 +761,11 @@ def main():
 
     table_1 = build_table_1(df_pairs, df_intra, df_inter, w1_global)
     table_2 = build_stratified_table(
-        df_pairs, df_intra, df_real_feats, w1_genus,
+        df_pairs, df_intra, df_inter, df_real_feats, w1_genus,
         "genus", "TABLE 2: BY GENUS",
     )
     table_3 = build_stratified_table(
-        df_pairs, df_intra, df_real_feats, w1_height,
+        df_pairs, df_intra, df_inter, df_real_feats, w1_height,
         "height_bin", "TABLE 3: BY HEIGHT BIN",
     )
 
