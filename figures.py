@@ -12,7 +12,6 @@ warnings.filterwarnings("ignore", message="Tight layout not applied")
 from pathlib import Path
 from scipy.ndimage import gaussian_filter
 from matplotlib.ticker import MaxNLocator
-from kneed import KneeLocator
 
 from numpy.polynomial import Polynomial
 
@@ -2096,21 +2095,18 @@ def create_figure_crown_audit(
         hcb_val = float("nan")
         kneedle_data = {}
         if mean_r_per_slice.max() > 0 and not np.allclose(mean_r_per_slice, mean_r_per_slice[0]):
-            cumr = np.cumsum(mean_r_per_slice)
+            cumr = np.cumsum(mean_r_per_slice ** 1.5)
             x_norm = (slice_centers - slice_centers[0]) / (slice_centers[-1] - slice_centers[0])
             y_norm = (cumr - cumr[0]) / (cumr[-1] - cumr[0])
-            kl = KneeLocator(x_norm, y_norm, curve="convex", direction="increasing", S=1.0)
-            if kl.knee is not None:
-                hcb_val = kl.knee  # already in [0, 1] normalized arc-length
-                # Find index closest to knee for plotting
-                knee_idx = int(np.argmin(np.abs(x_norm - kl.knee)))
-                d = x_norm - y_norm  # distance curve for visualization
-                kneedle_data = {
-                    "x_norm": x_norm,
-                    "y_norm": y_norm,
-                    "d": d,
-                    "knee_idx": knee_idx,
-                }
+            d = x_norm - y_norm
+            knee_idx = int(np.argmax(d))
+            hcb_val = slice_centers[knee_idx] / s_max
+            kneedle_data = {
+                "x_norm": x_norm,
+                "y_norm": y_norm,
+                "d": d,
+                "knee_idx": knee_idx,
+            }
 
         hcb_m = float(hcb_val * height_m)
 

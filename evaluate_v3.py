@@ -29,7 +29,6 @@ from pathlib import Path
 from scipy.spatial import ConvexHull
 from scipy.spatial.distance import cdist
 from scipy.stats import gaussian_kde, wasserstein_distance
-from kneed import KneeLocator
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 
@@ -205,12 +204,12 @@ def extract_features(cloud: np.ndarray, height_m: float) -> dict:
     # 5. Height to crown base (Kneedle on cumulative mean-r)
     hcb_val = float("nan")
     if mean_r_per_slice.max() > 0 and not np.allclose(mean_r_per_slice, mean_r_per_slice[0]):
-        cumr = np.cumsum(mean_r_per_slice)
+        cumr = np.cumsum(mean_r_per_slice ** 1.5)
         x_norm = (slice_centers - slice_centers[0]) / (slice_centers[-1] - slice_centers[0])
         y_norm = (cumr - cumr[0]) / (cumr[-1] - cumr[0])
-        kl = KneeLocator(x_norm, y_norm, curve="convex", direction="increasing", S=1.0)
-        if kl.knee is not None:
-            hcb_val = kl.knee  # already in [0, 1] normalized arc-length
+        d = x_norm - y_norm
+        knee_idx = int(np.argmax(d))
+        hcb_val = slice_centers[knee_idx] / s_max
 
     return {
         "hull_volume":  hull_volume,
