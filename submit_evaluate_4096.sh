@@ -9,7 +9,7 @@
 source /project/umontana_fire_modeling/anthony.marcozzi/miniforge3/etc/profile.d/conda.sh
 conda activate treeflow
 
-python evaluate_v2.py \
+python evaluate_v3.py \
     --experiment_name transformer-8-512-4096 \
     --data_path data/preprocessed-4096 \
     --num_workers 48 \
