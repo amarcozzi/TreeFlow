@@ -17,7 +17,7 @@ from matplotlib.ticker import MaxNLocator
 from numpy.polynomial import Polynomial
 
 from dataset import create_datasets
-from stem_tracker import find_trunk_base, track_spine_pass, compute_rz_spine
+from stem_tracker import find_trunk_base, track_spine_pass, compute_rz_spine, compute_rs_spine
 
 DOWNSAMPLE_POINTS = 16384
 
@@ -1686,7 +1686,7 @@ def create_figure_spine_audit(
     """
     import zarr
     from matplotlib.colors import PowerNorm
-    from evaluate import get_height_bin
+    from evaluate_v3 import get_height_bin
 
     output_dir = Path(output_dir)
     eval_dir = Path(experiment_dir) / "samples" / "evaluation"
@@ -1742,6 +1742,10 @@ def create_figure_spine_audit(
             continue
 
         cloud = zarr.load(str(zarr_path)).astype(np.float32)
+        if len(cloud) > DOWNSAMPLE_POINTS:
+            ds_rng = np.random.default_rng(seed)
+            ds_idx = ds_rng.choice(len(cloud), size=DOWNSAMPLE_POINTS, replace=False)
+            cloud = cloud[ds_idx]
         tree_row = grp[grp["source_tree_id"] == tree_id].iloc[0]
         height_m = float(tree_row["height_m"])
 
@@ -1973,6 +1977,374 @@ def create_figure_spine_audit(
     print(f"\nSpine audit: {total_figs} figures saved to {audit_dir}/")
 
 
+def create_figure_crown_audit(
+    experiment_dir: str = "experiments/transformer-8-512-4096",
+    data_path: str = "./data/preprocessed-4096",
+    output_dir: str = "figures",
+    seed: int = 42,
+    num_spine_bins: int = 20,
+    trees_per_group: int = 2,
+):
+    """Generate crown-metric verification figures for every (species, height_bin).
+
+    For each group, picks up to `trees_per_group` representative trees and
+    produces a 2x2 figure:
+      (a) 3D point cloud with convex hull wireframe
+      (b) 3D point cloud with HCB plane + max crown radius ring + spine
+      (c) Arc-length density plot showing HCB detection algorithm
+      (d) Mean radial distance vs arc-length showing max crown radius
+
+    Saves into output_dir/crown_audit/<species>/<height_bin>/.
+    Mirrors the feature extraction logic in evaluate_v3.py.
+    """
+    import zarr
+    from scipy.spatial import ConvexHull
+    from scipy.ndimage import gaussian_filter1d
+    from evaluate_v3 import get_height_bin
+
+    output_dir = Path(output_dir)
+    eval_dir = Path(experiment_dir) / "samples" / "evaluation"
+    per_pair_csv = eval_dir / "per_pair.csv"
+    data_path = Path(data_path)
+
+    pair_df = pd.read_csv(per_pair_csv)
+    pair_df["height_bin"] = pair_df["height_m"].apply(get_height_bin)
+
+    from tqdm import tqdm
+
+    groups = pair_df.groupby(["species", "height_bin"], observed=True)
+    print(f"Found {len(groups)} (species, height_bin) groups")
+
+    tasks = []
+    for (species, height_bin), grp in groups:
+        selected_trees = (
+            grp["source_tree_id"]
+            .drop_duplicates()
+            .sample(
+                n=min(trees_per_group, grp["source_tree_id"].nunique()),
+                random_state=seed,
+            )
+            .tolist()
+        )
+        for tree_id in selected_trees:
+            tasks.append(
+                {
+                    "species": species,
+                    "height_bin": height_bin,
+                    "tree_id": tree_id,
+                    "grp": grp,
+                }
+            )
+
+    audit_dir = output_dir / "crown_audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Generating {len(tasks)} crown audit figures...")
+
+    total_figs = 0
+    for task_info in tqdm(tasks, desc="Crown audit"):
+        species = task_info["species"]
+        height_bin = task_info["height_bin"]
+        tree_id = task_info["tree_id"]
+        grp = task_info["grp"]
+
+        tree_id_str = f"{int(tree_id):05d}"
+        zarr_path = data_path / f"{tree_id_str}.zarr"
+        if not zarr_path.exists():
+            continue
+
+        cloud = zarr.load(str(zarr_path)).astype(np.float32)
+        if len(cloud) > DOWNSAMPLE_POINTS:
+            ds_rng = np.random.default_rng(seed)
+            ds_idx = ds_rng.choice(len(cloud), size=DOWNSAMPLE_POINTS, replace=False)
+            cloud = cloud[ds_idx]
+        tree_row = grp[grp["source_tree_id"] == tree_id].iloc[0]
+        height_m = float(tree_row["height_m"])
+        scale = height_m / 2.0
+
+        # ── Stem tracker → cylindrical (r, s) ──
+        r, s, spine_raw, poly_x, poly_y = compute_rs_spine(cloud, num_bins=num_spine_bins)
+
+        z = cloud[:, 2]
+        z_min, z_max = z.min(), z.max()
+        eps = 1e-6
+        s_max = s.max() + eps if s.max() > 0 else eps
+
+        # ── Convex hull ──
+        try:
+            hull = ConvexHull(cloud)
+            hull_volume = float(hull.volume * scale ** 3)
+        except Exception:
+            hull = None
+            hull_volume = float("nan")
+
+        # ── Max crown radius (mirrors evaluate_v3 lines 194-201) ──
+        n_slices = 30
+        slice_edges = np.linspace(0, s_max, n_slices + 1)
+        slice_centers = 0.5 * (slice_edges[:-1] + slice_edges[1:])
+        mean_r_per_slice = np.zeros(n_slices)
+        for i in range(n_slices):
+            mask = (s >= slice_edges[i]) & (s < slice_edges[i + 1])
+            if mask.sum() > 0:
+                mean_r_per_slice[i] = r[mask].mean()
+        max_crown_r_norm = mean_r_per_slice.max()
+        max_crown_r_m = float(max_crown_r_norm * scale)
+        max_r_slice_idx = int(np.argmax(mean_r_per_slice))
+
+        # ── Height to crown base (mirrors evaluate_v3 lines 203-228) ──
+        hcb_bins = 50
+        hcb_val = float("nan")
+        hcb_detection = {}
+        try:
+            hcb_edges = np.linspace(0, s_max, hcb_bins + 1)
+            hcb_centers = 0.5 * (hcb_edges[:-1] + hcb_edges[1:])
+            counts = np.array([
+                ((s >= hcb_edges[i]) & (s < hcb_edges[i + 1])).sum()
+                for i in range(hcb_bins)
+            ], dtype=float)
+            smoothed = gaussian_filter1d(counts, sigma=2.5)
+            mean_freq = smoothed.mean()
+            first_peak = None
+            for i in range(1, len(smoothed) - 1):
+                if smoothed[i] > smoothed[i - 1] and smoothed[i] > smoothed[i + 1]:
+                    if smoothed[i] > mean_freq:
+                        first_peak = i
+                        break
+            if first_peak is not None and first_peak > 1:
+                min_idx = int(np.argmin(smoothed[:first_peak]))
+                hcb_val = (min_idx + 0.5) / hcb_bins
+            else:
+                cdf = np.cumsum(counts)
+                cdf /= cdf[-1] + 1e-30
+                idx_5 = int(np.searchsorted(cdf, 0.05))
+                hcb_val = (idx_5 + 0.5) / hcb_bins
+            hcb_detection = {
+                "counts": counts,
+                "smoothed": smoothed,
+                "mean_freq": mean_freq,
+                "first_peak": first_peak,
+                "hcb_centers": hcb_centers,
+            }
+        except Exception:
+            pass
+
+        hcb_m = float(hcb_val * height_m)
+
+        # ── Spine polynomial for 3D overlay ──
+        degree = 3
+        actual_deg = min(degree, len(spine_raw) - 1) if len(spine_raw) >= 2 else 1
+        if len(spine_raw) >= 2:
+            spine_z_dense = np.linspace(z_min, z_max, 200)
+            spine_curve = np.column_stack(
+                [poly_x(spine_z_dense), poly_y(spine_z_dense), spine_z_dense]
+            )
+        else:
+            spine_curve = spine_raw
+
+        # Subsample for 3D scatter
+        rng = np.random.default_rng(seed)
+        n_show = min(8000, len(cloud))
+        idx = rng.choice(len(cloud), n_show, replace=False)
+
+        centroid = cloud.mean(axis=0)
+
+        # ── Figure: 2×2 ──
+        fig = plt.figure(figsize=(13, 12))
+
+        def _setup_3d(ax, title, label):
+            cloud_range = (
+                np.array([
+                    cloud[:, 0].max() - cloud[:, 0].min(),
+                    cloud[:, 1].max() - cloud[:, 1].min(),
+                    cloud[:, 2].max() - cloud[:, 2].min(),
+                ]).max() / 2.0
+            )
+            mid = centroid
+            ax.set_xlim(mid[0] - cloud_range, mid[0] + cloud_range)
+            ax.set_ylim(mid[1] - cloud_range, mid[1] + cloud_range)
+            ax.set_zlim(mid[2] - cloud_range, mid[2] + cloud_range)
+            ax.view_init(elev=15, azim=135)
+            ax.xaxis.pane.fill = False
+            ax.yaxis.pane.fill = False
+            ax.zaxis.pane.fill = False
+            ax.xaxis.pane.set_edgecolor("lightgray")
+            ax.yaxis.pane.set_edgecolor("lightgray")
+            ax.zaxis.pane.set_edgecolor("lightgray")
+            ax.grid(True, alpha=0.2)
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
+            ax.set_zticklabels([])
+            ax.set_xlabel("")
+            ax.set_ylabel("")
+            ax.set_zlabel("")
+            ax.set_title(title, fontsize=13, fontweight="bold", pad=8)
+            ax.text2D(
+                0.02, 0.95, label,
+                transform=ax.transAxes, fontsize=16, fontweight="bold", va="top",
+            )
+
+        # -- (a) 3D with convex hull --
+        ax1 = fig.add_subplot(221, projection="3d")
+        ax1.scatter(
+            cloud[idx, 0], cloud[idx, 1], cloud[idx, 2],
+            c=cloud[idx, 2], cmap="viridis", s=0.8, alpha=0.4, rasterized=True,
+        )
+        if hull is not None:
+            for simplex in hull.simplices:
+                tri = cloud[simplex]
+                ax1.plot_trisurf(
+                    tri[:, 0], tri[:, 1], tri[:, 2],
+                    color="red", alpha=0.04, edgecolor="red", linewidth=0.3,
+                )
+        _setup_3d(ax1, f"Convex hull  (V = {hull_volume:.2f} m³)", "(a)")
+
+        # -- (b) 3D with HCB plane + max crown radius ring --
+        ax2 = fig.add_subplot(222, projection="3d")
+        ax2.scatter(
+            cloud[idx, 0], cloud[idx, 1], cloud[idx, 2],
+            c=cloud[idx, 2], cmap="viridis", s=0.8, alpha=0.4, rasterized=True,
+        )
+        # Spine curve
+        if len(spine_curve) > 0:
+            ax2.plot(
+                spine_curve[:, 0], spine_curve[:, 1], spine_curve[:, 2],
+                color="#d62728", linewidth=3.0, zorder=10,
+            )
+
+        # HCB horizontal plane — find spine center at HCB z-height
+        if not np.isnan(hcb_val):
+            hcb_z = z_min + hcb_val * (z_max - z_min)
+            hcb_cx = float(poly_x(hcb_z))
+            hcb_cy = float(poly_y(hcb_z))
+            theta = np.linspace(0, 2 * np.pi, 60)
+            plane_r = 0.3 * (z_max - z_min)
+            plane_x = hcb_cx + plane_r * np.cos(theta)
+            plane_y = hcb_cy + plane_r * np.sin(theta)
+            plane_z = np.full_like(theta, hcb_z)
+            ax2.plot(plane_x, plane_y, plane_z, color="#2ca02c", linewidth=2.5, zorder=8)
+            ax2.plot_trisurf(
+                plane_x, plane_y, plane_z,
+                color="#2ca02c", alpha=0.15, zorder=7,
+            )
+
+        # Max crown radius ring — at the arc-length slice with max mean-r
+        if max_crown_r_norm > 0:
+            # Find the z-height corresponding to the max-r slice center arc-length
+            s_center = slice_centers[max_r_slice_idx]
+            # Map arc-length back to z via interpolation on spine
+            spine_z_fine = np.linspace(z_min, z_max, 500)
+            from numpy.polynomial import Polynomial as Poly
+            dpx = poly_x.deriv()
+            dpy = poly_y.deriv()
+            ds_dz = np.sqrt(dpx(spine_z_fine) ** 2 + dpy(spine_z_fine) ** 2 + 1.0)
+            dz_vals = np.diff(spine_z_fine)
+            ds_vals = 0.5 * (ds_dz[:-1] + ds_dz[1:]) * dz_vals
+            s_fine = np.zeros(len(spine_z_fine))
+            s_fine[1:] = np.cumsum(ds_vals)
+            ring_z = float(np.interp(s_center, s_fine, spine_z_fine))
+            ring_cx = float(poly_x(ring_z))
+            ring_cy = float(poly_y(ring_z))
+            theta = np.linspace(0, 2 * np.pi, 60)
+            ring_x = ring_cx + max_crown_r_norm * np.cos(theta)
+            ring_y = ring_cy + max_crown_r_norm * np.sin(theta)
+            ring_zz = np.full_like(theta, ring_z)
+            ax2.plot(
+                ring_x, ring_y, ring_zz,
+                color="#ff7f0e", linewidth=2.5, zorder=9,
+            )
+
+        _setup_3d(
+            ax2,
+            f"HCB = {hcb_m:.1f} m  |  Max CrR = {max_crown_r_m:.2f} m",
+            "(b)",
+        )
+
+        # -- (c) Arc-length density → HCB detection --
+        ax3 = fig.add_subplot(223)
+        if hcb_detection:
+            centers = hcb_detection["hcb_centers"]
+            centers_m = centers * scale
+            smoothed = hcb_detection["smoothed"]
+            mean_freq = hcb_detection["mean_freq"]
+            first_peak = hcb_detection["first_peak"]
+
+            ax3.fill_between(centers_m, 0, hcb_detection["counts"],
+                             alpha=0.2, color="steelblue", label="Raw counts")
+            ax3.plot(centers_m, smoothed, color="steelblue", linewidth=2,
+                     label="Smoothed (σ=2.5)")
+            ax3.axhline(mean_freq, color="gray", linestyle="--", linewidth=1,
+                        label=f"Mean = {mean_freq:.1f}")
+
+            if first_peak is not None:
+                ax3.axvline(centers_m[first_peak], color="#d62728", linestyle=":",
+                            linewidth=1.5, label=f"First peak (bin {first_peak})")
+                if first_peak > 1:
+                    min_idx = int(np.argmin(smoothed[:first_peak]))
+                    ax3.axvline(centers_m[min_idx], color="#2ca02c", linewidth=2,
+                                label=f"HCB = {hcb_m:.1f} m")
+                    ax3.axvspan(0, centers_m[min_idx], alpha=0.08, color="#2ca02c")
+            else:
+                # Fallback: 5th percentile
+                if not np.isnan(hcb_val):
+                    hcb_s_m = hcb_val * (s_max * scale)
+                    ax3.axvline(hcb_s_m, color="#2ca02c", linewidth=2,
+                                label=f"HCB (5th pctl) = {hcb_m:.1f} m")
+
+            ax3.set_xlabel("Arc-length $s$ (m)", fontsize=11)
+            ax3.set_ylabel("Point count per bin", fontsize=11)
+            ax3.set_title("Height to crown base detection", fontsize=13, fontweight="bold", pad=8)
+            ax3.legend(fontsize=8, loc="upper right")
+        ax3.text(0.02, 0.97, "(c)", transform=ax3.transAxes,
+                 fontsize=16, fontweight="bold", va="top")
+
+        # -- (d) Mean-r vs arc-length → max crown radius --
+        ax4 = fig.add_subplot(224)
+        slice_centers_m = slice_centers * scale
+        mean_r_m = mean_r_per_slice * scale
+        ax4.plot(slice_centers_m, mean_r_m, color="steelblue", linewidth=2,
+                 marker="o", markersize=4, label="Mean $r$ per slice")
+        ax4.axhline(max_crown_r_m, color="#ff7f0e", linestyle="--", linewidth=1.5,
+                    label=f"Max = {max_crown_r_m:.2f} m")
+        ax4.plot(slice_centers_m[max_r_slice_idx], mean_r_m[max_r_slice_idx],
+                 "o", color="#ff7f0e", markersize=10, zorder=10)
+        if not np.isnan(hcb_val):
+            hcb_s_m = hcb_val * (s_max * scale)
+            ax4.axvline(hcb_s_m, color="#2ca02c", linestyle=":", linewidth=1.5,
+                        alpha=0.7, label=f"HCB = {hcb_m:.1f} m")
+        ax4.set_xlabel("Arc-length $s$ (m)", fontsize=11)
+        ax4.set_ylabel("Mean radial distance $r$ (m)", fontsize=11)
+        ax4.set_title("Max crown radius detection", fontsize=13, fontweight="bold", pad=8)
+        ax4.legend(fontsize=8, loc="upper right")
+        ax4.text(0.02, 0.97, "(d)", transform=ax4.transAxes,
+                 fontsize=16, fontweight="bold", va="top")
+
+        species_display = species.replace("_", " ")
+        fig.suptitle(
+            f"{species_display}  |  {height_bin} m  |  "
+            f"H = {height_m:.1f} m  |  tree {tree_id}  |  "
+            f"{len(cloud):,} pts\n"
+            f"HuV = {hull_volume:.2f} m³  |  CrR = {max_crown_r_m:.2f} m  |  HCB = {hcb_m:.1f} m",
+            fontsize=14,
+            fontweight="bold",
+            y=0.99,
+        )
+
+        fig.patch.set_facecolor("white")
+        plt.tight_layout(rect=[0, 0, 1, 0.94])
+        species_safe = species.replace(" ", "_")
+        fname = f"{species_safe}_{height_bin}m_tree_{tree_id_str}.pdf"
+        fig.savefig(
+            audit_dir / fname,
+            format="pdf",
+            bbox_inches="tight",
+            dpi=200,
+        )
+        plt.close(fig)
+        total_figs += 1
+
+    print(f"\nCrown audit: {total_figs} figures saved to {audit_dir}/")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -1981,7 +2353,7 @@ if __name__ == "__main__":
         "--figures",
         nargs="+",
         default=["spine_audit"],
-        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit)",
+        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit, crown_audit)",
     )
     parser.add_argument(
         "--experiment_dir", default="experiments/transformer-8-512-4096"
@@ -2026,6 +2398,13 @@ if __name__ == "__main__":
             )
         elif fig_name == "spine_audit":
             create_figure_spine_audit(
+                experiment_dir=args.experiment_dir,
+                data_path=args.data_path,
+                output_dir=args.output_dir,
+                seed=args.seed,
+            )
+        elif fig_name == "crown_audit":
+            create_figure_crown_audit(
                 experiment_dir=args.experiment_dir,
                 data_path=args.data_path,
                 output_dir=args.output_dir,
