@@ -2,6 +2,7 @@
 TreeFlow evaluation v3: morphological evaluation of generated tree point clouds.
 
 Per-pair metrics:
+  - Chamfer distance (m) — symmetric, PCA-canonicalized clouds in metric coords
   - Convex hull volume (m³) — scipy ConvexHull, stem-tracker independent
   - Max crown radius (m) — from stem tracker
   - Height to crown base (m) — from stem tracker
@@ -26,6 +27,7 @@ import pandas as pd
 import zarr
 from pathlib import Path
 from scipy.spatial import ConvexHull
+from scipy.spatial.distance import cdist
 from scipy.stats import gaussian_kde, wasserstein_distance
 from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
@@ -42,10 +44,11 @@ HEIGHT_BIN_LABELS = [
     "25-30", "30-35", "35-40", "40+",
 ]
 
-METRICS = ["delta_hull_vol", "delta_max_crown_r", "delta_hcb",
+METRICS = ["chamfer_dist", "delta_hull_vol", "delta_max_crown_r", "delta_hcb",
            "vert_kde_jsd", "hist_2d_jsd"]
 
 METRIC_DISPLAY = {
+    "chamfer_dist":      ("Chamfer distance",   "m"),
     "delta_hull_vol":    ("Δ Hull volume",      "m³"),
     "delta_max_crown_r": ("Δ Max crown radius", "m"),
     "delta_hcb":         ("Δ Height to crown base", "m"),
@@ -80,6 +83,62 @@ def jsd(p: np.ndarray, q: np.ndarray) -> float:
     q /= q.sum()
     m = 0.5 * (p + q)
     return float(0.5 * np.sum(p * np.log(p / m)) + 0.5 * np.sum(q * np.log(q / m)))
+
+
+def canonicalize(points: np.ndarray) -> np.ndarray:
+    """PCA-align XY axes, resolve sign ambiguity via cubic moment."""
+    pts = points.copy()
+    pts -= pts.mean(axis=0)
+    xy = pts[:, :2]
+    _, _, Vt = np.linalg.svd(xy - xy.mean(axis=0), full_matrices=False)
+    R = np.eye(3)
+    R[:2, :2] = Vt
+    pts = pts @ R.T
+    if np.sum(pts[:, 0] ** 3) < 0:
+        pts[:, 0] *= -1
+    return pts
+
+
+def chamfer_distance(p1: np.ndarray, p2: np.ndarray) -> float:
+    """Symmetric Chamfer distance (euclidean, in meters)."""
+    D = cdist(p1, p2, metric="euclidean")
+    return float((D.min(axis=1).mean() + D.min(axis=0).mean()) / 2)
+
+
+# ── Chamfer distance parallel helpers ────────────────────────────────────────
+
+_CD_CLOUDS_A: dict[str, np.ndarray] = {}
+_CD_CLOUDS_B: dict[str, np.ndarray] = {}
+
+
+def _cd_worker(task: tuple[str, str]) -> float:
+    """Compute CD for one pair using module-level cloud dicts (fork-shared)."""
+    id_a, id_b = task
+    return chamfer_distance(_CD_CLOUDS_A[id_a], _CD_CLOUDS_B[id_b])
+
+
+def _compute_cd_parallel(
+    clouds_a: dict[str, np.ndarray],
+    clouds_b: dict[str, np.ndarray],
+    pairs: list[tuple[str, str]],
+    num_workers: int,
+    desc: str,
+) -> list[float]:
+    """Compute Chamfer distances for a list of (id_a, id_b) pairs in parallel."""
+    global _CD_CLOUDS_A, _CD_CLOUDS_B
+    _CD_CLOUDS_A = clouds_a
+    _CD_CLOUDS_B = clouds_b
+    if num_workers <= 1:
+        results = [_cd_worker(p) for p in tqdm(pairs, desc=desc)]
+    else:
+        with ProcessPoolExecutor(max_workers=num_workers) as pool:
+            results = list(tqdm(
+                pool.map(_cd_worker, pairs, chunksize=64),
+                total=len(pairs), desc=desc,
+            ))
+    _CD_CLOUDS_A = {}
+    _CD_CLOUDS_B = {}
+    return results
 
 
 # ── Feature extraction ───────────────────────────────────────────────────────
@@ -190,6 +249,8 @@ def _extract_worker(task: dict) -> dict | None:
             points = points[idx]
         feats = extract_features(points, task["height_m"])
         feats["tree_id"] = task["tree_id"]
+        # Canonicalized cloud in metric coordinates for Chamfer distance
+        feats["_canon_cloud"] = canonicalize(points) * (task["height_m"] / 2.0)
         return feats
     except Exception as e:
         return {"tree_id": task["tree_id"], "_error": str(e)}
@@ -255,14 +316,11 @@ def build_pair_dataframe(
     max_points: int,
     num_workers: int,
     seed: int,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, np.ndarray]]:
     """Extract features for all trees and build the pair dataframe.
 
-    Returns (df_pairs, df_real_feats, df_gen_feats).
-    df_pairs has one row per generated tree with columns:
-        real_id, gen_id, genus, species, height_bin, scan_type, height_m,
-        cfg_scale, delta_hull_vol, delta_max_crown_r, delta_hcb,
-        vert_kde_jsd, hist_2d_jsd
+    Returns (df_pairs, df_real_feats, df_gen_feats, real_clouds).
+    real_clouds maps tree_id → canonicalized metric-scale point cloud.
     """
     # Extract real features
     real_tasks = [
@@ -274,6 +332,7 @@ def build_pair_dataframe(
     real_results = _run_extraction(real_tasks, num_workers, "Real trees")
 
     real_feats = {r["tree_id"]: r for r in real_results}
+    real_clouds = {r["tree_id"]: r["_canon_cloud"] for r in real_results}
 
     # Extract generated features
     gen_tasks = [
@@ -287,6 +346,7 @@ def build_pair_dataframe(
     gen_results = _run_extraction(gen_tasks, num_workers, "Gen trees")
 
     gen_feats = {r["tree_id"]: r for r in gen_results}
+    gen_clouds = {r["tree_id"]: r["_canon_cloud"] for r in gen_results}
 
     # Build gen_id → metadata lookup
     gen_id_to_meta = {}
@@ -294,7 +354,8 @@ def build_pair_dataframe(
         gid = Path(row["sample_file"]).stem
         gen_id_to_meta[gid] = row
 
-    # Build pair rows
+    # Build pair rows (without CD — added after parallel CD computation)
+    pair_keys = []  # (rid, gid) for CD
     rows = []
     for gid, gf in gen_feats.items():
         meta = gen_id_to_meta.get(gid)
@@ -305,6 +366,7 @@ def build_pair_dataframe(
         if rf is None:
             continue
 
+        pair_keys.append((rid, gid))
         rows.append({
             "real_id": rid,
             "gen_id": gid,
@@ -320,6 +382,14 @@ def build_pair_dataframe(
             "vert_kde_jsd":      jsd(rf["vert_kde"], gf["vert_kde"]),
             "hist_2d_jsd":       jsd(rf["hist_2d"],  gf["hist_2d"]),
         })
+
+    # Compute Chamfer distances in parallel
+    print(f"\nComputing Chamfer distances for {len(pair_keys)} gen pairs...")
+    cd_values = _compute_cd_parallel(
+        real_clouds, gen_clouds, pair_keys, num_workers, "CD (gen)",
+    )
+    for row, cd in zip(rows, cd_values):
+        row["chamfer_dist"] = cd
 
     df_pairs = pd.DataFrame(rows)
     print(f"\nPair dataframe: {len(df_pairs)} rows, "
@@ -352,13 +422,15 @@ def build_pair_dataframe(
             lambda x, c=col: id_to_row.loc[x, c] if x in id_to_row.index else "unknown"
         )
 
-    return df_pairs, df_real_feats, df_gen_feats
+    return df_pairs, df_real_feats, df_gen_feats, real_clouds
 
 
 # ── Baselines ────────────────────────────────────────────────────────────────
 
 def build_baselines(
     df_real: pd.DataFrame,
+    real_clouds: dict[str, np.ndarray],
+    num_workers: int = 1,
     n_neighbors: int = 32,
     seed: int = 42,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -373,6 +445,7 @@ def build_baselines(
 
     def _build(neighbor_map: dict[str, list[str]], label: str) -> pd.DataFrame:
         rows = []
+        pair_keys = []
         for tid, neighbors in neighbor_map.items():
             anchor = df_real.loc[tid]
             anchor_kde = np.array(anchor["vert_kde"])
@@ -381,6 +454,7 @@ def build_baselines(
                 if nid not in df_real.index:
                     continue
                 nb = df_real.loc[nid]
+                pair_keys.append((tid, nid))
                 rows.append({
                     "anchor_id": tid,
                     "neighbor_id": nid,
@@ -390,6 +464,13 @@ def build_baselines(
                     "vert_kde_jsd":      jsd(anchor_kde, np.array(nb["vert_kde"])),
                     "hist_2d_jsd":       jsd(anchor_hist, np.array(nb["hist_2d"])),
                 })
+        # Compute CD in parallel
+        cd_values = _compute_cd_parallel(
+            real_clouds, real_clouds, pair_keys, num_workers,
+            f"CD ({label})",
+        )
+        for row, cd in zip(rows, cd_values):
+            row["chamfer_dist"] = cd
         df = pd.DataFrame(rows)
         print(f"  {label}: {len(df)} pairs from {len(neighbor_map)} anchor trees")
         return df
@@ -545,8 +626,6 @@ def build_table_1(
 
 def build_stratified_table(
     df_pairs: pd.DataFrame,
-    df_intra: pd.DataFrame,
-    df_inter: pd.DataFrame,
     df_real_feats: pd.DataFrame,
     w1_df: pd.DataFrame,
     group_col: str,
@@ -555,17 +634,9 @@ def build_stratified_table(
     """Tables 2/3: By genus or height bin.
 
     Two sub-tables per stratum:
-      (a) Conditioning fidelity — gen / intra / inter medians for
-          Δ hull volume and vertical KDE JSD.
+      (a) Conditioning fidelity — gen median for all 6 metrics.
       (b) Population W₁ per morphological property.
     """
-    # Add group_col to baselines via anchor → real metadata
-    group_map = df_real_feats[group_col].to_dict()
-    intra_with_group = df_intra.copy()
-    intra_with_group[group_col] = intra_with_group["anchor_id"].map(group_map)
-    inter_with_group = df_inter.copy()
-    inter_with_group[group_col] = inter_with_group["anchor_id"].map(group_map)
-
     groups = sorted(df_pairs[group_col].dropna().unique(),
                     key=lambda x: (HEIGHT_BIN_LABELS.index(x)
                                    if x in HEIGHT_BIN_LABELS else 999, x))
@@ -576,45 +647,39 @@ def build_stratified_table(
         for _, row in w1_df.iterrows():
             w1_lookup[(row[group_col], row["property"])] = row["w1"]
 
-    # Compact metric set for conditioning sub-table
-    cond_metrics = ["delta_hull_vol", "vert_kde_jsd"]
-    cond_short = {"delta_hull_vol": "Δ HuV", "vert_kde_jsd": "V-KDE JSD"}
+    # Short names for metrics
+    metric_short = {
+        "chamfer_dist": "CD",
+        "delta_hull_vol": "Δ HuV",
+        "delta_max_crown_r": "Δ CrR",
+        "delta_hcb": "Δ HCB",
+        "vert_kde_jsd": "V-KDE",
+        "hist_2d_jsd": "H2D",
+    }
 
     lines = []
     lines.append(title)
     lines.append("=" * 100)
 
-    # (a) Conditioning fidelity
+    # (a) Conditioning fidelity — gen median only
     lines.append("")
-    lines.append("(a) Conditioning fidelity — median across test trees")
+    lines.append("(a) Conditioning fidelity — gen median across test trees")
     lines.append("─" * 100)
 
-    # Header: group | n | metric1 Gen Intra Inter | metric2 Gen Intra Inter
     h_parts = [f"  {group_col:<15s} {'n':>5s}"]
-    for m in cond_metrics:
-        label = cond_short[m]
-        h_parts.append(f"  {label + ' Gen':>10s} {'Intra':>8s} {'Inter':>8s}")
+    for m in METRICS:
+        h_parts.append(f"{metric_short[m]:>10s}")
     lines.append("".join(h_parts))
     lines.append("─" * 100)
 
     for g in groups:
         g_pairs = df_pairs[df_pairs[group_col] == g]
-        g_intra = intra_with_group[intra_with_group[group_col] == g]
-        g_inter = inter_with_group[inter_with_group[group_col] == g]
         n = g_pairs["real_id"].nunique()
-
         gen_med = _median_per_tree(g_pairs).median()
-        intra_med = g_intra.groupby("anchor_id")[cond_metrics].median().median() \
-            if not g_intra.empty else pd.Series({m: float("nan") for m in cond_metrics})
-        inter_med = g_inter.groupby("anchor_id")[cond_metrics].median().median() \
-            if not g_inter.empty else pd.Series({m: float("nan") for m in cond_metrics})
 
         parts = [f"  {str(g)[:15]:<15s} {n:>5d}"]
-        for m in cond_metrics:
-            gv = gen_med.get(m, float("nan"))
-            iv = intra_med.get(m, float("nan"))
-            xv = inter_med.get(m, float("nan"))
-            parts.append(f"  {_format_val(gv):>10s} {_format_val(iv):>8s} {_format_val(xv):>8s}")
+        for m in METRICS:
+            parts.append(f"{_format_val(gen_med.get(m, float('nan'))):>10s}")
         lines.append("".join(parts))
     lines.append("─" * 100)
 
@@ -729,7 +794,7 @@ def main():
     real_meta, gen_meta = load_metadata(data_path, experiment_dir)
 
     # 2. Extract features and build pair dataframe
-    df_pairs, df_real_feats, df_gen_feats = build_pair_dataframe(
+    df_pairs, df_real_feats, df_gen_feats, real_clouds = build_pair_dataframe(
         real_meta, gen_meta, zarr_dir,
         max_points=args.max_points, num_workers=args.num_workers, seed=args.seed,
     )
@@ -740,7 +805,8 @@ def main():
     # 3. Baselines
     print()
     df_intra, df_inter = build_baselines(
-        df_real_feats, seed=args.seed + 1000,
+        df_real_feats, real_clouds,
+        num_workers=args.num_workers, seed=args.seed + 1000,
     )
 
     # 4. Population W₁
@@ -761,11 +827,11 @@ def main():
 
     table_1 = build_table_1(df_pairs, df_intra, df_inter, w1_global)
     table_2 = build_stratified_table(
-        df_pairs, df_intra, df_inter, df_real_feats, w1_genus,
+        df_pairs, df_real_feats, w1_genus,
         "genus", "TABLE 2: BY GENUS",
     )
     table_3 = build_stratified_table(
-        df_pairs, df_intra, df_inter, df_real_feats, w1_height,
+        df_pairs, df_real_feats, w1_height,
         "height_bin", "TABLE 3: BY HEIGHT BIN",
     )
 
