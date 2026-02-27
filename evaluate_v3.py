@@ -29,7 +29,6 @@ from pathlib import Path
 from scipy.spatial import ConvexHull
 from scipy.spatial.distance import cdist
 from scipy.stats import gaussian_kde, wasserstein_distance
-from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 
@@ -191,42 +190,26 @@ def extract_features(cloud: np.ndarray, height_m: float) -> dict:
     if total > 0:
         hist_2d = hist_2d / total
 
-    # 4. Max crown radius (max mean-r across arc-length slices)
+    # 4. Mean-r per arc-length slice (shared by max crown radius + HCB)
     n_slices = 30
     slice_edges = np.linspace(0, s_max, n_slices + 1)
-    max_crown_r = 0.0
+    slice_centers = 0.5 * (slice_edges[:-1] + slice_edges[1:])
+    mean_r_per_slice = np.zeros(n_slices)
     for i in range(n_slices):
         mask = (s >= slice_edges[i]) & (s < slice_edges[i + 1])
         if mask.sum() > 0:
-            max_crown_r = max(max_crown_r, r[mask].mean())
+            mean_r_per_slice[i] = r[mask].mean()
+    max_crown_r = float(mean_r_per_slice.max())
 
-    # 5. Height to crown base (arc-length density analysis)
-    hcb_bins = 50
+    # 5. Height to crown base (Kneedle on cumulative mean-r)
     hcb_val = float("nan")
-    try:
-        hcb_edges = np.linspace(0, s_max, hcb_bins + 1)
-        counts = np.array([
-            ((s >= hcb_edges[i]) & (s < hcb_edges[i + 1])).sum()
-            for i in range(hcb_bins)
-        ], dtype=float)
-        smoothed = gaussian_filter1d(counts, sigma=2.5)
-        mean_freq = smoothed.mean()
-        first_peak = None
-        for i in range(1, len(smoothed) - 1):
-            if smoothed[i] > smoothed[i - 1] and smoothed[i] > smoothed[i + 1]:
-                if smoothed[i] > mean_freq:
-                    first_peak = i
-                    break
-        if first_peak is not None and first_peak > 1:
-            min_idx = int(np.argmin(smoothed[:first_peak]))
-            hcb_val = (min_idx + 0.5) / hcb_bins
-        else:
-            cdf = np.cumsum(counts)
-            cdf /= cdf[-1] + 1e-30
-            idx_5 = int(np.searchsorted(cdf, 0.05))
-            hcb_val = (idx_5 + 0.5) / hcb_bins
-    except Exception:
-        pass
+    if mean_r_per_slice.max() > 0 and not np.allclose(mean_r_per_slice, mean_r_per_slice[0]):
+        cumr = np.cumsum(mean_r_per_slice)
+        x_norm = (slice_centers - slice_centers[0]) / (slice_centers[-1] - slice_centers[0])
+        y_norm = (cumr - cumr[0]) / (cumr[-1] - cumr[0])
+        d = y_norm - x_norm
+        knee_idx = int(np.argmax(d))
+        hcb_val = slice_centers[knee_idx] / s_max
 
     return {
         "hull_volume":  hull_volume,

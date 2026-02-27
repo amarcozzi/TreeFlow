@@ -2000,7 +2000,6 @@ def create_figure_crown_audit(
     """
     import zarr
     from scipy.spatial import ConvexHull
-    from scipy.ndimage import gaussian_filter1d
     from evaluate_v3 import get_height_bin
 
     output_dir = Path(output_dir)
@@ -2093,42 +2092,22 @@ def create_figure_crown_audit(
         max_crown_r_m = float(max_crown_r_norm * scale)
         max_r_slice_idx = int(np.argmax(mean_r_per_slice))
 
-        # ── Height to crown base (mirrors evaluate_v3 lines 203-228) ──
-        hcb_bins = 50
+        # ── Height to crown base (Kneedle on cumulative mean-r) ──
         hcb_val = float("nan")
-        hcb_detection = {}
-        try:
-            hcb_edges = np.linspace(0, s_max, hcb_bins + 1)
-            hcb_centers = 0.5 * (hcb_edges[:-1] + hcb_edges[1:])
-            counts = np.array([
-                ((s >= hcb_edges[i]) & (s < hcb_edges[i + 1])).sum()
-                for i in range(hcb_bins)
-            ], dtype=float)
-            smoothed = gaussian_filter1d(counts, sigma=2.5)
-            mean_freq = smoothed.mean()
-            first_peak = None
-            for i in range(1, len(smoothed) - 1):
-                if smoothed[i] > smoothed[i - 1] and smoothed[i] > smoothed[i + 1]:
-                    if smoothed[i] > mean_freq:
-                        first_peak = i
-                        break
-            if first_peak is not None and first_peak > 1:
-                min_idx = int(np.argmin(smoothed[:first_peak]))
-                hcb_val = (min_idx + 0.5) / hcb_bins
-            else:
-                cdf = np.cumsum(counts)
-                cdf /= cdf[-1] + 1e-30
-                idx_5 = int(np.searchsorted(cdf, 0.05))
-                hcb_val = (idx_5 + 0.5) / hcb_bins
-            hcb_detection = {
-                "counts": counts,
-                "smoothed": smoothed,
-                "mean_freq": mean_freq,
-                "first_peak": first_peak,
-                "hcb_centers": hcb_centers,
+        kneedle_data = {}
+        if mean_r_per_slice.max() > 0 and not np.allclose(mean_r_per_slice, mean_r_per_slice[0]):
+            cumr = np.cumsum(mean_r_per_slice)
+            x_norm = (slice_centers - slice_centers[0]) / (slice_centers[-1] - slice_centers[0])
+            y_norm = (cumr - cumr[0]) / (cumr[-1] - cumr[0])
+            d = y_norm - x_norm
+            knee_idx = int(np.argmax(d))
+            hcb_val = slice_centers[knee_idx] / s_max
+            kneedle_data = {
+                "x_norm": x_norm,
+                "y_norm": y_norm,
+                "d": d,
+                "knee_idx": knee_idx,
             }
-        except Exception:
-            pass
 
         hcb_m = float(hcb_val * height_m)
 
@@ -2262,41 +2241,32 @@ def create_figure_crown_audit(
             "(b)",
         )
 
-        # -- (c) Arc-length density → HCB detection --
+        # -- (c) HCB detection (Kneedle on cumulative r) --
         ax3 = fig.add_subplot(223)
-        if hcb_detection:
-            centers = hcb_detection["hcb_centers"]
-            centers_m = centers * scale
-            smoothed = hcb_detection["smoothed"]
-            mean_freq = hcb_detection["mean_freq"]
-            first_peak = hcb_detection["first_peak"]
+        if kneedle_data:
+            x_n = kneedle_data["x_norm"]
+            y_n = kneedle_data["y_norm"]
+            d_curve = kneedle_data["d"]
+            ki = kneedle_data["knee_idx"]
 
-            ax3.fill_between(centers_m, 0, hcb_detection["counts"],
-                             alpha=0.2, color="steelblue", label="Raw counts")
-            ax3.plot(centers_m, smoothed, color="steelblue", linewidth=2,
-                     label="Smoothed (σ=2.5)")
-            ax3.axhline(mean_freq, color="gray", linestyle="--", linewidth=1,
-                        label=f"Mean = {mean_freq:.1f}")
+            ax3.plot(x_n, y_n, color="steelblue", linewidth=2, label="Cumulative mean-$r$")
+            ax3.plot([0, 1], [0, 1], color="gray", linestyle="--", linewidth=1, label="Diagonal")
+            ax3.fill_between(x_n, x_n, y_n, alpha=0.10, color="steelblue")
+            ax3.axvline(x_n[ki], color="#2ca02c", linewidth=2,
+                        label=f"Knee → HCB = {hcb_m:.1f} m")
+            ax3.plot(x_n[ki], y_n[ki], "o", color="#2ca02c", markersize=8, zorder=10)
 
-            if first_peak is not None:
-                ax3.axvline(centers_m[first_peak], color="#d62728", linestyle=":",
-                            linewidth=1.5, label=f"First peak (bin {first_peak})")
-                if first_peak > 1:
-                    min_idx = int(np.argmin(smoothed[:first_peak]))
-                    ax3.axvline(centers_m[min_idx], color="#2ca02c", linewidth=2,
-                                label=f"HCB = {hcb_m:.1f} m")
-                    ax3.axvspan(0, centers_m[min_idx], alpha=0.08, color="#2ca02c")
-            else:
-                # Fallback: 5th percentile
-                if not np.isnan(hcb_val):
-                    hcb_s_m = hcb_val * (s_max * scale)
-                    ax3.axvline(hcb_s_m, color="#2ca02c", linewidth=2,
-                                label=f"HCB (5th pctl) = {hcb_m:.1f} m")
+            # Inset: distance curve
+            ax3_inset = ax3.twinx()
+            ax3_inset.plot(x_n, d_curve, color="#d62728", linewidth=1.2, alpha=0.6, label="Distance $d$")
+            ax3_inset.set_ylabel("Distance $d$", fontsize=9, color="#d62728")
+            ax3_inset.tick_params(axis="y", labelcolor="#d62728", labelsize=8)
 
-            ax3.set_xlabel("Arc-length $s$ (m)", fontsize=11)
-            ax3.set_ylabel("Point count per bin", fontsize=11)
-            ax3.set_title("Height to crown base detection", fontsize=13, fontweight="bold", pad=8)
-            ax3.legend(fontsize=8, loc="upper right")
+            ax3.set_xlabel("Normalized arc-length", fontsize=11)
+            ax3.set_ylabel("Normalized cumulative $r$", fontsize=11)
+            ax3.set_title("HCB detection (Kneedle on cumulative $r$)",
+                          fontsize=13, fontweight="bold", pad=8)
+            ax3.legend(fontsize=8, loc="upper left")
         ax3.text(0.02, 0.97, "(c)", transform=ax3.transAxes,
                  fontsize=16, fontweight="bold", va="top")
 
