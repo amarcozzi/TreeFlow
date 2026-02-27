@@ -2192,12 +2192,13 @@ def create_figure_crown_audit(
             c=cloud[idx, 2], cmap="viridis", s=0.8, alpha=0.4, rasterized=True,
         )
         if hull is not None:
-            for simplex in hull.simplices:
-                tri = cloud[simplex]
-                ax1.plot_trisurf(
-                    tri[:, 0], tri[:, 1], tri[:, 2],
-                    color="red", alpha=0.04, edgecolor="red", linewidth=0.3,
-                )
+            from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+            hull_faces = [cloud[s] for s in hull.simplices]
+            hull_col = Poly3DCollection(
+                hull_faces, alpha=0.04, facecolor="red",
+                edgecolor="red", linewidth=0.3,
+            )
+            ax1.add_collection3d(hull_col)
         _setup_3d(ax1, f"Convex hull  (V = {hull_volume:.2f} m³)", "(a)")
 
         # -- (b) 3D with HCB plane + max crown radius ring --
