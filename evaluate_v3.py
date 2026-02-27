@@ -1,20 +1,17 @@
 """
-TreeFlow evaluation v3: simple stem-tracker morphological evaluation.
+TreeFlow evaluation v3: morphological evaluation of generated tree point clouds.
 
-For each (real, generated) pair, extracts crown volume, max crown radius,
-and height to crown base via the stem tracker, plus vertical KDE JSD and
-2D histogram JSD as shape-similarity scores.
+Per-pair metrics:
+  - Convex hull volume (m³) — scipy ConvexHull, stem-tracker independent
+  - Max crown radius (m) — from stem tracker
+  - Height to crown base (m) — from stem tracker
+  - Vertical KDE JSD — 1D density along z-axis
+  - 2D histogram JSD — radial × arc-length profile from stem tracker
 
-Outputs three tables suitable for publication:
-  Table 1 — Global summary (gen vs intra-class vs inter-class baselines)
-  Table 2 — By genus
-  Table 3 — By height bin
-
-Plus population W₁ distances for each morphological property per stratum.
-
-CD/COV/MMD/1-NNA are omitted from the primary evaluation (they require PCA
-canonicalization and test the wrong hypothesis). They belong in supplementary
-material for comparison with prior work.
+Tables:
+  1. Global summary with gen / intra-class / inter-class baselines + W₁
+  2. By genus (G/I ratios + W₁)
+  3. By height bin (G/I ratios + W₁)
 """
 
 import sys
@@ -28,6 +25,7 @@ import numpy as np
 import pandas as pd
 import zarr
 from pathlib import Path
+from scipy.spatial import ConvexHull
 from scipy.stats import gaussian_kde, wasserstein_distance
 from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
@@ -44,27 +42,24 @@ HEIGHT_BIN_LABELS = [
     "25-30", "30-35", "35-40", "40+",
 ]
 
-METRICS = ["delta_crown_vol", "delta_max_crown_r", "delta_hcb",
+METRICS = ["delta_hull_vol", "delta_max_crown_r", "delta_hcb",
            "vert_kde_jsd", "hist_2d_jsd"]
 
 METRIC_DISPLAY = {
-    "delta_crown_vol":   ("Δ Crown volume",    "m³"),
+    "delta_hull_vol":    ("Δ Hull volume",      "m³"),
     "delta_max_crown_r": ("Δ Max crown radius", "m"),
     "delta_hcb":         ("Δ Height to crown base", "m"),
     "vert_kde_jsd":      ("Vertical KDE JSD",  ""),
     "hist_2d_jsd":       ("2D histogram JSD",  ""),
 }
 
-MORPH_PROPERTIES = ["crown_volume", "max_crown_r", "hcb"]
+MORPH_PROPERTIES = ["hull_volume", "max_crown_r", "hcb"]
 
 MORPH_DISPLAY = {
-    "crown_volume": ("Crown volume", "m³"),
+    "hull_volume":  ("Convex hull volume", "m³"),
     "max_crown_r":  ("Max crown radius", "m"),
     "hcb":          ("Height to crown base", "m"),
 }
-
-HARD_CAP_CROWN_VOL = 50_000   # m³
-HARD_CAP_CROWN_R   = 25.0     # m
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -87,23 +82,32 @@ def jsd(p: np.ndarray, q: np.ndarray) -> float:
     return float(0.5 * np.sum(p * np.log(p / m)) + 0.5 * np.sum(q * np.log(q / m)))
 
 
-# ── Stem-tracker feature extraction ─────────────────────────────────────────
+# ── Feature extraction ───────────────────────────────────────────────────────
 
 def extract_features(cloud: np.ndarray, height_m: float) -> dict:
     """Extract morphological features from one point cloud.
 
     Returns dict with:
-        crown_volume  (m³), max_crown_r (m), hcb (m),
-        vert_kde (64,), hist_2d (512,)
+        hull_volume   (m³) — convex hull of the full point cloud
+        max_crown_r   (m)  — from stem tracker (max mean-r per arc-length slice)
+        hcb           (m)  — from stem tracker (arc-length density analysis)
+        vert_kde      (64,) — 1D KDE of z-axis (no stem tracker)
+        hist_2d       (512,) — 2D (r, s) histogram (stem tracker)
     """
     z = cloud[:, 2]
     z_min, z_max = z.min(), z.max()
     scale = height_m / 2.0  # normalized → metric
 
+    # 1. Convex hull volume (stem-tracker independent)
+    try:
+        hull_volume = float(ConvexHull(cloud).volume * scale ** 3)
+    except Exception:
+        hull_volume = float("nan")
+
     # Stem tracker → cylindrical coordinates (r, s)
     r, s, _, _, _ = compute_rs_spine(cloud)
 
-    # 1. Vertical 1D KDE
+    # 2. Vertical 1D KDE (uses raw z, not stem tracker)
     kde_bins = 64
     try:
         kde = gaussian_kde(z)
@@ -113,7 +117,7 @@ def extract_features(cloud: np.ndarray, height_m: float) -> dict:
     except Exception:
         vert_kde = np.ones(kde_bins) / kde_bins
 
-    # 2. 2D (r, s) histogram — bin edges relative to each tree's own range
+    # 3. 2D (r, s) histogram — bin edges relative to each tree's own range
     hist_r_bins, hist_s_bins = 16, 32
     eps = 1e-6
     r_max = r.max() + eps
@@ -128,19 +132,16 @@ def extract_features(cloud: np.ndarray, height_m: float) -> dict:
     if total > 0:
         hist_2d = hist_2d / total
 
-    # 3. Crown volume and max crown radius (cylinder-slice integration)
+    # 4. Max crown radius (max mean-r across arc-length slices)
     n_slices = 30
     slice_edges = np.linspace(0, s_max, n_slices + 1)
-    ds = s_max / n_slices
-    crown_volume = 0.0
     max_crown_r = 0.0
     for i in range(n_slices):
         mask = (s >= slice_edges[i]) & (s < slice_edges[i + 1])
-        r_mean = r[mask].mean() if mask.sum() > 0 else 0.0
-        crown_volume += ds * np.pi * r_mean ** 2
-        max_crown_r = max(max_crown_r, r_mean)
+        if mask.sum() > 0:
+            max_crown_r = max(max_crown_r, r[mask].mean())
 
-    # 4. Height to crown base
+    # 5. Height to crown base (arc-length density analysis)
     hcb_bins = 50
     hcb_val = float("nan")
     try:
@@ -169,7 +170,7 @@ def extract_features(cloud: np.ndarray, height_m: float) -> dict:
         pass
 
     return {
-        "crown_volume": float(crown_volume * scale ** 3),
+        "hull_volume":  hull_volume,
         "max_crown_r":  float(max_crown_r * scale),
         "hcb":          float(hcb_val * height_m),
         "vert_kde":     vert_kde,
@@ -247,25 +248,6 @@ def load_metadata(data_path: Path, experiment_dir: Path) -> tuple[pd.DataFrame, 
 
 # ── Build the core dataframe ─────────────────────────────────────────────────
 
-def _clip_features(feats: dict) -> dict:
-    """Apply hard physical caps to extracted features in-place.
-
-    Catches stem tracker failures (polynomial spine divergence) that produce
-    crown volumes or radii orders of magnitude beyond physical plausibility.
-    """
-    n_vol = n_r = 0
-    for f in feats.values():
-        if f["crown_volume"] > HARD_CAP_CROWN_VOL:
-            f["crown_volume"] = HARD_CAP_CROWN_VOL
-            n_vol += 1
-        if f["max_crown_r"] > HARD_CAP_CROWN_R:
-            f["max_crown_r"] = HARD_CAP_CROWN_R
-            n_r += 1
-    if n_vol + n_r > 0:
-        print(f"    Clipped {n_vol} crown_volume, {n_r} max_crown_r")
-    return {"n_clipped_vol": n_vol, "n_clipped_r": n_r}
-
-
 def build_pair_dataframe(
     real_meta: pd.DataFrame,
     gen_meta: pd.DataFrame,
@@ -273,16 +255,13 @@ def build_pair_dataframe(
     max_points: int,
     num_workers: int,
     seed: int,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Extract features for all trees and build the pair dataframe.
 
-    Hard physical caps are applied to features BEFORE computing deltas,
-    so all downstream consumers (pairs, baselines, W₁) see clipped values.
-
-    Returns (df_pairs, df_real_feats, df_gen_feats, clip_info).
+    Returns (df_pairs, df_real_feats, df_gen_feats).
     df_pairs has one row per generated tree with columns:
         real_id, gen_id, genus, species, height_bin, scan_type, height_m,
-        cfg_scale, delta_crown_vol, delta_max_crown_r, delta_hcb,
+        cfg_scale, delta_hull_vol, delta_max_crown_r, delta_hcb,
         vert_kde_jsd, hist_2d_jsd
     """
     # Extract real features
@@ -294,10 +273,7 @@ def build_pair_dataframe(
     print(f"\nExtracting features for {len(real_tasks)} real trees...")
     real_results = _run_extraction(real_tasks, num_workers, "Real trees")
 
-    # Build real feature lookup
-    real_feats = {}
-    for r in real_results:
-        real_feats[r["tree_id"]] = r
+    real_feats = {r["tree_id"]: r for r in real_results}
 
     # Extract generated features
     gen_tasks = [
@@ -310,23 +286,7 @@ def build_pair_dataframe(
     print(f"\nExtracting features for {len(gen_tasks)} generated trees...")
     gen_results = _run_extraction(gen_tasks, num_workers, "Gen trees")
 
-    gen_feats = {}
-    for r in gen_results:
-        gen_feats[r["tree_id"]] = r
-
-    # Apply hard physical caps BEFORE computing deltas
-    print("  Applying hard caps (real)...")
-    clip_real = _clip_features(real_feats)
-    print("  Applying hard caps (gen)...")
-    clip_gen = _clip_features(gen_feats)
-    clip_info = {
-        "real_clipped_vol": clip_real["n_clipped_vol"],
-        "real_clipped_r": clip_real["n_clipped_r"],
-        "gen_clipped_vol": clip_gen["n_clipped_vol"],
-        "gen_clipped_r": clip_gen["n_clipped_r"],
-        "crown_vol_cap_m3": HARD_CAP_CROWN_VOL,
-        "crown_r_cap_m": HARD_CAP_CROWN_R,
-    }
+    gen_feats = {r["tree_id"]: r for r in gen_results}
 
     # Build gen_id → metadata lookup
     gen_id_to_meta = {}
@@ -334,7 +294,7 @@ def build_pair_dataframe(
         gid = Path(row["sample_file"]).stem
         gen_id_to_meta[gid] = row
 
-    # Build pair rows (deltas computed from already-clipped features)
+    # Build pair rows
     rows = []
     for gid, gf in gen_feats.items():
         meta = gen_id_to_meta.get(gid)
@@ -354,7 +314,7 @@ def build_pair_dataframe(
             "scan_type": meta.get("scan_type", "unknown"),
             "height_m": float(meta.get("height_m", 0)),
             "cfg_scale": float(meta.get("cfg_scale", 0)),
-            "delta_crown_vol":   abs(gf["crown_volume"] - rf["crown_volume"]),
+            "delta_hull_vol":    abs(gf["hull_volume"]  - rf["hull_volume"]),
             "delta_max_crown_r": abs(gf["max_crown_r"]  - rf["max_crown_r"]),
             "delta_hcb":         abs(gf["hcb"]          - rf["hcb"]),
             "vert_kde_jsd":      jsd(rf["vert_kde"], gf["vert_kde"]),
@@ -366,9 +326,8 @@ def build_pair_dataframe(
           f"{df_pairs['real_id'].nunique()} unique real trees")
 
     # Build feature dataframes for downstream (W₁, baselines)
-    # These use already-clipped values from real_feats / gen_feats.
     df_real_feats = pd.DataFrame([
-        {"tree_id": tid, "crown_volume": r["crown_volume"],
+        {"tree_id": tid, "hull_volume": r["hull_volume"],
          "max_crown_r": r["max_crown_r"], "hcb": r["hcb"],
          "vert_kde": r["vert_kde"], "hist_2d": r["hist_2d"]}
         for tid, r in real_feats.items()
@@ -376,7 +335,7 @@ def build_pair_dataframe(
 
     df_gen_feats = pd.DataFrame([
         {"gen_id": gid, "real_id": gen_id_to_meta[gid]["source_tree_id"],
-         "crown_volume": r["crown_volume"],
+         "hull_volume": r["hull_volume"],
          "max_crown_r": r["max_crown_r"], "hcb": r["hcb"]}
         for gid, r in gen_feats.items()
         if gid in gen_id_to_meta
@@ -393,7 +352,7 @@ def build_pair_dataframe(
             lambda x, c=col: id_to_row.loc[x, c] if x in id_to_row.index else "unknown"
         )
 
-    return df_pairs, df_real_feats, df_gen_feats, clip_info
+    return df_pairs, df_real_feats, df_gen_feats
 
 
 # ── Baselines ────────────────────────────────────────────────────────────────
@@ -425,7 +384,7 @@ def build_baselines(
                 rows.append({
                     "anchor_id": tid,
                     "neighbor_id": nid,
-                    "delta_crown_vol":   abs(anchor["crown_volume"] - nb["crown_volume"]),
+                    "delta_hull_vol":    abs(anchor["hull_volume"]  - nb["hull_volume"]),
                     "delta_max_crown_r": abs(anchor["max_crown_r"]  - nb["max_crown_r"]),
                     "delta_hcb":         abs(anchor["hcb"]          - nb["hcb"]),
                     "vert_kde_jsd":      jsd(anchor_kde, np.array(nb["vert_kde"])),
@@ -607,7 +566,7 @@ def build_stratified_table(
     lines.append("=" * 110)
 
     # Select a compact set of metrics for the stratified table
-    cond_metrics = ["vert_kde_jsd", "hist_2d_jsd", "delta_crown_vol",
+    cond_metrics = ["vert_kde_jsd", "hist_2d_jsd", "delta_hull_vol",
                     "delta_max_crown_r", "delta_hcb"]
 
     # Header row
@@ -616,14 +575,14 @@ def build_stratified_table(
         display, _ = METRIC_DISPLAY[m]
         short = display.replace("Δ ", "Δ").replace("Vertical KDE ", "V-KDE ")
         short = short.replace("2D histogram ", "H2D ")
-        short = short.replace("Crown volume", "CrV")
+        short = short.replace("Hull volume", "HuV")
         short = short.replace("Max crown radius", "CrR")
         short = short.replace("Height to crown base", "HCB")
         header_parts.append(f"{short:>9s}")
     # W₁ columns
     for prop in MORPH_PROPERTIES:
         _, unit = MORPH_DISPLAY[prop]
-        short = {"crown_volume": "W₁ CrV", "max_crown_r": "W₁ CrR", "hcb": "W₁ HCB"}[prop]
+        short = {"hull_volume": "W₁ HuV", "max_crown_r": "W₁ CrR", "hcb": "W₁ HCB"}[prop]
         header_parts.append(f"{short:>9s}")
     lines.append("".join(header_parts))
 
@@ -681,7 +640,6 @@ def save_results(
     w1_global: pd.DataFrame,
     w1_genus: pd.DataFrame,
     w1_height: pd.DataFrame,
-    clip_info: dict,
     run_args: dict | None = None,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -713,7 +671,6 @@ def save_results(
         "n_pairs": len(df_pairs),
         "n_real_trees": df_pairs["real_id"].nunique(),
         "n_gen_trees": len(df_pairs),
-        "outlier_clipping": clip_info,
     }
     if run_args:
         summary["args"] = run_args
@@ -757,8 +714,8 @@ def main():
     # 1. Load metadata
     real_meta, gen_meta = load_metadata(data_path, experiment_dir)
 
-    # 2. Extract features, apply hard caps, build pair dataframe
-    df_pairs, df_real_feats, df_gen_feats, clip_info = build_pair_dataframe(
+    # 2. Extract features and build pair dataframe
+    df_pairs, df_real_feats, df_gen_feats = build_pair_dataframe(
         real_meta, gen_meta, zarr_dir,
         max_points=args.max_points, num_workers=args.num_workers, seed=args.seed,
     )
@@ -809,7 +766,7 @@ def main():
     # 8. Save
     print(f"\nSaving results to {output_dir}...")
     save_results(output_dir, df_pairs, df_real_feats, df_gen_feats,
-                 tables, w1_global, w1_genus, w1_height, clip_info,
+                 tables, w1_global, w1_genus, w1_height,
                  run_args=vars(args))
 
     elapsed = time.time() - t_start
