@@ -207,7 +207,7 @@ def extract_features(cloud: np.ndarray, height_m: float) -> dict:
         cumr = np.cumsum(mean_r_per_slice)
         x_norm = (slice_centers - slice_centers[0]) / (slice_centers[-1] - slice_centers[0])
         y_norm = (cumr - cumr[0]) / (cumr[-1] - cumr[0])
-        d = y_norm - x_norm
+        d = x_norm - y_norm
         knee_idx = int(np.argmax(d))
         hcb_val = slice_centers[knee_idx] / s_max
 
