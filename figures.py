@@ -16,7 +16,12 @@ from matplotlib.ticker import MaxNLocator
 from numpy.polynomial import Polynomial
 
 from dataset import create_datasets
-from stem_tracker import find_trunk_base, track_spine_pass, compute_rz_spine, compute_rs_spine
+from stem_tracker import (
+    find_trunk_base,
+    track_spine_pass,
+    compute_rz_spine,
+    compute_rs_spine,
+)
 
 DOWNSAMPLE_POINTS = 16384
 
@@ -2063,7 +2068,9 @@ def create_figure_crown_audit(
         scale = height_m / 2.0
 
         # ── Stem tracker → cylindrical (r, s) ──
-        r, s, spine_raw, poly_x, poly_y = compute_rs_spine(cloud, num_bins=num_spine_bins)
+        r, s, spine_raw, poly_x, poly_y = compute_rs_spine(
+            cloud, num_bins=num_spine_bins
+        )
 
         z = cloud[:, 2]
         z_min, z_max = z.min(), z.max()
@@ -2073,7 +2080,7 @@ def create_figure_crown_audit(
         # ── Convex hull ──
         try:
             hull = ConvexHull(cloud)
-            hull_volume = float(hull.volume * scale ** 3)
+            hull_volume = float(hull.volume * scale**3)
         except Exception:
             hull = None
             hull_volume = float("nan")
@@ -2094,9 +2101,13 @@ def create_figure_crown_audit(
         # ── Height to crown base (Kneedle on cumulative mean-r) ──
         hcb_val = float("nan")
         kneedle_data = {}
-        if mean_r_per_slice.max() > 0 and not np.allclose(mean_r_per_slice, mean_r_per_slice[0]):
-            cumr = np.cumsum(mean_r_per_slice ** 1.5)
-            x_norm = (slice_centers - slice_centers[0]) / (slice_centers[-1] - slice_centers[0])
+        if mean_r_per_slice.max() > 0 and not np.allclose(
+            mean_r_per_slice, mean_r_per_slice[0]
+        ):
+            cumr = np.cumsum(mean_r_per_slice**2)
+            x_norm = (slice_centers - slice_centers[0]) / (
+                slice_centers[-1] - slice_centers[0]
+            )
             y_norm = (cumr - cumr[0]) / (cumr[-1] - cumr[0])
             d = x_norm - y_norm
             knee_idx = int(np.argmax(d))
@@ -2133,11 +2144,14 @@ def create_figure_crown_audit(
 
         def _setup_3d(ax, title, label):
             cloud_range = (
-                np.array([
-                    cloud[:, 0].max() - cloud[:, 0].min(),
-                    cloud[:, 1].max() - cloud[:, 1].min(),
-                    cloud[:, 2].max() - cloud[:, 2].min(),
-                ]).max() / 2.0
+                np.array(
+                    [
+                        cloud[:, 0].max() - cloud[:, 0].min(),
+                        cloud[:, 1].max() - cloud[:, 1].min(),
+                        cloud[:, 2].max() - cloud[:, 2].min(),
+                    ]
+                ).max()
+                / 2.0
             )
             mid = centroid
             ax.set_xlim(mid[0] - cloud_range, mid[0] + cloud_range)
@@ -2159,22 +2173,37 @@ def create_figure_crown_audit(
             ax.set_zlabel("")
             ax.set_title(title, fontsize=13, fontweight="bold", pad=8)
             ax.text2D(
-                0.02, 0.95, label,
-                transform=ax.transAxes, fontsize=16, fontweight="bold", va="top",
+                0.02,
+                0.95,
+                label,
+                transform=ax.transAxes,
+                fontsize=16,
+                fontweight="bold",
+                va="top",
             )
 
         # -- (a) 3D with convex hull --
         ax1 = fig.add_subplot(221, projection="3d")
         ax1.scatter(
-            cloud[idx, 0], cloud[idx, 1], cloud[idx, 2],
-            c=cloud[idx, 2], cmap="viridis", s=0.8, alpha=0.4, rasterized=True,
+            cloud[idx, 0],
+            cloud[idx, 1],
+            cloud[idx, 2],
+            c=cloud[idx, 2],
+            cmap="viridis",
+            s=0.8,
+            alpha=0.4,
+            rasterized=True,
         )
         if hull is not None:
             from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
             hull_faces = [cloud[s] for s in hull.simplices]
             hull_col = Poly3DCollection(
-                hull_faces, alpha=0.04, facecolor="red",
-                edgecolor="red", linewidth=0.3,
+                hull_faces,
+                alpha=0.04,
+                facecolor="red",
+                edgecolor="red",
+                linewidth=0.3,
             )
             ax1.add_collection3d(hull_col)
         _setup_3d(ax1, f"Convex hull  (V = {hull_volume:.2f} m³)", "(a)")
@@ -2182,14 +2211,24 @@ def create_figure_crown_audit(
         # -- (b) 3D with HCB plane + max crown radius ring --
         ax2 = fig.add_subplot(222, projection="3d")
         ax2.scatter(
-            cloud[idx, 0], cloud[idx, 1], cloud[idx, 2],
-            c=cloud[idx, 2], cmap="viridis", s=0.8, alpha=0.4, rasterized=True,
+            cloud[idx, 0],
+            cloud[idx, 1],
+            cloud[idx, 2],
+            c=cloud[idx, 2],
+            cmap="viridis",
+            s=0.8,
+            alpha=0.4,
+            rasterized=True,
         )
         # Spine curve
         if len(spine_curve) > 0:
             ax2.plot(
-                spine_curve[:, 0], spine_curve[:, 1], spine_curve[:, 2],
-                color="#d62728", linewidth=3.0, zorder=10,
+                spine_curve[:, 0],
+                spine_curve[:, 1],
+                spine_curve[:, 2],
+                color="#d62728",
+                linewidth=3.0,
+                zorder=10,
             )
 
         # HCB horizontal plane — find spine center at HCB z-height
@@ -2202,10 +2241,16 @@ def create_figure_crown_audit(
             plane_x = hcb_cx + plane_r * np.cos(theta)
             plane_y = hcb_cy + plane_r * np.sin(theta)
             plane_z = np.full_like(theta, hcb_z)
-            ax2.plot(plane_x, plane_y, plane_z, color="#2ca02c", linewidth=2.5, zorder=8)
+            ax2.plot(
+                plane_x, plane_y, plane_z, color="#2ca02c", linewidth=2.5, zorder=8
+            )
             ax2.plot_trisurf(
-                plane_x, plane_y, plane_z,
-                color="#2ca02c", alpha=0.15, zorder=7,
+                plane_x,
+                plane_y,
+                plane_z,
+                color="#2ca02c",
+                alpha=0.15,
+                zorder=7,
             )
 
         # Max crown radius ring — at the arc-length slice with max mean-r
@@ -2215,6 +2260,7 @@ def create_figure_crown_audit(
             # Map arc-length back to z via interpolation on spine
             spine_z_fine = np.linspace(z_min, z_max, 500)
             from numpy.polynomial import Polynomial as Poly
+
             dpx = poly_x.deriv()
             dpy = poly_y.deriv()
             ds_dz = np.sqrt(dpx(spine_z_fine) ** 2 + dpy(spine_z_fine) ** 2 + 1.0)
@@ -2230,8 +2276,12 @@ def create_figure_crown_audit(
             ring_y = ring_cy + max_crown_r_norm * np.sin(theta)
             ring_zz = np.full_like(theta, ring_z)
             ax2.plot(
-                ring_x, ring_y, ring_zz,
-                color="#ff7f0e", linewidth=2.5, zorder=9,
+                ring_x,
+                ring_y,
+                ring_zz,
+                color="#ff7f0e",
+                linewidth=2.5,
+                zorder=9,
             )
 
         _setup_3d(
@@ -2248,47 +2298,111 @@ def create_figure_crown_audit(
             d_curve = kneedle_data["d"]
             ki = kneedle_data["knee_idx"]
 
-            ax3.plot(x_n, y_n, color="steelblue", linewidth=2, label="Cumulative mean-$r$")
-            ax3.plot([0, 1], [0, 1], color="gray", linestyle="--", linewidth=1, label="Diagonal")
+            ax3.plot(
+                x_n, y_n, color="steelblue", linewidth=2, label="Cumulative mean-$r$"
+            )
+            ax3.plot(
+                [0, 1],
+                [0, 1],
+                color="gray",
+                linestyle="--",
+                linewidth=1,
+                label="Diagonal",
+            )
             ax3.fill_between(x_n, x_n, y_n, alpha=0.10, color="steelblue")
-            ax3.axvline(x_n[ki], color="#2ca02c", linewidth=2,
-                        label=f"Knee → HCB = {hcb_m:.1f} m")
+            ax3.axvline(
+                x_n[ki],
+                color="#2ca02c",
+                linewidth=2,
+                label=f"Knee → HCB = {hcb_m:.1f} m",
+            )
             ax3.plot(x_n[ki], y_n[ki], "o", color="#2ca02c", markersize=8, zorder=10)
 
             # Inset: distance curve
             ax3_inset = ax3.twinx()
-            ax3_inset.plot(x_n, d_curve, color="#d62728", linewidth=1.2, alpha=0.6, label="Distance $d$")
+            ax3_inset.plot(
+                x_n,
+                d_curve,
+                color="#d62728",
+                linewidth=1.2,
+                alpha=0.6,
+                label="Distance $d$",
+            )
             ax3_inset.set_ylabel("Distance $d$", fontsize=9, color="#d62728")
             ax3_inset.tick_params(axis="y", labelcolor="#d62728", labelsize=8)
 
             ax3.set_xlabel("Normalized arc-length", fontsize=11)
             ax3.set_ylabel("Normalized cumulative $r$", fontsize=11)
-            ax3.set_title("HCB detection (Kneedle on cumulative $r$)",
-                          fontsize=13, fontweight="bold", pad=8)
+            ax3.set_title(
+                "HCB detection (Kneedle on cumulative $r$)",
+                fontsize=13,
+                fontweight="bold",
+                pad=8,
+            )
             ax3.legend(fontsize=8, loc="upper left")
-        ax3.text(0.02, 0.97, "(c)", transform=ax3.transAxes,
-                 fontsize=16, fontweight="bold", va="top")
+        ax3.text(
+            0.02,
+            0.97,
+            "(c)",
+            transform=ax3.transAxes,
+            fontsize=16,
+            fontweight="bold",
+            va="top",
+        )
 
         # -- (d) Mean-r vs arc-length → max crown radius --
         ax4 = fig.add_subplot(224)
         slice_centers_m = slice_centers * scale
         mean_r_m = mean_r_per_slice * scale
-        ax4.plot(slice_centers_m, mean_r_m, color="steelblue", linewidth=2,
-                 marker="o", markersize=4, label="Mean $r$ per slice")
-        ax4.axhline(max_crown_r_m, color="#ff7f0e", linestyle="--", linewidth=1.5,
-                    label=f"Max = {max_crown_r_m:.2f} m")
-        ax4.plot(slice_centers_m[max_r_slice_idx], mean_r_m[max_r_slice_idx],
-                 "o", color="#ff7f0e", markersize=10, zorder=10)
+        ax4.plot(
+            slice_centers_m,
+            mean_r_m,
+            color="steelblue",
+            linewidth=2,
+            marker="o",
+            markersize=4,
+            label="Mean $r$ per slice",
+        )
+        ax4.axhline(
+            max_crown_r_m,
+            color="#ff7f0e",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"Max = {max_crown_r_m:.2f} m",
+        )
+        ax4.plot(
+            slice_centers_m[max_r_slice_idx],
+            mean_r_m[max_r_slice_idx],
+            "o",
+            color="#ff7f0e",
+            markersize=10,
+            zorder=10,
+        )
         if not np.isnan(hcb_val):
             hcb_s_m = hcb_val * (s_max * scale)
-            ax4.axvline(hcb_s_m, color="#2ca02c", linestyle=":", linewidth=1.5,
-                        alpha=0.7, label=f"HCB = {hcb_m:.1f} m")
+            ax4.axvline(
+                hcb_s_m,
+                color="#2ca02c",
+                linestyle=":",
+                linewidth=1.5,
+                alpha=0.7,
+                label=f"HCB = {hcb_m:.1f} m",
+            )
         ax4.set_xlabel("Arc-length $s$ (m)", fontsize=11)
         ax4.set_ylabel("Mean radial distance $r$ (m)", fontsize=11)
-        ax4.set_title("Max crown radius detection", fontsize=13, fontweight="bold", pad=8)
+        ax4.set_title(
+            "Max crown radius detection", fontsize=13, fontweight="bold", pad=8
+        )
         ax4.legend(fontsize=8, loc="upper right")
-        ax4.text(0.02, 0.97, "(d)", transform=ax4.transAxes,
-                 fontsize=16, fontweight="bold", va="top")
+        ax4.text(
+            0.02,
+            0.97,
+            "(d)",
+            transform=ax4.transAxes,
+            fontsize=16,
+            fontweight="bold",
+            va="top",
+        )
 
         species_display = species.replace("_", " ")
         fig.suptitle(
