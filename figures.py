@@ -2109,7 +2109,7 @@ def create_figure_crown_audit(
                 slice_centers[-1] - slice_centers[0]
             )
             y_norm = (cumr - cumr[0]) / (cumr[-1] - cumr[0])
-            d = (x_norm - y_norm) * (1 - x_norm)
+            d = (x_norm - y_norm) * (1 - x_norm)**0.5
             knee_idx = int(np.argmax(d))
             hcb_val = slice_centers[knee_idx] / s_max
             kneedle_data = {
