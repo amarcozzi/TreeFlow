@@ -2004,7 +2004,7 @@ def create_figure_crown_audit(
     """
     import zarr
     from scipy.spatial import ConvexHull
-    from evaluate_v3 import get_height_bin
+    from evaluate_v3 import get_height_bin, compute_mean_r_per_slice, compute_hcb
 
     output_dir = Path(output_dir)
     eval_dir = Path(experiment_dir) / "samples" / "evaluation_v3"
@@ -2085,39 +2085,14 @@ def create_figure_crown_audit(
             hull = None
             hull_volume = float("nan")
 
-        # ── Max crown radius (mirrors evaluate_v3 lines 194-201) ──
-        n_slices = 30
-        slice_edges = np.linspace(0, s_max, n_slices + 1)
-        slice_centers = 0.5 * (slice_edges[:-1] + slice_edges[1:])
-        mean_r_per_slice = np.zeros(n_slices)
-        for i in range(n_slices):
-            mask = (s >= slice_edges[i]) & (s < slice_edges[i + 1])
-            if mask.sum() > 0:
-                mean_r_per_slice[i] = r[mask].mean()
+        # ── Max crown radius ──
+        slice_centers, mean_r_per_slice = compute_mean_r_per_slice(s, r, s_max)
         max_crown_r_norm = mean_r_per_slice.max()
         max_crown_r_m = float(max_crown_r_norm * scale)
         max_r_slice_idx = int(np.argmax(mean_r_per_slice))
 
         # ── Height to crown base (Kneedle on cumulative mean-r) ──
-        hcb_val = float("nan")
-        kneedle_data = {}
-        if mean_r_per_slice.max() > 0 and not np.allclose(
-            mean_r_per_slice, mean_r_per_slice[0]
-        ):
-            cumr = np.cumsum(mean_r_per_slice)
-            x_norm = (slice_centers - slice_centers[0]) / (
-                slice_centers[-1] - slice_centers[0]
-            )
-            y_norm = (cumr - cumr[0]) / (cumr[-1] - cumr[0])
-            d = (x_norm - y_norm) * (1 - x_norm)**0.5
-            knee_idx = int(np.argmax(d))
-            hcb_val = slice_centers[knee_idx] / s_max
-            kneedle_data = {
-                "x_norm": x_norm,
-                "y_norm": y_norm,
-                "d": d,
-                "knee_idx": knee_idx,
-            }
+        hcb_val, kneedle_data = compute_hcb(slice_centers, mean_r_per_slice, s_max)
 
         hcb_m = float(hcb_val * height_m)
 

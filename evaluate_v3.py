@@ -140,6 +140,42 @@ def _compute_cd_parallel(
     return results
 
 
+# ── Shared crown-metric helpers ──────────────────────────────────────────────
+
+def compute_mean_r_per_slice(s, r, s_max, n_slices=30):
+    """Mean radial distance in each arc-length slice.
+
+    Returns (slice_centers, mean_r_per_slice) — both numpy arrays of length n_slices.
+    """
+    slice_edges = np.linspace(0, s_max, n_slices + 1)
+    slice_centers = 0.5 * (slice_edges[:-1] + slice_edges[1:])
+    mean_r_per_slice = np.zeros(n_slices)
+    for i in range(n_slices):
+        mask = (s >= slice_edges[i]) & (s < slice_edges[i + 1])
+        if mask.sum() > 0:
+            mean_r_per_slice[i] = r[mask].mean()
+    return slice_centers, mean_r_per_slice
+
+
+def compute_hcb(slice_centers, mean_r_per_slice, s_max):
+    """Detect height-to-crown-base via Kneedle on cumulative mean-r.
+
+    Returns (hcb_val, kneedle_data) where:
+        hcb_val     — float in [0, 1] normalised arc-length (nan if degenerate)
+        kneedle_data — dict with x_norm, y_norm, d, knee_idx (empty if degenerate)
+    """
+    if mean_r_per_slice.max() <= 0 or np.allclose(mean_r_per_slice, mean_r_per_slice[0]):
+        return float("nan"), {}
+    cumr = np.cumsum(mean_r_per_slice)
+    x_norm = (slice_centers - slice_centers[0]) / (slice_centers[-1] - slice_centers[0])
+    y_norm = (cumr - cumr[0]) / (cumr[-1] - cumr[0])
+    d = (x_norm - y_norm) * (1 - x_norm) ** 0.5
+    knee_idx = int(np.argmax(d))
+    hcb_val = slice_centers[knee_idx] / s_max
+    kneedle_data = {"x_norm": x_norm, "y_norm": y_norm, "d": d, "knee_idx": knee_idx}
+    return hcb_val, kneedle_data
+
+
 # ── Feature extraction ───────────────────────────────────────────────────────
 
 def extract_features(cloud: np.ndarray, height_m: float) -> dict:
@@ -191,25 +227,11 @@ def extract_features(cloud: np.ndarray, height_m: float) -> dict:
         hist_2d = hist_2d / total
 
     # 4. Mean-r per arc-length slice (shared by max crown radius + HCB)
-    n_slices = 30
-    slice_edges = np.linspace(0, s_max, n_slices + 1)
-    slice_centers = 0.5 * (slice_edges[:-1] + slice_edges[1:])
-    mean_r_per_slice = np.zeros(n_slices)
-    for i in range(n_slices):
-        mask = (s >= slice_edges[i]) & (s < slice_edges[i + 1])
-        if mask.sum() > 0:
-            mean_r_per_slice[i] = r[mask].mean()
+    slice_centers, mean_r_per_slice = compute_mean_r_per_slice(s, r, s_max)
     max_crown_r = float(mean_r_per_slice.max())
 
     # 5. Height to crown base (Kneedle on cumulative mean-r)
-    hcb_val = float("nan")
-    if mean_r_per_slice.max() > 0 and not np.allclose(mean_r_per_slice, mean_r_per_slice[0]):
-        cumr = np.cumsum(mean_r_per_slice ** 1.5)
-        x_norm = (slice_centers - slice_centers[0]) / (slice_centers[-1] - slice_centers[0])
-        y_norm = (cumr - cumr[0]) / (cumr[-1] - cumr[0])
-        d = x_norm - y_norm
-        knee_idx = int(np.argmax(d))
-        hcb_val = slice_centers[knee_idx] / s_max
+    hcb_val, _ = compute_hcb(slice_centers, mean_r_per_slice, s_max)
 
     return {
         "hull_volume":  hull_volume,
