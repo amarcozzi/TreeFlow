@@ -2421,8 +2421,8 @@ def create_figure_qualitative(
     checkpoint: str = None,
     data_path: str = None,
     n_rows: int = 6,
-    n_generated: int = 3,
-    cfg_scale: float = 3.0,
+    n_generated: int = 5,
+    cfg_scale: str = "1.5,5.0",
     canonicalize_clouds: bool = False,
     seed: int = 42,
     output_dir: str = "figures",
@@ -2557,13 +2557,19 @@ def create_figure_qualitative(
 
         species_name = ds_species_list[species_idx]
         type_name = ds_type_list[type_idx]
+        # Compute per-column CFG values
+        cfg_parts = [float(x) for x in cfg_scale.split(",")]
+        if len(cfg_parts) == 2:
+            cfg_values = list(np.linspace(cfg_parts[0], cfg_parts[1], n_generated))
+        else:
+            cfg_values = [cfg_parts[0]] * n_generated
+
+        cfg_str = ", ".join(f"{v:.1f}" for v in cfg_values)
         print(
             f"  Row {row_i+1}: {file_id} - {species_name} ({type_name}), "
-            f"H={height_raw:.1f}m, {num_points} pts"
+            f"H={height_raw:.1f}m, {num_points} pts, CFG=[{cfg_str}]"
         )
 
-        # Generate n_generated samples with same conditioning
-        cfg_values = [cfg_scale] * n_generated
         generated_norm = sample_conditional(
             model=model,
             num_points=num_points,
@@ -2718,8 +2724,9 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", default="figures")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--checkpoint", default=None, help="Checkpoint name (auto-discovers latest if not set)")
-    parser.add_argument("--cfg_scale", type=float, default=3.0)
+    parser.add_argument("--cfg_scale", type=str, default="1.5,5.0", help="Single value or 'low,high' for linear range across generated columns")
     parser.add_argument("--n_rows", type=int, default=6)
+    parser.add_argument("--n_generated", type=int, default=5)
     parser.add_argument("--canonicalize", action="store_true")
     parser.add_argument("--solver_method", default="dopri5")
     args = parser.parse_args()
@@ -2777,6 +2784,7 @@ if __name__ == "__main__":
                 checkpoint=args.checkpoint,
                 data_path=args.data_path,
                 n_rows=args.n_rows,
+                n_generated=args.n_generated,
                 cfg_scale=args.cfg_scale,
                 canonicalize_clouds=args.canonicalize,
                 seed=args.seed,
