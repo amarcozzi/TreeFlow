@@ -701,7 +701,7 @@ def create_figure_2(
     # Label for source distribution
     ax_c.text(
         1.5,
-        3.5,
+        3.75,
         r"$X_0$ (Source)" + "\n" + r"$\mathcal{N}(0, I)$",
         fontsize=12,
         color="#1565C0",
@@ -713,7 +713,7 @@ def create_figure_2(
     # Label for target distribution
     ax_c.text(
         7.5,
-        3.5,
+        3.75,
         r"$X_1$ (Target)" + "\n" + r"$p_{\mathrm{data}}$",
         fontsize=12,
         color="#C62828",
@@ -2487,7 +2487,9 @@ def create_figure_qualitative(
         species_groups.setdefault(sp_idx, []).append(i)
 
     # Sort species by number of samples (pick from well-represented species first)
-    sorted_species = sorted(species_groups.keys(), key=lambda k: -len(species_groups[k]))
+    sorted_species = sorted(
+        species_groups.keys(), key=lambda k: -len(species_groups[k])
+    )
 
     selected_indices = []
     used_species = set()
@@ -2501,7 +2503,9 @@ def create_figure_qualitative(
         heights = [(i, test_ds[i]["height_raw"].item()) for i in indices]
         heights.sort(key=lambda x: x[1])
         percentile_idx = len(selected_indices) % 3  # cycle through low, mid, high
-        pos = [len(heights) // 4, len(heights) // 2, 3 * len(heights) // 4][percentile_idx]
+        pos = [len(heights) // 4, len(heights) // 2, 3 * len(heights) // 4][
+            percentile_idx
+        ]
         pos = min(pos, len(heights) - 1)
         selected_indices.append(heights[pos][0])
         used_species.add(sp_idx)
@@ -2509,7 +2513,8 @@ def create_figure_qualitative(
     # If we need more rows, pick additional trees from remaining pool
     if len(selected_indices) < n_rows:
         all_remaining = [
-            i for sp_indices in species_groups.values()
+            i
+            for sp_indices in species_groups.values()
             for i in sp_indices
             if i not in selected_indices
         ]
@@ -2583,7 +2588,9 @@ def create_figure_qualitative(
         # generated_norm shape: (n_generated, num_points, 3)
 
         # Collect all clouds for this row (real + generated) in normalized coords
-        row_clouds_norm = [points_norm] + [generated_norm[j] for j in range(n_generated)]
+        row_clouds_norm = [points_norm] + [
+            generated_norm[j] for j in range(n_generated)
+        ]
 
         # Optionally canonicalize
         if canonicalize_clouds:
@@ -2615,8 +2622,8 @@ def create_figure_qualitative(
     point_size = 0.4
     elev, azim = 20, 45
     margin = 0.05  # 5% padding around point extent
-    col_width = 2.0   # inches per column
-    row_height = 3.0   # inches per row (tall for trees)
+    col_width = 2.0  # inches per column
+    row_height = 3.0  # inches per row (tall for trees)
     fig_width = col_width * n_cols
     fig_height = row_height * n_rows
 
@@ -2640,9 +2647,14 @@ def create_figure_qualitative(
     def setup_ax(ax, pts, mids, ranges):
         """Configure a 3D axis with tight per-axis limits."""
         ax.scatter(
-            pts[:, 0], pts[:, 1], pts[:, 2],
-            c=pts[:, 2], cmap="viridis", s=point_size,
-            alpha=0.8, rasterized=True,
+            pts[:, 0],
+            pts[:, 1],
+            pts[:, 2],
+            c=pts[:, 2],
+            cmap="viridis",
+            s=point_size,
+            alpha=0.8,
+            rasterized=True,
         )
         ax.set_xlim(mids[0] - ranges[0] / 2, mids[0] + ranges[0] / 2)
         ax.set_ylim(mids[1] - ranges[1] / 2, mids[1] + ranges[1] / 2)
@@ -2665,7 +2677,9 @@ def create_figure_qualitative(
         plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0.02)
         row_label = chr(ord("a") + row_i)
         row_path = output_dir / f"figure_qualitative_{row_label}.pdf"
-        fig_row.savefig(row_path, format="pdf", bbox_inches="tight", dpi=600, pad_inches=0)
+        fig_row.savefig(
+            row_path, format="pdf", bbox_inches="tight", dpi=600, pad_inches=0
+        )
         plt.close(fig_row)
         print(f"  Saved row: {row_path}")
 
@@ -2707,6 +2721,282 @@ def create_figure_qualitative(
     print(f"\nQualitative figure saved to {output_dir}/")
 
 
+def plot_stem_tracker_figure(
+    zarr_path: str,
+    height_m: float,
+    output_path: str,
+    num_spine_bins: int = 20,
+    seed: int = 42,
+    hist_r_bins: int = 32,
+    hist_s_bins: int = 64,
+):
+    """Generate a 1×2 appendix figure: 3D spine overlay + (r, s) density histogram.
+
+    Args:
+        zarr_path: Path to a single tree's zarr file (normalized coordinates).
+        height_m: Tree height in meters (used to scale cloud for 3D display).
+        output_path: Where to save the PDF.
+        num_spine_bins: Number of vertical bins for the stem tracker.
+        seed: Random seed for point subsampling.
+        hist_r_bins: Radial bins for the 2D histogram (default 32, matching spine audit).
+        hist_s_bins: Arc-length bins for the 2D histogram (default 64, matching spine audit).
+    """
+    import zarr
+    from matplotlib.colors import PowerNorm
+
+    # ---- Load and scale cloud ----
+    cloud_norm = zarr.load(str(zarr_path)).astype(np.float32)
+    cloud = cloud_norm * height_m  # scale to meters for spine fitting
+
+    # ---- Compute (r, s) cylindrical coordinates on normalized cloud ----
+    r, s, spine_raw, poly_x, poly_y = compute_rs_spine(
+        cloud_norm, num_bins=num_spine_bins
+    )
+
+    # ---- Smooth polynomial spine in meters for 3D overlay ----
+    x, y, z = cloud[:, 0], cloud[:, 1], cloud[:, 2]
+    z_min, z_max = z.min(), z.max()
+    # Evaluate the fitted polynomials in normalized space, then scale
+    z_norm = cloud_norm[:, 2]
+    zn_min, zn_max = z_norm.min(), z_norm.max()
+    spine_zn_dense = np.linspace(zn_min, zn_max, 200)
+    spine_curve = np.column_stack(
+        [
+            poly_x(spine_zn_dense) * height_m,
+            poly_y(spine_zn_dense) * height_m,
+            spine_zn_dense * height_m,
+        ]
+    )
+
+    # ---- Subsample for 3D scatter ----
+    rng = np.random.default_rng(seed)
+    n_show = min(8000, len(cloud))
+    idx = rng.choice(len(cloud), n_show, replace=False)
+
+    # ---- Figure setup ----
+    prev_rc = {
+        k: plt.rcParams[k]
+        for k in [
+            "font.family",
+            "font.size",
+            "axes.labelsize",
+            "xtick.labelsize",
+            "ytick.labelsize",
+        ]
+    }
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.size": 9,
+            "axes.labelsize": 10,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+        }
+    )
+
+    # Render the 3D panel to an image buffer first, crop it tight, then
+    # compose both panels side-by-side at matched heights.  This avoids
+    # the matplotlib 3D projection sizing issues entirely.
+    import io
+    from PIL import Image
+
+    render_dpi = 300
+
+    # ---- Render 3D panel to image ----
+    # Use per-axis limits with padding instead of a cube, so tall narrow
+    # trees fill the vertical extent rather than floating in a big cube.
+    centroid = cloud.mean(axis=0)
+    pad = 0.15  # fraction of each axis range to pad
+    ranges = np.ptp(cloud, axis=0)
+    # Ensure XY ranges are equal (so the tree isn't distorted in plan view)
+    xy_range = max(ranges[0], ranges[1])
+    half_xy = xy_range * (1 + pad) / 2.0
+    half_z = ranges[2] * (1 + pad) / 2.0
+
+    # Figure aspect ratio matches the 3D box proportions
+    fig3d = plt.figure(figsize=(5, 5 * half_z / max(half_xy, 1e-6)), dpi=render_dpi)
+    ax1 = fig3d.add_subplot(111, projection="3d")
+    ax1.scatter(
+        cloud[idx, 0],
+        cloud[idx, 1],
+        cloud[idx, 2],
+        c=cloud[idx, 2],
+        cmap="viridis",
+        s=0.8,
+        alpha=0.4,
+        rasterized=True,
+    )
+    ax1.plot(
+        spine_curve[:, 0],
+        spine_curve[:, 1],
+        spine_curve[:, 2],
+        color="#d62728",
+        linewidth=3.5,
+        zorder=10,
+    )
+
+    ax1.set_xlim(centroid[0] - half_xy, centroid[0] + half_xy)
+    ax1.set_ylim(centroid[1] - half_xy, centroid[1] + half_xy)
+    ax1.set_zlim(centroid[2] - half_z, centroid[2] + half_z)
+    ax1.set_box_aspect([half_xy, half_xy, half_z])
+    ax1.view_init(elev=15, azim=135)
+    ax1.xaxis.pane.fill = False
+    ax1.yaxis.pane.fill = False
+    ax1.zaxis.pane.fill = False
+    ax1.xaxis.pane.set_edgecolor("lightgray")
+    ax1.yaxis.pane.set_edgecolor("lightgray")
+    ax1.zaxis.pane.set_edgecolor("lightgray")
+    ax1.grid(True, alpha=0.2)
+    ax1.set_xticklabels([])
+    ax1.set_yticklabels([])
+    ax1.set_zticklabels([])
+    ax1.set_xlabel("")
+    ax1.set_ylabel("")
+    ax1.set_zlabel("")
+
+    buf = io.BytesIO()
+    fig3d.savefig(
+        buf,
+        format="png",
+        dpi=render_dpi,
+        bbox_inches="tight",
+        pad_inches=0.05,
+        facecolor="white",
+    )
+    plt.close(fig3d)
+    buf.seek(0)
+    img_3d = np.array(Image.open(buf))
+
+    # ---- Compose final figure: 3D image on left, heatmap on right ----
+    fig = plt.figure(figsize=(10, 5))
+    # Place the 3D image — axes fills left half, image scaled to match
+    ax_img = fig.add_axes([0.02, 0.02, 0.44, 0.96])
+    ax_img.imshow(img_3d)
+    ax_img.set_axis_off()
+
+    ax2 = fig.add_axes([0.52, 0.12, 0.34, 0.80])
+
+    # ---- Panel (b): 2D density histogram in (r, s) ----
+    eps = 1e-6
+    r_max = np.percentile(r, 99.5) + eps
+    s_max = s.max() + eps if s.max() > 0 else eps
+    hist, r_edges, s_edges = np.histogram2d(
+        r,
+        s,
+        bins=[
+            np.linspace(0, r_max, hist_r_bins + 1),
+            np.linspace(0, s_max, hist_s_bins + 1),
+        ],
+    )
+    density = hist / (hist.sum() + eps)
+    density_ma = np.ma.masked_equal(density, 0)
+    vmax = np.percentile(density[density > 0], 99) if (density > 0).any() else 1
+
+    cmap_heat = plt.cm.YlGnBu.copy()
+    cmap_heat.set_bad(color="white")
+    pcm = ax2.pcolormesh(
+        r_edges,
+        s_edges,
+        density_ma.T,
+        cmap=cmap_heat,
+        norm=PowerNorm(gamma=0.4, vmin=0, vmax=vmax),
+        rasterized=True,
+    )
+    ax2.set_xlabel(r"Radial distance $r$", fontsize=11)
+    ax2.set_ylabel(r"Arc length $s$", fontsize=11)
+    cb = fig.colorbar(pcm, ax=ax2, pad=0.02, fraction=0.046)
+    cb.set_label("Point density", fontsize=9)
+    cb.ax.tick_params(labelsize=8)
+
+    # ---- Save ----
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    plt.rcParams.update(prev_rc)
+    print(f"Saved stem tracker figure: {output_path}")
+
+
+def create_figure_stem_tracker(
+    data_path: str = "./data/preprocessed-16384",
+    output_dir: str = "figures",
+    tree_ids: list[int] | None = None,
+    seed: int = 42,
+):
+    """CLI-facing wrapper: resolve tree IDs from dataset metadata, then plot.
+
+    Args:
+        data_path: Path to preprocessed dataset directory (with metadata.csv).
+        output_dir: Directory to save PDFs into.
+        tree_ids: List of tree IDs to plot. If None, prints available IDs.
+        seed: Random seed for point subsampling.
+    """
+    data_path = Path(data_path)
+    meta_csv = data_path / "metadata.csv"
+    df = pd.read_csv(meta_csv)
+    df["file_id"] = df["filename"].apply(lambda x: Path(x).stem)
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if tree_ids is None:
+        print("No tree IDs specified. Available trees:")
+        for _, row in df.iterrows():
+            print(
+                f"  {int(row['treeID']):5d}  {row['species']:30s}  H={row['tree_H']:.1f}m  ({row['split']})"
+            )
+        return
+
+    metadata = {}
+    for tree_id in tree_ids:
+        tree_rows = df[df["treeID"] == tree_id]
+        if tree_rows.empty:
+            print(f"Tree {tree_id} not found in {meta_csv}")
+            continue
+
+        row = tree_rows.iloc[0]
+        height_m = float(row["tree_H"])
+        species = row["species"]
+        file_id = row["file_id"]
+        data_type = row["data_type"]
+        dataset = row["dataset"]
+        split = row["split"]
+        zarr_path = data_path / f"{file_id}.zarr"
+
+        if not zarr_path.exists():
+            print(f"Zarr not found: {zarr_path}")
+            continue
+
+        species_safe = species.replace(" ", "_")
+        output_path = (
+            out_dir / f"figure_appendix_stem_tracker_{species_safe}_{tree_id}.pdf"
+        )
+        print(f"Stem tracker figure: tree {tree_id}, {species}, H={height_m:.1f}m")
+        plot_stem_tracker_figure(
+            str(zarr_path),
+            height_m,
+            str(output_path),
+            seed=seed,
+        )
+
+        metadata[str(tree_id)] = {
+            "tree_id": int(tree_id),
+            "file_id": file_id,
+            "species": species,
+            "height_m": round(height_m, 2),
+            "data_type": data_type,
+            "dataset": dataset,
+            "split": split,
+            "output_path": str(output_path),
+        }
+
+    if metadata:
+        meta_path = out_dir / "figure_stem_tracker.json"
+        with open(meta_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        print(f"  Saved metadata: {meta_path}")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -2715,16 +3005,25 @@ if __name__ == "__main__":
         "--figures",
         nargs="+",
         default=["spine_audit"],
-        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit, crown_audit, qualitative)",
+        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit, crown_audit, qualitative, stem_tracker)",
     )
     parser.add_argument(
         "--experiment_dir", default="experiments/transformer-8-512-4096"
     )
-    parser.add_argument("--data_path", default="./data/preprocessed-4096")
+    parser.add_argument("--data_path", default="./data/preprocessed-16384")
     parser.add_argument("--output_dir", default="figures")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--checkpoint", default=None, help="Checkpoint name (auto-discovers latest if not set)")
-    parser.add_argument("--cfg_scale", type=str, default="1.5,5.0", help="Single value or 'low,high' for linear range across generated columns")
+    parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help="Checkpoint name (auto-discovers latest if not set)",
+    )
+    parser.add_argument(
+        "--cfg_scale",
+        type=str,
+        default="1.5,5.0",
+        help="Single value or 'low,high' for linear range across generated columns",
+    )
     parser.add_argument("--n_rows", type=int, default=6)
     parser.add_argument("--n_generated", type=int, default=4)
     parser.add_argument("--canonicalize", action="store_true")
@@ -2790,6 +3089,13 @@ if __name__ == "__main__":
                 seed=args.seed,
                 output_dir=args.output_dir,
                 solver_method=args.solver_method,
+            )
+        elif fig_name == "stem_tracker":
+            create_figure_stem_tracker(
+                data_path=args.data_path,
+                output_dir=args.output_dir,
+                tree_ids=[12917, 12776, 17199, 11286, 16927],
+                seed=args.seed,
             )
         else:
             print(f"Unknown figure: {fig_name}")
