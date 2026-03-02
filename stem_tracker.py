@@ -29,16 +29,19 @@ def find_trunk_base(
     bandwidth: float,
     n_sub: int = 6,
 ) -> tuple[float, float]:
-    """Find the trunk base using vertical persistence in the lower portion.
+    """Find the trunk base using vertical persistence.
 
     Instead of finding the densest cluster in a thin base slab (which can
-    be hijacked by a low branch), this uses the bottom ~30% of the tree
-    split into n_sub sub-slices. For each candidate XY position, it counts
+    be hijacked by a low branch), this splits the provided points into
+    n_sub horizontal sub-slices. For each candidate XY position, it counts
     how many sub-slices have nearby points. The trunk wins because it
     persists across all sub-slices; a branch only appears in one or two.
 
+    The caller is responsible for pre-filtering to the relevant vertical
+    region (e.g. the lower 30% of the tree).
+
     Algorithm:
-    1. Split the lower 30% of the tree into n_sub horizontal sub-slices.
+    1. Split the provided points into n_sub horizontal sub-slices.
     2. In each sub-slice, run mean-shift to find the densest cluster center.
     3. Build candidate set from all sub-slice centers.
     4. Score each candidate by how many sub-slices have points within
@@ -46,22 +49,18 @@ def find_trunk_base(
     5. Among the highest-scoring candidates, pick the one closest to the
        overall median (tiebreaker favoring the geometric center).
     """
-    z_min, z_max = z.min(), z.max()
-    base_top = z_min + (z_max - z_min) * 0.3
-    base_mask = z <= base_top
-    if base_mask.sum() < 5:
+    if len(z) < 5:
         return np.median(x), np.median(y)
 
-    xb, yb, zb = x[base_mask], y[base_mask], z[base_mask]
-    sub_edges = np.linspace(zb.min(), zb.max(), n_sub + 1)
+    sub_edges = np.linspace(z.min(), z.max(), n_sub + 1)
 
     # Collect mean-shift centers from each sub-slice
     candidates = []
     for s in range(n_sub):
-        smask = (zb >= sub_edges[s]) & (zb <= sub_edges[s + 1])
+        smask = (z >= sub_edges[s]) & (z <= sub_edges[s + 1])
         if smask.sum() < 3:
             continue
-        xs, ys = xb[smask], yb[smask]
+        xs, ys = x[smask], y[smask]
         # Mean-shift convergence within sub-slice
         cx, cy = np.median(xs), np.median(ys)
         for _ in range(20):
@@ -83,16 +82,16 @@ def find_trunk_base(
     # Score each candidate by vertical persistence:
     # how many sub-slices have points within `bandwidth` of this (x,y)?
     best_score = -1
-    med_x, med_y = np.median(xb), np.median(yb)
+    med_x, med_y = np.median(x), np.median(y)
     best_cx, best_cy = candidates[0]
 
     for cx, cy in candidates:
         score = 0
         for s in range(n_sub):
-            smask = (zb >= sub_edges[s]) & (zb <= sub_edges[s + 1])
+            smask = (z >= sub_edges[s]) & (z <= sub_edges[s + 1])
             if smask.sum() < 1:
                 continue
-            dists = np.sqrt((xb[smask] - cx) ** 2 + (yb[smask] - cy) ** 2)
+            dists = np.sqrt((x[smask] - cx) ** 2 + (y[smask] - cy) ** 2)
             if np.any(dists <= bandwidth):
                 score += 1
 
