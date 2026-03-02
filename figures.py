@@ -2622,8 +2622,8 @@ def create_figure_qualitative(
     point_size = 0.4
     elev, azim = 20, 45
     margin = 0.05  # 5% padding around point extent
-    col_width = 2.0  # inches per column
-    row_height = 3.0  # inches per row (tall for trees)
+    col_width = 1.4   # inches per column (narrow — trees are tall & thin)
+    row_height = 2.8  # inches per row
     fig_width = col_width * n_cols
     fig_height = row_height * n_rows
 
@@ -2674,7 +2674,7 @@ def create_figure_qualitative(
             ax = fig_row.add_subplot(1, n_cols, col_j + 1, projection="3d")
             setup_ax(ax, row_clouds[col_j], mids, ranges)
 
-        plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0.02)
+        plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=-0.35)
         row_label = chr(ord("a") + row_i)
         row_path = output_dir / f"figure_qualitative_{row_label}.pdf"
         fig_row.savefig(
@@ -2695,7 +2695,7 @@ def create_figure_qualitative(
             ax = fig.add_subplot(n_rows, n_cols, subplot_idx, projection="3d")
             setup_ax(ax, row_clouds[col_j], mids, ranges)
 
-    plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0.02, hspace=0.02)
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=-0.35, hspace=0.02)
     combined_path = output_dir / "figure_qualitative.pdf"
     fig.savefig(combined_path, format="pdf", bbox_inches="tight", dpi=600, pad_inches=0)
     plt.close(fig)
