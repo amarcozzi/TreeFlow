@@ -2608,53 +2608,58 @@ def create_figure_qualitative(
     # Rendering parameters
     point_size = 0.4
     elev, azim = 20, 45
-    row_height = 1.8  # inches per row
-    col_width = 1.8   # inches per column
+    margin = 0.05  # 5% padding around point extent
+    col_width = 2.0   # inches per column
+    row_height = 3.0   # inches per row (tall for trees)
     fig_width = col_width * n_cols
     fig_height = row_height * n_rows
 
     print("Rendering figure grid...")
 
+    def compute_row_limits(row_clouds):
+        """Compute per-axis limits and box aspect for a row of point clouds."""
+        all_pts = np.concatenate(row_clouds, axis=0)
+        ranges = []
+        mids = []
+        for dim in range(3):
+            lo, hi = all_pts[:, dim].min(), all_pts[:, dim].max()
+            span = hi - lo
+            pad = span * margin
+            ranges.append(span + 2 * pad)
+            mids.append((lo + hi) / 2)
+        # Ensure no zero-range axis
+        ranges = [max(r, 0.1) for r in ranges]
+        return mids, ranges
+
+    def setup_ax(ax, pts, mids, ranges):
+        """Configure a 3D axis with tight per-axis limits."""
+        ax.scatter(
+            pts[:, 0], pts[:, 1], pts[:, 2],
+            c=pts[:, 2], cmap="viridis", s=point_size,
+            alpha=0.8, rasterized=True,
+        )
+        ax.set_xlim(mids[0] - ranges[0] / 2, mids[0] + ranges[0] / 2)
+        ax.set_ylim(mids[1] - ranges[1] / 2, mids[1] + ranges[1] / 2)
+        ax.set_zlim(mids[2] - ranges[2] / 2, mids[2] + ranges[2] / 2)
+        ax.set_box_aspect(ranges)
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_axis_off()
+
     # --- Save individual row strips ---
     for row_i in range(n_rows):
         row_clouds = all_clouds[row_i]
-
-        # Compute shared axis limits for this row
-        all_pts = np.concatenate(row_clouds, axis=0)
-        max_range = (
-            np.array([
-                np.ptp(all_pts[:, 0]),
-                np.ptp(all_pts[:, 1]),
-                np.ptp(all_pts[:, 2]),
-            ]).max()
-            / 2.0
-        )
-        mid_x = (all_pts[:, 0].max() + all_pts[:, 0].min()) / 2
-        mid_y = (all_pts[:, 1].max() + all_pts[:, 1].min()) / 2
-        mid_z = (all_pts[:, 2].max() + all_pts[:, 2].min()) / 2
+        mids, ranges = compute_row_limits(row_clouds)
 
         fig_row = plt.figure(figsize=(col_width * n_cols, row_height))
 
         for col_j in range(n_cols):
             ax = fig_row.add_subplot(1, n_cols, col_j + 1, projection="3d")
-            pts = row_clouds[col_j]
-
-            ax.scatter(
-                pts[:, 0], pts[:, 1], pts[:, 2],
-                c=pts[:, 2], cmap="viridis", s=point_size,
-                alpha=0.8, rasterized=True,
-            )
-
-            ax.set_xlim(mid_x - max_range, mid_x + max_range)
-            ax.set_ylim(mid_y - max_range, mid_y + max_range)
-            ax.set_zlim(mid_z - max_range, mid_z + max_range)
-            ax.view_init(elev=elev, azim=azim)
-            ax.set_axis_off()
+            setup_ax(ax, row_clouds[col_j], mids, ranges)
 
         plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0.02)
         row_label = chr(ord("a") + row_i)
         row_path = output_dir / f"figure_qualitative_{row_label}.pdf"
-        fig_row.savefig(row_path, format="pdf", bbox_inches="tight", dpi=600)
+        fig_row.savefig(row_path, format="pdf", bbox_inches="tight", dpi=600, pad_inches=0)
         plt.close(fig_row)
         print(f"  Saved row: {row_path}")
 
@@ -2663,41 +2668,16 @@ def create_figure_qualitative(
 
     for row_i in range(n_rows):
         row_clouds = all_clouds[row_i]
-
-        # Shared axis limits per row
-        all_pts = np.concatenate(row_clouds, axis=0)
-        max_range = (
-            np.array([
-                np.ptp(all_pts[:, 0]),
-                np.ptp(all_pts[:, 1]),
-                np.ptp(all_pts[:, 2]),
-            ]).max()
-            / 2.0
-        )
-        mid_x = (all_pts[:, 0].max() + all_pts[:, 0].min()) / 2
-        mid_y = (all_pts[:, 1].max() + all_pts[:, 1].min()) / 2
-        mid_z = (all_pts[:, 2].max() + all_pts[:, 2].min()) / 2
+        mids, ranges = compute_row_limits(row_clouds)
 
         for col_j in range(n_cols):
             subplot_idx = row_i * n_cols + col_j + 1
             ax = fig.add_subplot(n_rows, n_cols, subplot_idx, projection="3d")
-            pts = row_clouds[col_j]
-
-            ax.scatter(
-                pts[:, 0], pts[:, 1], pts[:, 2],
-                c=pts[:, 2], cmap="viridis", s=point_size,
-                alpha=0.8, rasterized=True,
-            )
-
-            ax.set_xlim(mid_x - max_range, mid_x + max_range)
-            ax.set_ylim(mid_y - max_range, mid_y + max_range)
-            ax.set_zlim(mid_z - max_range, mid_z + max_range)
-            ax.view_init(elev=elev, azim=azim)
-            ax.set_axis_off()
+            setup_ax(ax, row_clouds[col_j], mids, ranges)
 
     plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0.02, hspace=0.02)
     combined_path = output_dir / "figure_qualitative.pdf"
-    fig.savefig(combined_path, format="pdf", bbox_inches="tight", dpi=600)
+    fig.savefig(combined_path, format="pdf", bbox_inches="tight", dpi=600, pad_inches=0)
     plt.close(fig)
     print(f"  Saved combined: {combined_path}")
 
