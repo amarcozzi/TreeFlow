@@ -2421,7 +2421,7 @@ def create_figure_qualitative(
     checkpoint: str = None,
     data_path: str = None,
     n_rows: int = 6,
-    n_generated: int = 5,
+    n_generated: int = 4,
     cfg_scale: str = "1.5,5.0",
     canonicalize_clouds: bool = False,
     seed: int = 42,
@@ -2726,7 +2726,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", default=None, help="Checkpoint name (auto-discovers latest if not set)")
     parser.add_argument("--cfg_scale", type=str, default="1.5,5.0", help="Single value or 'low,high' for linear range across generated columns")
     parser.add_argument("--n_rows", type=int, default=6)
-    parser.add_argument("--n_generated", type=int, default=5)
+    parser.add_argument("--n_generated", type=int, default=4)
     parser.add_argument("--canonicalize", action="store_true")
     parser.add_argument("--solver_method", default="dopri5")
     args = parser.parse_args()
