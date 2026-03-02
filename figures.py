@@ -2623,9 +2623,9 @@ def create_figure_qualitative(
         all_pts = np.concatenate(row_clouds, axis=0)
         max_range = (
             np.array([
-                all_pts[:, 0].ptp(),
-                all_pts[:, 1].ptp(),
-                all_pts[:, 2].ptp(),
+                np.ptp(all_pts[:, 0]),
+                np.ptp(all_pts[:, 1]),
+                np.ptp(all_pts[:, 2]),
             ]).max()
             / 2.0
         )
@@ -2668,9 +2668,9 @@ def create_figure_qualitative(
         all_pts = np.concatenate(row_clouds, axis=0)
         max_range = (
             np.array([
-                all_pts[:, 0].ptp(),
-                all_pts[:, 1].ptp(),
-                all_pts[:, 2].ptp(),
+                np.ptp(all_pts[:, 0]),
+                np.ptp(all_pts[:, 1]),
+                np.ptp(all_pts[:, 2]),
             ]).max()
             / 2.0
         )
