@@ -701,7 +701,7 @@ def create_figure_2(
     # Label for source distribution
     ax_c.text(
         1.5,
-        3.2,
+        3.5,
         r"$X_0$ (Source)" + "\n" + r"$\mathcal{N}(0, I)$",
         fontsize=12,
         color="#1565C0",
@@ -713,7 +713,7 @@ def create_figure_2(
     # Label for target distribution
     ax_c.text(
         7.5,
-        3.2,
+        3.5,
         r"$X_1$ (Target)" + "\n" + r"$p_{\mathrm{data}}$",
         fontsize=12,
         color="#C62828",
@@ -2406,6 +2406,321 @@ def create_figure_crown_audit(
     print(f"\nCrown audit: {total_figs} figures saved to {audit_dir}/")
 
 
+def find_latest_checkpoint(experiment_dir):
+    """Find the latest epoch checkpoint in an experiment directory."""
+    ckpt_dir = Path(experiment_dir) / "checkpoints"
+    epoch_files = list(ckpt_dir.glob("epoch_*.pt"))
+    if not epoch_files:
+        return "best_model.pt"
+    epochs = sorted([int(f.stem.split("_")[1]) for f in epoch_files])
+    return f"epoch_{epochs[-1]}.pt"
+
+
+def create_figure_qualitative(
+    experiment_dir: str = "experiments/finetune-8-512-16384",
+    checkpoint: str = None,
+    data_path: str = None,
+    n_rows: int = 6,
+    n_generated: int = 3,
+    cfg_scale: float = 3.0,
+    canonicalize_clouds: bool = False,
+    seed: int = 42,
+    output_dir: str = "figures",
+    solver_method: str = "dopri5",
+):
+    """
+    Create qualitative results figure: real test trees alongside generated counterparts.
+
+    Grid layout: n_rows x (1 + n_generated) — column 1 is real, rest are generated.
+    No subplot titles (handled by LaTeX subcaptions).
+    """
+    import torch
+    from types import SimpleNamespace
+    from generate_samples import load_experiment_config, load_checkpoint
+    from models import get_model
+    from sample import sample_conditional
+    from evaluate_v3 import canonicalize
+
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    experiment_dir = Path(experiment_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+
+    # Load experiment config
+    print("Loading experiment config...")
+    config = load_experiment_config(experiment_dir)
+    species_list = config["species_list"]
+    type_list = config["type_list"]
+
+    if data_path is None:
+        data_path = config.get("data_path", "./data/preprocessed-16384")
+
+    max_points = config.get("max_points", DOWNSAMPLE_POINTS)
+
+    # Auto-discover checkpoint
+    if checkpoint is None:
+        checkpoint = find_latest_checkpoint(experiment_dir)
+    checkpoint_path = experiment_dir / "checkpoints" / checkpoint
+    print(f"Using checkpoint: {checkpoint_path}")
+
+    # Load test dataset (no augmentation)
+    print("Loading test dataset...")
+    _, _, test_ds, ds_species_list, ds_type_list = create_datasets(
+        data_path=data_path,
+        sample_exponent=None,
+        rotation_augment=False,
+        shuffle_augment=False,
+        cache_train=False,
+        cache_val=False,
+        cache_test=True,
+        max_points=max_points,
+    )
+    print(f"Test set: {len(test_ds)} trees")
+
+    # Select diverse trees: group by species, pick across height range
+    species_groups = {}
+    for i in range(len(test_ds)):
+        sample = test_ds[i]
+        sp_idx = sample["species_idx"].item()
+        species_groups.setdefault(sp_idx, []).append(i)
+
+    # Sort species by number of samples (pick from well-represented species first)
+    sorted_species = sorted(species_groups.keys(), key=lambda k: -len(species_groups[k]))
+
+    selected_indices = []
+    used_species = set()
+
+    # First pass: pick one tree per species, sorted by height diversity
+    for sp_idx in sorted_species:
+        if len(selected_indices) >= n_rows:
+            break
+        indices = species_groups[sp_idx]
+        # Sort by height and pick from different height percentiles for variety
+        heights = [(i, test_ds[i]["height_raw"].item()) for i in indices]
+        heights.sort(key=lambda x: x[1])
+        percentile_idx = len(selected_indices) % 3  # cycle through low, mid, high
+        pos = [len(heights) // 4, len(heights) // 2, 3 * len(heights) // 4][percentile_idx]
+        pos = min(pos, len(heights) - 1)
+        selected_indices.append(heights[pos][0])
+        used_species.add(sp_idx)
+
+    # If we need more rows, pick additional trees from remaining pool
+    if len(selected_indices) < n_rows:
+        all_remaining = [
+            i for sp_indices in species_groups.values()
+            for i in sp_indices
+            if i not in selected_indices
+        ]
+        np.random.shuffle(all_remaining)
+        for idx in all_remaining:
+            if len(selected_indices) >= n_rows:
+                break
+            selected_indices.append(idx)
+
+    # Sort selected by height (tallest first) for nice visual presentation
+    selected_indices.sort(key=lambda i: -test_ds[i]["height_raw"].item())
+
+    print(f"Selected {len(selected_indices)} trees for qualitative figure")
+
+    # Load model
+    print("Loading model...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_args = SimpleNamespace(
+        model_type=config["model_type"],
+        model_dim=config["model_dim"],
+        num_layers=config["num_layers"],
+        num_heads=config["num_heads"],
+        dropout=config.get("dropout", 0.1),
+        num_freq_bands=config.get("num_freq_bands", 12),
+        species_list=species_list,
+        type_list=type_list,
+    )
+    model = get_model(model_args, device)
+    model = load_checkpoint(checkpoint_path, model, device)
+    model.eval()
+
+    # Generate samples for each selected tree
+    n_cols = 1 + n_generated
+    all_clouds = []  # list of lists: [row][col] = (N, 3) in meters
+    metadata = {}
+
+    for row_i, ds_idx in enumerate(selected_indices):
+        sample = test_ds[ds_idx]
+        points_norm = sample["points"].numpy()
+        height_raw = sample["height_raw"].item()
+        species_idx = sample["species_idx"].item()
+        type_idx = sample["type_idx"].item()
+        file_id = sample["file_id"]
+        num_points = sample["num_points"]
+
+        species_name = ds_species_list[species_idx]
+        type_name = ds_type_list[type_idx]
+        print(
+            f"  Row {row_i+1}: {file_id} - {species_name} ({type_name}), "
+            f"H={height_raw:.1f}m, {num_points} pts"
+        )
+
+        # Generate n_generated samples with same conditioning
+        cfg_values = [cfg_scale] * n_generated
+        generated_norm = sample_conditional(
+            model=model,
+            num_points=num_points,
+            device=device,
+            target_height=height_raw,
+            species_idx=species_idx,
+            type_idx=type_idx,
+            cfg_values=cfg_values,
+            solver_method=solver_method,
+        )
+        # generated_norm shape: (n_generated, num_points, 3)
+
+        # Collect all clouds for this row (real + generated) in normalized coords
+        row_clouds_norm = [points_norm] + [generated_norm[j] for j in range(n_generated)]
+
+        # Optionally canonicalize
+        if canonicalize_clouds:
+            row_clouds_norm = [canonicalize(c) for c in row_clouds_norm]
+
+        # Convert to meters
+        row_clouds_m = []
+        for cloud in row_clouds_norm:
+            pts_m = (cloud / 2.0) * height_raw
+            pts_m[:, 2] -= pts_m[:, 2].min()
+            row_clouds_m.append(pts_m)
+
+        all_clouds.append(row_clouds_m)
+
+        # Metadata
+        subfig_key = chr(ord("a") + row_i)
+        metadata[subfig_key] = {
+            "file_id": file_id,
+            "dataset_index": int(ds_idx),
+            "species": species_name,
+            "data_type": type_name,
+            "height_m": round(height_raw, 2),
+            "num_points": int(num_points),
+            "species_idx": int(species_idx),
+            "type_idx": int(type_idx),
+        }
+
+    # Rendering parameters
+    point_size = 0.4
+    elev, azim = 20, 45
+    row_height = 1.8  # inches per row
+    col_width = 1.8   # inches per column
+    fig_width = col_width * n_cols
+    fig_height = row_height * n_rows
+
+    print("Rendering figure grid...")
+
+    # --- Save individual row strips ---
+    for row_i in range(n_rows):
+        row_clouds = all_clouds[row_i]
+
+        # Compute shared axis limits for this row
+        all_pts = np.concatenate(row_clouds, axis=0)
+        max_range = (
+            np.array([
+                all_pts[:, 0].ptp(),
+                all_pts[:, 1].ptp(),
+                all_pts[:, 2].ptp(),
+            ]).max()
+            / 2.0
+        )
+        mid_x = (all_pts[:, 0].max() + all_pts[:, 0].min()) / 2
+        mid_y = (all_pts[:, 1].max() + all_pts[:, 1].min()) / 2
+        mid_z = (all_pts[:, 2].max() + all_pts[:, 2].min()) / 2
+
+        fig_row = plt.figure(figsize=(col_width * n_cols, row_height))
+
+        for col_j in range(n_cols):
+            ax = fig_row.add_subplot(1, n_cols, col_j + 1, projection="3d")
+            pts = row_clouds[col_j]
+
+            ax.scatter(
+                pts[:, 0], pts[:, 1], pts[:, 2],
+                c=pts[:, 2], cmap="viridis", s=point_size,
+                alpha=0.8, rasterized=True,
+            )
+
+            ax.set_xlim(mid_x - max_range, mid_x + max_range)
+            ax.set_ylim(mid_y - max_range, mid_y + max_range)
+            ax.set_zlim(mid_z - max_range, mid_z + max_range)
+            ax.view_init(elev=elev, azim=azim)
+            ax.set_axis_off()
+
+        plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0.02)
+        row_label = chr(ord("a") + row_i)
+        row_path = output_dir / f"figure_qualitative_{row_label}.pdf"
+        fig_row.savefig(row_path, format="pdf", bbox_inches="tight", dpi=600)
+        plt.close(fig_row)
+        print(f"  Saved row: {row_path}")
+
+    # --- Save combined grid ---
+    fig = plt.figure(figsize=(fig_width, fig_height))
+
+    for row_i in range(n_rows):
+        row_clouds = all_clouds[row_i]
+
+        # Shared axis limits per row
+        all_pts = np.concatenate(row_clouds, axis=0)
+        max_range = (
+            np.array([
+                all_pts[:, 0].ptp(),
+                all_pts[:, 1].ptp(),
+                all_pts[:, 2].ptp(),
+            ]).max()
+            / 2.0
+        )
+        mid_x = (all_pts[:, 0].max() + all_pts[:, 0].min()) / 2
+        mid_y = (all_pts[:, 1].max() + all_pts[:, 1].min()) / 2
+        mid_z = (all_pts[:, 2].max() + all_pts[:, 2].min()) / 2
+
+        for col_j in range(n_cols):
+            subplot_idx = row_i * n_cols + col_j + 1
+            ax = fig.add_subplot(n_rows, n_cols, subplot_idx, projection="3d")
+            pts = row_clouds[col_j]
+
+            ax.scatter(
+                pts[:, 0], pts[:, 1], pts[:, 2],
+                c=pts[:, 2], cmap="viridis", s=point_size,
+                alpha=0.8, rasterized=True,
+            )
+
+            ax.set_xlim(mid_x - max_range, mid_x + max_range)
+            ax.set_ylim(mid_y - max_range, mid_y + max_range)
+            ax.set_zlim(mid_z - max_range, mid_z + max_range)
+            ax.view_init(elev=elev, azim=azim)
+            ax.set_axis_off()
+
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0.02, hspace=0.02)
+    combined_path = output_dir / "figure_qualitative.pdf"
+    fig.savefig(combined_path, format="pdf", bbox_inches="tight", dpi=600)
+    plt.close(fig)
+    print(f"  Saved combined: {combined_path}")
+
+    # Save metadata
+    metadata["_config"] = {
+        "experiment_dir": str(experiment_dir),
+        "checkpoint": checkpoint,
+        "data_path": str(data_path),
+        "cfg_scale": cfg_scale,
+        "canonicalize": canonicalize_clouds,
+        "seed": seed,
+        "solver_method": solver_method,
+        "n_rows": n_rows,
+        "n_generated": n_generated,
+    }
+    meta_path = output_dir / "figure_qualitative.json"
+    with open(meta_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    print(f"  Saved metadata: {meta_path}")
+
+    print(f"\nQualitative figure saved to {output_dir}/")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -2414,7 +2729,7 @@ if __name__ == "__main__":
         "--figures",
         nargs="+",
         default=["spine_audit"],
-        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit, crown_audit)",
+        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit, crown_audit, qualitative)",
     )
     parser.add_argument(
         "--experiment_dir", default="experiments/transformer-8-512-4096"
@@ -2422,6 +2737,11 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", default="./data/preprocessed-4096")
     parser.add_argument("--output_dir", default="figures")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--checkpoint", default=None, help="Checkpoint name (auto-discovers latest if not set)")
+    parser.add_argument("--cfg_scale", type=float, default=3.0)
+    parser.add_argument("--n_rows", type=int, default=6)
+    parser.add_argument("--canonicalize", action="store_true")
+    parser.add_argument("--solver_method", default="dopri5")
     args = parser.parse_args()
 
     for fig_name in args.figures:
@@ -2470,6 +2790,18 @@ if __name__ == "__main__":
                 data_path=args.data_path,
                 output_dir=args.output_dir,
                 seed=args.seed,
+            )
+        elif fig_name == "qualitative":
+            create_figure_qualitative(
+                experiment_dir=args.experiment_dir,
+                checkpoint=args.checkpoint,
+                data_path=args.data_path,
+                n_rows=args.n_rows,
+                cfg_scale=args.cfg_scale,
+                canonicalize_clouds=args.canonicalize,
+                seed=args.seed,
+                output_dir=args.output_dir,
+                solver_method=args.solver_method,
             )
         else:
             print(f"Unknown figure: {fig_name}")
