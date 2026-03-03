@@ -17,6 +17,6 @@ python figures.py \
     --figures qualitative \
     --experiment_dir experiments/finetune-8-512-16384 \
     --data_path data/preprocessed-16384 \
-    --cfg_scale "1.5,2.5" \
+    --cfg_scale 1.5 \
     --n_generated 4 \
     --seed 42
