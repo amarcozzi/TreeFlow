@@ -567,6 +567,11 @@ def _median_per_tree(df_pairs: pd.DataFrame) -> pd.DataFrame:
     return df_pairs.groupby("real_id")[METRICS].median()
 
 
+def _mean_per_tree(df_pairs: pd.DataFrame) -> pd.DataFrame:
+    """Mean of each metric across the K generations per conditioning tree."""
+    return df_pairs.groupby("real_id")[METRICS].mean()
+
+
 def _format_val(v, fmt=".4f"):
     return f"{v:{fmt}}" if pd.notna(v) else "—"
 
@@ -584,21 +589,25 @@ def build_table_1(
     """
     # Per-tree medians, then global median
     gen_medians = _median_per_tree(df_pairs).median()
-    # Baselines: aggregate per anchor, then median
     intra_medians = df_intra.groupby("anchor_id")[METRICS].median().median()
     inter_medians = df_inter.groupby("anchor_id")[METRICS].median().median()
 
+    # Per-tree means, then global mean
+    gen_means = _mean_per_tree(df_pairs).mean()
+    intra_means = df_intra.groupby("anchor_id")[METRICS].mean().mean()
+    inter_means = df_inter.groupby("anchor_id")[METRICS].mean().mean()
+
     lines = []
     lines.append("TABLE 1: GLOBAL SUMMARY")
-    lines.append("=" * 72)
+    lines.append("=" * 100)
 
-    # Part A: Conditioning fidelity
+    # Part A: Conditioning fidelity — median of medians
     lines.append("")
-    lines.append("(a) Conditioning fidelity — median across test trees")
-    lines.append("─" * 72)
+    lines.append("(a) Conditioning fidelity — median of per-tree medians")
+    lines.append("─" * 100)
     header = f"  {'Metric':<35s} {'Gen':>8s} {'Intra':>8s} {'Inter':>8s}"
     lines.append(header)
-    lines.append("─" * 72)
+    lines.append("─" * 100)
 
     for m in METRICS:
         display, unit = METRIC_DISPLAY[m]
@@ -610,7 +619,27 @@ def build_table_1(
             f"  {label:<35s} {_format_val(g):>8s} {_format_val(i):>8s} "
             f"{_format_val(x):>8s}"
         )
-    lines.append("─" * 72)
+    lines.append("─" * 100)
+
+    # Part A': Conditioning fidelity — mean of means
+    lines.append("")
+    lines.append("(a') Conditioning fidelity — mean of per-tree means")
+    lines.append("─" * 100)
+    header = f"  {'Metric':<35s} {'Gen':>8s} {'Intra':>8s} {'Inter':>8s}"
+    lines.append(header)
+    lines.append("─" * 100)
+
+    for m in METRICS:
+        display, unit = METRIC_DISPLAY[m]
+        label = f"{display} ({unit})" if unit else display
+        g = gen_means[m]
+        i = intra_means[m]
+        x = inter_means[m]
+        lines.append(
+            f"  {label:<35s} {_format_val(g):>8s} {_format_val(i):>8s} "
+            f"{_format_val(x):>8s}"
+        )
+    lines.append("─" * 100)
 
     # Part B: Population distributions
     lines.append("")
@@ -666,9 +695,9 @@ def build_stratified_table(
     lines.append(title)
     lines.append("=" * 100)
 
-    # (a) Conditioning fidelity — gen median only
+    # (a) Conditioning fidelity — median of medians
     lines.append("")
-    lines.append("(a) Conditioning fidelity — gen median across test trees")
+    lines.append("(a) Conditioning fidelity — median of per-tree medians")
     lines.append("─" * 100)
 
     h_parts = [f"  {group_col:<15s} {'n':>5s}"]
@@ -685,6 +714,28 @@ def build_stratified_table(
         parts = [f"  {str(g)[:15]:<15s} {n:>5d}"]
         for m in METRICS:
             parts.append(f"{_format_val(gen_med.get(m, float('nan'))):>10s}")
+        lines.append("".join(parts))
+    lines.append("─" * 100)
+
+    # (a') Conditioning fidelity — mean of means
+    lines.append("")
+    lines.append("(a') Conditioning fidelity — mean of per-tree means")
+    lines.append("─" * 100)
+
+    h_parts = [f"  {group_col:<15s} {'n':>5s}"]
+    for m in METRICS:
+        h_parts.append(f"{metric_short[m]:>10s}")
+    lines.append("".join(h_parts))
+    lines.append("─" * 100)
+
+    for g in groups:
+        g_pairs = df_pairs[df_pairs[group_col] == g]
+        n = g_pairs["real_id"].nunique()
+        gen_mean = _mean_per_tree(g_pairs).mean()
+
+        parts = [f"  {str(g)[:15]:<15s} {n:>5d}"]
+        for m in METRICS:
+            parts.append(f"{_format_val(gen_mean.get(m, float('nan'))):>10s}")
         lines.append("".join(parts))
     lines.append("─" * 100)
 
