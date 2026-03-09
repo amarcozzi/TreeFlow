@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --account=umontana_fire_modeling
-#SBATCH --partition=general
+#SBATCH --partition=atlas
 #SBATCH --job-name="fig-qual"
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
