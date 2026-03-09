@@ -11,8 +11,8 @@ Per-pair metrics:
 
 Tables:
   1. Global summary with gen / intra-class / inter-class baselines + W₁
-  2. By genus (gen / intra / inter medians + W₁)
-  3. By height bin (gen / intra / inter medians + W₁)
+  2. By genus (gen mean-of-medians + W₁)
+  3. By height bin (gen mean-of-medians + W₁)
 """
 
 import sys
@@ -567,10 +567,6 @@ def _median_per_tree(df_pairs: pd.DataFrame) -> pd.DataFrame:
     return df_pairs.groupby("real_id")[METRICS].median()
 
 
-def _mean_per_tree(df_pairs: pd.DataFrame) -> pd.DataFrame:
-    """Mean of each metric across the K generations per conditioning tree."""
-    return df_pairs.groupby("real_id")[METRICS].mean()
-
 
 def _format_val(v, fmt=".4f"):
     return f"{v:{fmt}}" if pd.notna(v) else "—"
@@ -584,26 +580,21 @@ def build_table_1(
 ) -> str:
     """Table 1: Global summary.
 
-    For each metric: median across generated trees, intra-class median,
-    inter-class median. Plus population W₁.
+    For each metric: mean of per-tree medians for gen / intra / inter.
+    Plus population W₁.
     """
-    # Per-tree medians, then global median
-    gen_medians = _median_per_tree(df_pairs).median()
-    intra_medians = df_intra.groupby("anchor_id")[METRICS].median().median()
-    inter_medians = df_inter.groupby("anchor_id")[METRICS].median().median()
-
-    # Per-tree means, then global mean
-    gen_means = _mean_per_tree(df_pairs).mean()
-    intra_means = df_intra.groupby("anchor_id")[METRICS].mean().mean()
-    inter_means = df_inter.groupby("anchor_id")[METRICS].mean().mean()
+    # Per-tree medians, then mean across trees
+    gen_vals = _median_per_tree(df_pairs).mean()
+    intra_vals = df_intra.groupby("anchor_id")[METRICS].median().mean()
+    inter_vals = df_inter.groupby("anchor_id")[METRICS].median().mean()
 
     lines = []
     lines.append("TABLE 1: GLOBAL SUMMARY")
     lines.append("=" * 100)
 
-    # Part A: Conditioning fidelity — median of medians
+    # Part A: Conditioning fidelity — mean of medians
     lines.append("")
-    lines.append("(a) Conditioning fidelity — median of per-tree medians")
+    lines.append("(a) Conditioning fidelity — mean of per-tree medians")
     lines.append("─" * 100)
     header = f"  {'Metric':<35s} {'Gen':>8s} {'Intra':>8s} {'Inter':>8s}"
     lines.append(header)
@@ -612,29 +603,9 @@ def build_table_1(
     for m in METRICS:
         display, unit = METRIC_DISPLAY[m]
         label = f"{display} ({unit})" if unit else display
-        g = gen_medians[m]
-        i = intra_medians[m]
-        x = inter_medians[m]
-        lines.append(
-            f"  {label:<35s} {_format_val(g):>8s} {_format_val(i):>8s} "
-            f"{_format_val(x):>8s}"
-        )
-    lines.append("─" * 100)
-
-    # Part A': Conditioning fidelity — mean of means
-    lines.append("")
-    lines.append("(a') Conditioning fidelity — mean of per-tree means")
-    lines.append("─" * 100)
-    header = f"  {'Metric':<35s} {'Gen':>8s} {'Intra':>8s} {'Inter':>8s}"
-    lines.append(header)
-    lines.append("─" * 100)
-
-    for m in METRICS:
-        display, unit = METRIC_DISPLAY[m]
-        label = f"{display} ({unit})" if unit else display
-        g = gen_means[m]
-        i = intra_means[m]
-        x = inter_means[m]
+        g = gen_vals[m]
+        i = intra_vals[m]
+        x = inter_vals[m]
         lines.append(
             f"  {label:<35s} {_format_val(g):>8s} {_format_val(i):>8s} "
             f"{_format_val(x):>8s}"
@@ -668,7 +639,7 @@ def build_stratified_table(
     """Tables 2/3: By genus or height bin.
 
     Two sub-tables per stratum:
-      (a) Conditioning fidelity — gen median for all 6 metrics.
+      (a) Conditioning fidelity — gen mean-of-medians for all 6 metrics.
       (b) Population W₁ per morphological property.
     """
     groups = sorted(df_pairs[group_col].dropna().unique(),
@@ -695,9 +666,9 @@ def build_stratified_table(
     lines.append(title)
     lines.append("=" * 100)
 
-    # (a) Conditioning fidelity — median of medians
+    # (a) Conditioning fidelity — mean of medians
     lines.append("")
-    lines.append("(a) Conditioning fidelity — median of per-tree medians")
+    lines.append("(a) Conditioning fidelity — mean of per-tree medians")
     lines.append("─" * 100)
 
     h_parts = [f"  {group_col:<15s} {'n':>5s}"]
@@ -709,33 +680,11 @@ def build_stratified_table(
     for g in groups:
         g_pairs = df_pairs[df_pairs[group_col] == g]
         n = g_pairs["real_id"].nunique()
-        gen_med = _median_per_tree(g_pairs).median()
+        gen_vals = _median_per_tree(g_pairs).mean()
 
         parts = [f"  {str(g)[:15]:<15s} {n:>5d}"]
         for m in METRICS:
-            parts.append(f"{_format_val(gen_med.get(m, float('nan'))):>10s}")
-        lines.append("".join(parts))
-    lines.append("─" * 100)
-
-    # (a') Conditioning fidelity — mean of means
-    lines.append("")
-    lines.append("(a') Conditioning fidelity — mean of per-tree means")
-    lines.append("─" * 100)
-
-    h_parts = [f"  {group_col:<15s} {'n':>5s}"]
-    for m in METRICS:
-        h_parts.append(f"{metric_short[m]:>10s}")
-    lines.append("".join(h_parts))
-    lines.append("─" * 100)
-
-    for g in groups:
-        g_pairs = df_pairs[df_pairs[group_col] == g]
-        n = g_pairs["real_id"].nunique()
-        gen_mean = _mean_per_tree(g_pairs).mean()
-
-        parts = [f"  {str(g)[:15]:<15s} {n:>5d}"]
-        for m in METRICS:
-            parts.append(f"{_format_val(gen_mean.get(m, float('nan'))):>10s}")
+            parts.append(f"{_format_val(gen_vals.get(m, float('nan'))):>10s}")
         lines.append("".join(parts))
     lines.append("─" * 100)
 
