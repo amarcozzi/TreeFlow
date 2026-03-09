@@ -2418,243 +2418,162 @@ def find_latest_checkpoint(experiment_dir):
 
 def create_figure_qualitative(
     experiment_dir: str = "experiments/finetune-8-512-16384",
-    checkpoint: str = None,
     data_path: str = None,
-    n_rows: int = 6,
+    n_rows: int = 4,
     n_generated: int = 4,
-    cfg_scale: str = "1.5,5.0",
+    n_sheets: int = 3,
+    tree_ids: list[int] = None,
     canonicalize_clouds: bool = False,
     seed: int = 42,
     output_dir: str = "figures",
-    solver_method: str = "dopri5",
 ):
     """
     Create qualitative results figure: real test trees alongside generated counterparts.
 
-    Grid layout: n_rows x (1 + n_generated) — column 1 is real, rest are generated.
-    No subplot titles (handled by LaTeX subcaptions).
+    Loads pre-generated samples from zarr files (no model/ODE needed).
+    Generates n_sheets independent figure sheets, each with n_rows diverse trees.
+    If tree_ids is provided, those are used for sheet 1.
+
+    Grid layout per sheet: n_rows x (1 + n_generated).
+    Column 0 = real tree, columns 1..n_generated = generated samples.
+    Species/height labels embedded in matplotlib. Sized for MDPI text width (~17cm).
     """
-    import torch
-    from types import SimpleNamespace
-    from generate_samples import load_experiment_config, load_checkpoint
-    from models import get_model
-    from sample import sample_conditional
+    import zarr
     from evaluate_v3 import canonicalize
 
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    rng = np.random.RandomState(seed)
 
     experiment_dir = Path(experiment_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
 
-    # Load experiment config
-    print("Loading experiment config...")
-    config = load_experiment_config(experiment_dir)
-    species_list = config["species_list"]
-    type_list = config["type_list"]
-
+    # Load metadata
     if data_path is None:
+        from generate_samples import load_experiment_config
+        config = load_experiment_config(experiment_dir)
         data_path = config.get("data_path", "./data/preprocessed-16384")
+    data_path = Path(data_path)
 
-    max_points = config.get("max_points", DOWNSAMPLE_POINTS)
-
-    # Auto-discover checkpoint
-    if checkpoint is None:
-        checkpoint = find_latest_checkpoint(experiment_dir)
-    checkpoint_path = experiment_dir / "checkpoints" / checkpoint
-    print(f"Using checkpoint: {checkpoint_path}")
-
-    # Load test dataset (no augmentation)
-    print("Loading test dataset...")
-    _, _, test_ds, ds_species_list, ds_type_list = create_datasets(
-        data_path=data_path,
-        sample_exponent=None,
-        rotation_augment=False,
-        shuffle_augment=False,
-        cache_train=False,
-        cache_val=False,
-        cache_test=True,
-        max_points=max_points,
+    real_csv = data_path / "metadata.csv"
+    real_meta = pd.read_csv(real_csv)
+    real_meta["file_id"] = real_meta["filename"].apply(lambda x: Path(x).stem)
+    real_meta["file_path"] = real_meta["file_id"].apply(
+        lambda x: str(data_path / f"{x}.zarr")
     )
-    print(f"Test set: {len(test_ds)} trees")
+    real_meta = real_meta[real_meta["file_path"].apply(lambda x: Path(x).exists())]
+    real_meta = real_meta[real_meta["split"] == "test"].copy()
+    print(f"Real test trees: {len(real_meta)}")
 
-    # Select diverse trees: group by species, pick across height range
+    gen_csv = experiment_dir / "samples" / "samples_metadata.csv"
+    gen_meta = pd.read_csv(gen_csv)
+    gen_meta["source_tree_id"] = gen_meta["source_tree_id"].apply(
+        lambda x: str(x).zfill(5)
+    )
+    zarr_dir = experiment_dir / "samples" / "zarr"
+    print(f"Generated samples: {len(gen_meta)}")
+
+    # Build lookup: tree_id -> list of generated sample rows
+    tree_to_samples = {}
+    for _, row in gen_meta.iterrows():
+        tid = row["source_tree_id"]
+        tree_to_samples.setdefault(tid, []).append(row)
+
+    # Only consider trees that have enough generated samples
+    eligible_tree_ids = [
+        tid for tid, samples in tree_to_samples.items()
+        if len(samples) >= n_generated
+    ]
+    eligible_real = real_meta[real_meta["file_id"].isin(eligible_tree_ids)].copy()
+    print(f"Eligible trees (>= {n_generated} samples): {len(eligible_real)}")
+
+    # Select trees for all sheets
+    total_needed = n_rows * n_sheets
+    all_selected = []
+
+    # Sheet 1: use manual tree_ids if provided
+    if tree_ids is not None:
+        manual_ids = [str(tid).zfill(5) for tid in tree_ids]
+        for mid in manual_ids[:n_rows]:
+            if mid in eligible_tree_ids:
+                all_selected.append(mid)
+            else:
+                print(f"  Warning: tree_id {mid} not eligible, skipping")
+        print(f"Sheet 1: {len(all_selected)} manually selected trees")
+
+    # Auto-select remaining trees: diverse species, varied heights
+    used_ids = set(all_selected)
+    remaining = eligible_real[~eligible_real["file_id"].isin(used_ids)].copy()
+
+    # Group by species for diversity
     species_groups = {}
-    for i in range(len(test_ds)):
-        sample = test_ds[i]
-        sp_idx = sample["species_idx"].item()
-        species_groups.setdefault(sp_idx, []).append(i)
+    for _, row in remaining.iterrows():
+        sp = row.get("species", "unknown")
+        species_groups.setdefault(sp, []).append(row)
 
-    # Sort species by number of samples (pick from well-represented species first)
-    sorted_species = sorted(
-        species_groups.keys(), key=lambda k: -len(species_groups[k])
-    )
+    # Sort species by count (most samples first)
+    sorted_species = sorted(species_groups.keys(), key=lambda k: -len(species_groups[k]))
 
-    selected_indices = []
-    used_species = set()
-
-    # First pass: pick one tree per species, sorted by height diversity
-    for sp_idx in sorted_species:
-        if len(selected_indices) >= n_rows:
-            break
-        indices = species_groups[sp_idx]
-        # Sort by height and pick from different height percentiles for variety
-        heights = [(i, test_ds[i]["height_raw"].item()) for i in indices]
-        heights.sort(key=lambda x: x[1])
-        percentile_idx = len(selected_indices) % 3  # cycle through low, mid, high
-        pos = [len(heights) // 4, len(heights) // 2, 3 * len(heights) // 4][
-            percentile_idx
-        ]
-        pos = min(pos, len(heights) - 1)
-        selected_indices.append(heights[pos][0])
-        used_species.add(sp_idx)
-
-    # If we need more rows, pick additional trees from remaining pool
-    if len(selected_indices) < n_rows:
-        all_remaining = [
-            i
-            for sp_indices in species_groups.values()
-            for i in sp_indices
-            if i not in selected_indices
-        ]
-        np.random.shuffle(all_remaining)
-        for idx in all_remaining:
-            if len(selected_indices) >= n_rows:
+    still_needed = total_needed - len(all_selected)
+    if still_needed > 0:
+        # Round-robin across species, picking from different height percentiles
+        sp_idx = 0
+        height_cycle = 0
+        while len(all_selected) < total_needed and remaining.shape[0] > 0:
+            sp = sorted_species[sp_idx % len(sorted_species)]
+            sp_rows = [r for r in species_groups.get(sp, [])
+                       if r["file_id"] not in used_ids]
+            if sp_rows:
+                sp_rows.sort(key=lambda r: r["tree_H"])
+                percentile = [0.25, 0.5, 0.75][height_cycle % 3]
+                pick_idx = min(int(len(sp_rows) * percentile), len(sp_rows) - 1)
+                picked = sp_rows[pick_idx]
+                all_selected.append(picked["file_id"])
+                used_ids.add(picked["file_id"])
+                height_cycle += 1
+            sp_idx += 1
+            # Break if we've cycled through all species without finding new trees
+            if sp_idx >= len(sorted_species) * 3:
                 break
-            selected_indices.append(idx)
 
-    # Sort selected by height (tallest first) for nice visual presentation
-    selected_indices.sort(key=lambda i: -test_ds[i]["height_raw"].item())
+    print(f"Total selected: {len(all_selected)} trees for {n_sheets} sheets")
 
-    print(f"Selected {len(selected_indices)} trees for qualitative figure")
-
-    # Load model
-    print("Loading model...")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model_args = SimpleNamespace(
-        model_type=config["model_type"],
-        model_dim=config["model_dim"],
-        num_layers=config["num_layers"],
-        num_heads=config["num_heads"],
-        dropout=config.get("dropout", 0.1),
-        num_freq_bands=config.get("num_freq_bands", 12),
-        species_list=species_list,
-        type_list=type_list,
-    )
-    model = get_model(model_args, device)
-    model = load_checkpoint(checkpoint_path, model, device)
-    model.eval()
-
-    # Generate samples for each selected tree
-    n_cols = 1 + n_generated
-    all_clouds = []  # list of lists: [row][col] = (N, 3) in meters
-    metadata = {}
-
-    for row_i, ds_idx in enumerate(selected_indices):
-        sample = test_ds[ds_idx]
-        points_norm = sample["points"].numpy()
-        height_raw = sample["height_raw"].item()
-        species_idx = sample["species_idx"].item()
-        type_idx = sample["type_idx"].item()
-        file_id = sample["file_id"]
-        num_points = sample["num_points"]
-
-        species_name = ds_species_list[species_idx]
-        type_name = ds_type_list[type_idx]
-        # Compute per-column CFG values
-        cfg_parts = [float(x) for x in cfg_scale.split(",")]
-        if len(cfg_parts) == 2:
-            cfg_values = list(np.linspace(cfg_parts[0], cfg_parts[1], n_generated))
-        else:
-            cfg_values = [cfg_parts[0]] * n_generated
-
-        cfg_str = ", ".join(f"{v:.1f}" for v in cfg_values)
-        print(
-            f"  Row {row_i+1}: {file_id} - {species_name} ({type_name}), "
-            f"H={height_raw:.1f}m, {num_points} pts, CFG=[{cfg_str}]"
-        )
-
-        generated_norm = sample_conditional(
-            model=model,
-            num_points=num_points,
-            device=device,
-            target_height=height_raw,
-            species_idx=species_idx,
-            type_idx=type_idx,
-            cfg_values=cfg_values,
-            solver_method=solver_method,
-        )
-        # generated_norm shape: (n_generated, num_points, 3)
-
-        # Collect all clouds for this row (real + generated) in normalized coords
-        row_clouds_norm = [points_norm] + [
-            generated_norm[j] for j in range(n_generated)
-        ]
-
-        # Optionally canonicalize
-        if canonicalize_clouds:
-            row_clouds_norm = [canonicalize(c) for c in row_clouds_norm]
-
-        # Convert to meters
-        row_clouds_m = []
-        for cloud in row_clouds_norm:
-            pts_m = (cloud / 2.0) * height_raw
-            pts_m[:, 2] -= pts_m[:, 2].min()
-            row_clouds_m.append(pts_m)
-
-        all_clouds.append(row_clouds_m)
-
-        # Metadata
-        subfig_key = chr(ord("a") + row_i)
-        metadata[subfig_key] = {
-            "file_id": file_id,
-            "dataset_index": int(ds_idx),
-            "species": species_name,
-            "data_type": type_name,
-            "height_m": round(height_raw, 2),
-            "num_points": int(num_points),
-            "species_idx": int(species_idx),
-            "type_idx": int(type_idx),
-        }
+    # Split into sheets
+    sheets = []
+    for s in range(n_sheets):
+        start = s * n_rows
+        end = min(start + n_rows, len(all_selected))
+        if start >= len(all_selected):
+            break
+        sheet_ids = all_selected[start:end]
+        sheets.append(sheet_ids)
 
     # Rendering parameters
     point_size = 0.4
     elev, azim = 20, 45
-    margin = 0.05  # 5% padding around point extent
-    col_width = 1.4   # inches per column (narrow — trees are tall & thin)
-    row_height = 2.8  # inches per row
-    fig_width = col_width * n_cols
-    fig_height = row_height * n_rows
-
-    print("Rendering figure grid...")
+    margin = 0.05
+    n_cols = 1 + n_generated
+    # MDPI text width ~17cm = 6.69in
+    fig_width = 6.69
+    col_width = fig_width / n_cols
+    row_height = 2.5
 
     def compute_row_limits(row_clouds):
-        """Compute per-axis limits and box aspect for a row of point clouds."""
         all_pts = np.concatenate(row_clouds, axis=0)
-        ranges = []
-        mids = []
+        ranges, mids = [], []
         for dim in range(3):
             lo, hi = all_pts[:, dim].min(), all_pts[:, dim].max()
             span = hi - lo
             pad = span * margin
             ranges.append(span + 2 * pad)
             mids.append((lo + hi) / 2)
-        # Ensure no zero-range axis
         ranges = [max(r, 0.1) for r in ranges]
         return mids, ranges
 
     def setup_ax(ax, pts, mids, ranges):
-        """Configure a 3D axis with tight per-axis limits."""
         ax.scatter(
-            pts[:, 0],
-            pts[:, 1],
-            pts[:, 2],
-            c=pts[:, 2],
-            cmap="viridis",
-            s=point_size,
-            alpha=0.8,
-            rasterized=True,
+            pts[:, 0], pts[:, 1], pts[:, 2],
+            c=pts[:, 2], cmap="viridis", s=point_size,
+            alpha=0.8, rasterized=True,
         )
         ax.set_xlim(mids[0] - ranges[0] / 2, mids[0] + ranges[0] / 2)
         ax.set_ylim(mids[1] - ranges[1] / 2, mids[1] + ranges[1] / 2)
@@ -2663,59 +2582,171 @@ def create_figure_qualitative(
         ax.view_init(elev=elev, azim=azim)
         ax.set_axis_off()
 
-    # --- Save individual row strips ---
-    for row_i in range(n_rows):
-        row_clouds = all_clouds[row_i]
-        mids, ranges = compute_row_limits(row_clouds)
+    # Generate each sheet
+    all_metadata = {}
 
-        fig_row = plt.figure(figsize=(col_width * n_cols, row_height))
+    for sheet_i, sheet_ids in enumerate(sheets):
+        sheet_num = sheet_i + 1
+        print(f"\n--- Sheet {sheet_num} ({len(sheet_ids)} rows) ---")
 
+        # Sort by height (tallest first) within each sheet
+        id_to_height = {}
+        for tid in sheet_ids:
+            row = real_meta[real_meta["file_id"] == tid].iloc[0]
+            id_to_height[tid] = row["tree_H"]
+        sheet_ids = sorted(sheet_ids, key=lambda t: -id_to_height[t])
+
+        # Load data for this sheet
+        all_clouds = []
+        sheet_meta = {}
+
+        for row_i, tree_id in enumerate(sheet_ids):
+            real_row = real_meta[real_meta["file_id"] == tree_id].iloc[0]
+            height_m = float(real_row["tree_H"])
+            species = real_row.get("species", "unknown")
+
+            # Load real cloud
+            real_path = data_path / f"{tree_id}.zarr"
+            real_cloud = zarr.load(str(real_path)).astype(np.float32)
+
+            # Pick n_generated samples for this tree
+            available = tree_to_samples[tree_id]
+            rng.shuffle(available)
+            chosen_samples = available[:n_generated]
+
+            gen_clouds = []
+            sample_files = []
+            for sample_row in chosen_samples:
+                gen_path = zarr_dir / sample_row["sample_file"]
+                gen_cloud = zarr.load(str(gen_path)).astype(np.float32)
+                gen_clouds.append(gen_cloud)
+                sample_files.append(sample_row["sample_file"])
+
+            row_clouds_norm = [real_cloud] + gen_clouds
+
+            if canonicalize_clouds:
+                row_clouds_norm = [canonicalize(c) for c in row_clouds_norm]
+
+            # Convert to meters
+            row_clouds_m = []
+            for cloud in row_clouds_norm:
+                pts_m = (cloud / 2.0) * height_m
+                pts_m[:, 2] -= pts_m[:, 2].min()
+                row_clouds_m.append(pts_m)
+
+            all_clouds.append(row_clouds_m)
+
+            species_display = species.replace("_", " ")
+            print(
+                f"  Row {row_i+1}: {tree_id} - {species_display}, "
+                f"H={height_m:.1f}m, {len(real_cloud)} pts"
+            )
+
+            sheet_meta[f"row_{row_i}"] = {
+                "tree_id": tree_id,
+                "species": species,
+                "height_m": round(height_m, 2),
+                "num_points": int(len(real_cloud)),
+                "sample_files": sample_files,
+            }
+
+        actual_rows = len(all_clouds)
+        fig_height = row_height * actual_rows
+
+        # --- Save individual row strips ---
+        for row_i in range(actual_rows):
+            row_clouds = all_clouds[row_i]
+            mids, ranges = compute_row_limits(row_clouds)
+            tree_id = sheet_ids[row_i]
+            height_m = id_to_height[tree_id]
+            real_row = real_meta[real_meta["file_id"] == tree_id].iloc[0]
+            species = real_row.get("species", "unknown").replace("_", " ")
+
+            fig_row = plt.figure(figsize=(fig_width, row_height))
+
+            for col_j in range(n_cols):
+                ax = fig_row.add_subplot(1, n_cols, col_j + 1, projection="3d")
+                setup_ax(ax, row_clouds[col_j], mids, ranges)
+
+            plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=-0.35)
+            row_path = output_dir / f"figure_qualitative_sheet_{sheet_num}_row_{row_i}.pdf"
+            fig_row.savefig(
+                row_path, format="pdf", bbox_inches="tight", dpi=600, pad_inches=0
+            )
+            plt.close(fig_row)
+
+        # --- Save combined sheet ---
+        # Extra space at top for column headers
+        header_height = 0.3
+        label_width = 0.9  # inches for species/height label on left
+
+        total_width = label_width + fig_width
+        total_height = header_height + fig_height
+
+        fig = plt.figure(figsize=(total_width, total_height))
+
+        # Column headers
+        col_labels = ["Real"] + [f"Generated {j+1}" for j in range(n_generated)]
         for col_j in range(n_cols):
-            ax = fig_row.add_subplot(1, n_cols, col_j + 1, projection="3d")
-            setup_ax(ax, row_clouds[col_j], mids, ranges)
+            x = (label_width + col_j * col_width + col_width / 2) / total_width
+            y = 1.0 - header_height * 0.5 / total_height
+            fig.text(x, y, col_labels[col_j], ha="center", va="center",
+                     fontsize=8, fontweight="bold")
 
-        plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=-0.35)
-        row_label = chr(ord("a") + row_i)
-        row_path = output_dir / f"figure_qualitative_{row_label}.pdf"
-        fig_row.savefig(
-            row_path, format="pdf", bbox_inches="tight", dpi=600, pad_inches=0
-        )
-        plt.close(fig_row)
-        print(f"  Saved row: {row_path}")
+        for row_i in range(actual_rows):
+            row_clouds = all_clouds[row_i]
+            mids, ranges = compute_row_limits(row_clouds)
+            tree_id = sheet_ids[row_i]
+            height_m = id_to_height[tree_id]
+            real_row = real_meta[real_meta["file_id"] == tree_id].iloc[0]
+            species = real_row.get("species", "unknown").replace("_", " ")
 
-    # --- Save combined grid ---
-    fig = plt.figure(figsize=(fig_width, fig_height))
+            # Row label (species + height) on the left
+            label_x = label_width * 0.5 / total_width
+            row_top = header_height + row_i * row_height
+            label_y = 1.0 - (row_top + row_height / 2) / total_height
+            fig.text(label_x, label_y, f"{species}\nH = {height_m:.1f} m",
+                     ha="center", va="center", fontsize=6, fontstyle="italic",
+                     rotation=90)
 
-    for row_i in range(n_rows):
-        row_clouds = all_clouds[row_i]
-        mids, ranges = compute_row_limits(row_clouds)
+            for col_j in range(n_cols):
+                # Position each 3D subplot
+                left = (label_width + col_j * col_width) / total_width
+                bottom = 1.0 - (row_top + row_height) / total_height
+                w = col_width / total_width
+                h = row_height / total_height
+                ax = fig.add_axes([left, bottom, w, h], projection="3d")
+                setup_ax(ax, row_clouds[col_j], mids, ranges)
 
-        for col_j in range(n_cols):
-            subplot_idx = row_i * n_cols + col_j + 1
-            ax = fig.add_subplot(n_rows, n_cols, subplot_idx, projection="3d")
-            setup_ax(ax, row_clouds[col_j], mids, ranges)
+        sheet_path = output_dir / f"figure_qualitative_sheet_{sheet_num}.pdf"
+        fig.savefig(sheet_path, format="pdf", bbox_inches="tight", dpi=600, pad_inches=0.02)
+        plt.close(fig)
+        print(f"  Saved sheet: {sheet_path}")
 
-    plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=-0.35, hspace=0.02)
-    combined_path = output_dir / "figure_qualitative.pdf"
-    fig.savefig(combined_path, format="pdf", bbox_inches="tight", dpi=600, pad_inches=0)
-    plt.close(fig)
-    print(f"  Saved combined: {combined_path}")
+        all_metadata[f"sheet_{sheet_num}"] = sheet_meta
+
+    # If only one sheet, also save as figure_qualitative.pdf for convenience
+    if len(sheets) == 1:
+        import shutil
+        src = output_dir / "figure_qualitative_sheet_1.pdf"
+        dst = output_dir / "figure_qualitative.pdf"
+        shutil.copy2(src, dst)
+        print(f"  Copied to: {dst}")
 
     # Save metadata
-    metadata["_config"] = {
+    all_metadata["_config"] = {
         "experiment_dir": str(experiment_dir),
-        "checkpoint": checkpoint,
         "data_path": str(data_path),
-        "cfg_scale": cfg_scale,
         "canonicalize": canonicalize_clouds,
         "seed": seed,
-        "solver_method": solver_method,
         "n_rows": n_rows,
         "n_generated": n_generated,
+        "n_sheets": n_sheets,
+        "tree_ids": tree_ids,
     }
     meta_path = output_dir / "figure_qualitative.json"
     with open(meta_path, "w") as f:
-        json.dump(metadata, f, indent=2)
+        json.dump(all_metadata, f, indent=2)
     print(f"  Saved metadata: {meta_path}")
 
     print(f"\nQualitative figure saved to {output_dir}/")
@@ -3013,21 +3044,12 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", default="./data/preprocessed-16384")
     parser.add_argument("--output_dir", default="figures")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--checkpoint",
-        default=None,
-        help="Checkpoint name (auto-discovers latest if not set)",
-    )
-    parser.add_argument(
-        "--cfg_scale",
-        type=str,
-        default="1.5,5.0",
-        help="Single value or 'low,high' for linear range across generated columns",
-    )
-    parser.add_argument("--n_rows", type=int, default=6)
+    parser.add_argument("--n_rows", type=int, default=4)
     parser.add_argument("--n_generated", type=int, default=4)
+    parser.add_argument("--n_sheets", type=int, default=3)
+    parser.add_argument("--tree_ids", type=str, default=None,
+                        help="Comma-separated tree IDs for sheet 1 (e.g. '12345,67890')")
     parser.add_argument("--canonicalize", action="store_true")
-    parser.add_argument("--solver_method", default="dopri5")
     args = parser.parse_args()
 
     for fig_name in args.figures:
@@ -3078,17 +3100,19 @@ if __name__ == "__main__":
                 seed=args.seed,
             )
         elif fig_name == "qualitative":
+            tree_ids = None
+            if args.tree_ids:
+                tree_ids = [int(x) for x in args.tree_ids.split(",")]
             create_figure_qualitative(
                 experiment_dir=args.experiment_dir,
-                checkpoint=args.checkpoint,
                 data_path=args.data_path,
                 n_rows=args.n_rows,
                 n_generated=args.n_generated,
-                cfg_scale=args.cfg_scale,
+                n_sheets=args.n_sheets,
+                tree_ids=tree_ids,
                 canonicalize_clouds=args.canonicalize,
                 seed=args.seed,
                 output_dir=args.output_dir,
-                solver_method=args.solver_method,
             )
         elif fig_name == "stem_tracker":
             create_figure_stem_tracker(
