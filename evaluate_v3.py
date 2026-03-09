@@ -3,7 +3,7 @@ TreeFlow evaluation v3: morphological evaluation of generated tree point clouds.
 
 Per-pair metrics:
   - Chamfer distance (m) — symmetric, PCA-canonicalized clouds in metric coords
-  - Convex hull volume (m³) — scipy ConvexHull, stem-tracker independent
+  - Height at max crown radius (m) — from stem tracker
   - Max crown radius (m) — from stem tracker
   - Height to crown base (m) — from stem tracker
   - Vertical KDE JSD — 1D density along z-axis
@@ -26,7 +26,6 @@ import numpy as np
 import pandas as pd
 import zarr
 from pathlib import Path
-from scipy.spatial import ConvexHull
 from scipy.spatial.distance import cdist
 from scipy.stats import gaussian_kde, wasserstein_distance
 from tqdm import tqdm
@@ -43,22 +42,22 @@ HEIGHT_BIN_LABELS = [
     "25-30", "30-35", "35-40", "40+",
 ]
 
-METRICS = ["chamfer_dist", "delta_hull_vol", "delta_max_crown_r", "delta_hcb",
+METRICS = ["chamfer_dist", "delta_h_max_cr", "delta_max_crown_r", "delta_hcb",
            "vert_kde_jsd", "hist_2d_jsd"]
 
 METRIC_DISPLAY = {
     "chamfer_dist":      ("Chamfer distance",   "m"),
-    "delta_hull_vol":    ("Δ Hull volume",      "m³"),
+    "delta_h_max_cr":    ("Δ Height at max crown R", "m"),
     "delta_max_crown_r": ("Δ Max crown radius", "m"),
     "delta_hcb":         ("Δ Height to crown base", "m"),
     "vert_kde_jsd":      ("Vertical KDE JSD",  ""),
     "hist_2d_jsd":       ("2D histogram JSD",  ""),
 }
 
-MORPH_PROPERTIES = ["hull_volume", "max_crown_r", "hcb"]
+MORPH_PROPERTIES = ["h_max_cr", "max_crown_r", "hcb"]
 
 MORPH_DISPLAY = {
-    "hull_volume":  ("Convex hull volume", "m³"),
+    "h_max_cr":     ("Height at max crown R", "m"),
     "max_crown_r":  ("Max crown radius", "m"),
     "hcb":          ("Height to crown base", "m"),
 }
@@ -182,7 +181,7 @@ def extract_features(cloud: np.ndarray, height_m: float) -> dict:
     """Extract morphological features from one point cloud.
 
     Returns dict with:
-        hull_volume   (m³) — convex hull of the full point cloud
+        h_max_cr      (m)  — height at max crown radius (arc-length position)
         max_crown_r   (m)  — from stem tracker (max mean-r per arc-length slice)
         hcb           (m)  — from stem tracker (arc-length density analysis)
         vert_kde      (64,) — 1D KDE of z-axis (no stem tracker)
@@ -191,12 +190,6 @@ def extract_features(cloud: np.ndarray, height_m: float) -> dict:
     z = cloud[:, 2]
     z_min, z_max = z.min(), z.max()
     scale = height_m / 2.0  # normalized → metric
-
-    # 1. Convex hull volume (stem-tracker independent)
-    try:
-        hull_volume = float(ConvexHull(cloud).volume * scale ** 3)
-    except Exception:
-        hull_volume = float("nan")
 
     # Stem tracker → cylindrical coordinates (r, s)
     r, s, _, _, _ = compute_rs_spine(cloud)
@@ -230,11 +223,14 @@ def extract_features(cloud: np.ndarray, height_m: float) -> dict:
     slice_centers, mean_r_per_slice = compute_mean_r_per_slice(s, r, s_max)
     max_crown_r = float(mean_r_per_slice.max())
 
-    # 5. Height to crown base (Kneedle on cumulative mean-r)
+    # 5. Height at max crown radius (arc-length of widest slice, in meters)
+    h_max_cr = float(slice_centers[np.argmax(mean_r_per_slice)] / s_max * height_m)
+
+    # 6. Height to crown base (Kneedle on cumulative mean-r)
     hcb_val, _ = compute_hcb(slice_centers, mean_r_per_slice, s_max)
 
     return {
-        "hull_volume":  hull_volume,
+        "h_max_cr":     h_max_cr,
         "max_crown_r":  float(max_crown_r * scale),
         "hcb":          float(hcb_val * height_m),
         "vert_kde":     vert_kde,
@@ -381,7 +377,7 @@ def build_pair_dataframe(
             "scan_type": meta.get("scan_type", "unknown"),
             "height_m": float(meta.get("height_m", 0)),
             "cfg_scale": float(meta.get("cfg_scale", 0)),
-            "delta_hull_vol":    abs(gf["hull_volume"]  - rf["hull_volume"]),
+            "delta_h_max_cr":    abs(gf["h_max_cr"]     - rf["h_max_cr"]),
             "delta_max_crown_r": abs(gf["max_crown_r"]  - rf["max_crown_r"]),
             "delta_hcb":         abs(gf["hcb"]          - rf["hcb"]),
             "vert_kde_jsd":      jsd(rf["vert_kde"], gf["vert_kde"]),
@@ -402,7 +398,7 @@ def build_pair_dataframe(
 
     # Build feature dataframes for downstream (W₁, baselines)
     df_real_feats = pd.DataFrame([
-        {"tree_id": tid, "hull_volume": r["hull_volume"],
+        {"tree_id": tid, "h_max_cr": r["h_max_cr"],
          "max_crown_r": r["max_crown_r"], "hcb": r["hcb"],
          "vert_kde": r["vert_kde"], "hist_2d": r["hist_2d"]}
         for tid, r in real_feats.items()
@@ -410,7 +406,7 @@ def build_pair_dataframe(
 
     df_gen_feats = pd.DataFrame([
         {"gen_id": gid, "real_id": gen_id_to_meta[gid]["source_tree_id"],
-         "hull_volume": r["hull_volume"],
+         "h_max_cr": r["h_max_cr"],
          "max_crown_r": r["max_crown_r"], "hcb": r["hcb"]}
         for gid, r in gen_feats.items()
         if gid in gen_id_to_meta
@@ -463,7 +459,7 @@ def build_baselines(
                 rows.append({
                     "anchor_id": tid,
                     "neighbor_id": nid,
-                    "delta_hull_vol":    abs(anchor["hull_volume"]  - nb["hull_volume"]),
+                    "delta_h_max_cr":    abs(anchor["h_max_cr"]     - nb["h_max_cr"]),
                     "delta_max_crown_r": abs(anchor["max_crown_r"]  - nb["max_crown_r"]),
                     "delta_hcb":         abs(anchor["hcb"]          - nb["hcb"]),
                     "vert_kde_jsd":      jsd(anchor_kde, np.array(nb["vert_kde"])),
@@ -655,7 +651,7 @@ def build_stratified_table(
     # Short names for metrics
     metric_short = {
         "chamfer_dist": "CD",
-        "delta_hull_vol": "Δ HuV",
+        "delta_h_max_cr": "Δ HmCR",
         "delta_max_crown_r": "Δ CrR",
         "delta_hcb": "Δ HCB",
         "vert_kde_jsd": "V-KDE",
@@ -696,7 +692,7 @@ def build_stratified_table(
     w1_h_parts = [f"  {group_col:<15s} {'n':>5s}"]
     for prop in MORPH_PROPERTIES:
         _, unit = MORPH_DISPLAY[prop]
-        short = {"hull_volume": "W₁ HuV", "max_crown_r": "W₁ CrR", "hcb": "W₁ HCB"}[prop]
+        short = {"h_max_cr": "W₁ HmCR", "max_crown_r": "W₁ CrR", "hcb": "W₁ HCB"}[prop]
         w1_h_parts.append(f"{short + (' (' + unit + ')' if unit else ''):>16s}")
     lines.append("".join(w1_h_parts))
     lines.append("─" * 100)
