@@ -16,5 +16,4 @@ python figures.py \
     --data_path data/preprocessed-16384 \
     --n_rows 4 \
     --n_generated 4 \
-    --n_sheets 3 \
     --seed 42
