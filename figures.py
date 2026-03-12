@@ -2504,48 +2504,122 @@ def create_figure_qualitative(
     else:
         print(f"WARNING: {pairs_path} not found — falling back to random sample selection")
 
-    # --- Select trees: 2 conifers + 2 broadleaves per sheet ---
-    def _select_stratified_trees(eligible_df, n_sets=2, trees_per_set=4, rng=rng):
-        """Select n_sets non-overlapping sets of trees, each with 2 conifers + 2 broadleaves."""
-        conifers = eligible_df[eligible_df["genus"].isin(CONIFER_GENERA)].copy()
-        broadleaves = eligible_df[~eligible_df["genus"].isin(CONIFER_GENERA)].copy()
-        conifers = conifers.sort_values("tree_H").reset_index(drop=True)
-        broadleaves = broadleaves.sort_values("tree_H").reset_index(drop=True)
+    # --- Select trees: species-diverse, different trees per quality mode ---
+    def _compute_tree_median_cd(eligible_df):
+        """Compute median Chamfer distance per tree from df_pairs."""
+        if df_pairs is None:
+            return {}
+        median_cd = df_pairs.groupby("real_id")["chamfer_dist"].median()
+        return median_cd.to_dict()
 
-        print(f"  Conifers: {len(conifers)}, Broadleaves: {len(broadleaves)}")
+    def _select_species_diverse_trees(eligible_df, n_trees=4, used=None,
+                                      prefer_cd=None, rng=rng):
+        """Select n_trees with unique species, balanced conifer/broadleaf,
+        spread across height range.
 
-        used = set()
-        sets = []
-        for _ in range(n_sets):
-            picked = []
-            for group in [conifers, broadleaves]:
-                avail = group[~group["file_id"].isin(used)]
-                if len(avail) < 2:
-                    # Fall back: pick whatever is available
-                    avail = eligible_df[~eligible_df["file_id"].isin(used)]
-                # Pick one short (bottom quartile) and one tall (top quartile)
-                n = len(avail)
-                if n >= 2:
-                    short_idx = max(0, int(n * 0.25) - 1)
-                    tall_idx = min(n - 1, int(n * 0.75))
-                    short_row = avail.iloc[short_idx]
-                    tall_row = avail.iloc[tall_idx]
-                    picked.extend([short_row["file_id"], tall_row["file_id"]])
-                elif n == 1:
-                    picked.append(avail.iloc[0]["file_id"])
-            used.update(picked)
-            sets.append(picked)
-        return sets
+        prefer_cd: if 'best', prefer low median CD trees; 'worst', prefer high;
+                   'representative', prefer trees near the global median CD.
+        """
+        if used is None:
+            used = set()
+        avail = eligible_df[~eligible_df["file_id"].isin(used)].copy()
+
+        # Split into conifers / broadleaves
+        conifers = avail[avail["genus"].isin(CONIFER_GENERA)].copy()
+        broadleaves = avail[~avail["genus"].isin(CONIFER_GENERA)].copy()
+
+        # Target: 2 conifers + 2 broadleaves (adjust if not enough)
+        n_con = min(2, len(conifers["species"].unique()))
+        n_broad = min(n_trees - n_con, len(broadleaves["species"].unique()))
+        n_con = min(n_trees - n_broad, len(conifers["species"].unique()))
+
+        tree_median_cd = _compute_tree_median_cd(avail)
+
+        def _pick_from_group(group_df, n_pick):
+            """Pick n_pick trees: one per species, spread across height range."""
+            # Get unique species, pick the n_pick most common ones
+            species_counts = group_df["species"].value_counts()
+            candidate_species = species_counts.head(max(n_pick * 2, len(species_counts))).index.tolist()
+
+            # For each candidate species, pick a representative tree
+            candidates = []
+            for sp in candidate_species:
+                sp_trees = group_df[group_df["species"] == sp].copy()
+                if len(sp_trees) == 0:
+                    continue
+                # Pick tree near median height for this species
+                median_h = sp_trees["tree_H"].median()
+                sp_trees["_h_dist"] = (sp_trees["tree_H"] - median_h).abs()
+                # If we have CD preference, weight by that too
+                if prefer_cd and tree_median_cd:
+                    for idx, row in sp_trees.iterrows():
+                        cd = tree_median_cd.get(row["file_id"])
+                        if cd is not None:
+                            sp_trees.loc[idx, "_cd"] = cd
+                    if "_cd" in sp_trees.columns:
+                        if prefer_cd == "best":
+                            sp_trees = sp_trees.sort_values("_cd")
+                        elif prefer_cd == "worst":
+                            sp_trees = sp_trees.sort_values("_cd", ascending=False)
+                        elif prefer_cd == "representative":
+                            global_median = np.median(list(tree_median_cd.values()))
+                            sp_trees["_cd_dist"] = (sp_trees["_cd"] - global_median).abs()
+                            sp_trees = sp_trees.sort_values("_cd_dist")
+                candidates.append(sp_trees.iloc[0])
+
+            if len(candidates) == 0:
+                return []
+
+            cand_df = pd.DataFrame(candidates)
+            # Sort by height and pick n_pick spread across the range
+            cand_df = cand_df.sort_values("tree_H").reset_index(drop=True)
+            if len(cand_df) <= n_pick:
+                return cand_df["file_id"].tolist()
+            # Pick evenly spaced indices
+            indices = np.linspace(0, len(cand_df) - 1, n_pick).astype(int)
+            return cand_df.iloc[indices]["file_id"].tolist()
+
+        picked = []
+        picked.extend(_pick_from_group(conifers, n_con))
+        picked.extend(_pick_from_group(broadleaves, n_broad))
+
+        # If we still need more, fill from whatever is available
+        if len(picked) < n_trees:
+            remaining = avail[~avail["file_id"].isin(set(picked) | used)]
+            remaining_species = remaining[~remaining["species"].isin(
+                avail[avail["file_id"].isin(picked)]["species"].values
+            )]
+            if len(remaining_species) > 0:
+                extra = remaining_species.sample(
+                    min(n_trees - len(picked), len(remaining_species)), random_state=rng
+                )
+                picked.extend(extra["file_id"].tolist())
+
+        return picked[:n_trees]
 
     if tree_ids is not None:
-        # Manual override: all sheets use these trees
+        # Manual override: all modes use these trees
         manual_ids = [str(tid).zfill(5) for tid in tree_ids]
         manual_ids = [mid for mid in manual_ids if mid in eligible_tree_ids]
-        tree_sets = [manual_ids, manual_ids]
+        mode_tree_sets = {m: [manual_ids, manual_ids] for m in ["best", "representative", "worst"]}
         print(f"Manual tree_ids: {manual_ids}")
     else:
-        tree_sets = _select_stratified_trees(eligible_real)
-        print(f"Selected tree sets: {[len(s) for s in tree_sets]}")
+        # Select DIFFERENT trees for each quality mode, 2 sets per mode
+        all_used = set()
+        mode_tree_sets = {}
+        for mode in ["best", "representative", "worst"]:
+            sets = []
+            for set_i in range(2):
+                trees = _select_species_diverse_trees(
+                    eligible_real, n_trees=n_rows, used=all_used,
+                    prefer_cd=mode, rng=rng,
+                )
+                sets.append(trees)
+                all_used.update(trees)
+                species_picked = eligible_real[eligible_real["file_id"].isin(trees)]["species"].tolist()
+                print(f"  {mode} set {set_i+1}: {trees} — {[s.replace('_', ' ') for s in species_picked]}")
+            mode_tree_sets[mode] = sets
+        print(f"Selected {len(all_used)} unique trees across all modes")
 
     # --- Sample selection functions ---
     def _pick_samples_by_cd(tree_id, mode, n):
@@ -2720,8 +2794,8 @@ def create_figure_qualitative(
         # Build composite figure with imshow
         # MDPI text width ~17cm = 6.69in
         fig_width = 6.69
-        label_col_frac = 0.12  # fraction of width for species label column
-        header_frac = 0.06  # fraction of height for column headers
+        label_col_frac = 0.16  # fraction of width for species label column
+        header_frac = 0.05  # fraction of height for column headers
 
         grid_width = 1.0 - label_col_frac
         col_frac = grid_width / n_cols
@@ -2762,7 +2836,7 @@ def create_figure_qualitative(
             x = label_col_frac + col_j * col_frac + col_frac / 2
             y = 1.0 - header_frac * 0.4
             fig.text(x, y, col_labels[col_j], ha="center", va="center",
-                     fontsize=7, fontweight="bold")
+                     fontsize=8, fontweight="bold")
 
         # Row labels (species + height) in the label column
         row_y_positions = []
@@ -2781,12 +2855,13 @@ def create_figure_qualitative(
             real_row = real_meta[real_meta["file_id"] == tree_id].iloc[0]
             species = real_row.get("species", "unknown").replace("_", " ")
             height_m = id_to_height[tree_id]
-            label_x = label_col_frac * 0.5
+            # Position label right-aligned, close to the image grid
+            label_x = label_col_frac - 0.01
             label_y = row_y_positions[row_i]
             fig.text(
                 label_x, label_y,
                 f"{species}\nH = {height_m:.1f} m",
-                ha="center", va="center", fontsize=5.5, fontstyle="italic",
+                ha="right", va="center", fontsize=8, fontstyle="italic",
             )
 
         sheet_path = output_dir / f"figure_qualitative_{sheet_name}.pdf"
@@ -2796,15 +2871,15 @@ def create_figure_qualitative(
 
         all_metadata_dict[sheet_name] = sheet_meta
 
-    # --- Generate all 6 sheets ---
+    # --- Generate all 6 sheets (different trees per mode) ---
     all_metadata = {}
     sheet_configs = [
-        ("best_1", tree_sets[0], "best"),
-        ("best_2", tree_sets[1], "best"),
-        ("representative_1", tree_sets[0], "representative"),
-        ("representative_2", tree_sets[1], "representative"),
-        ("worst_1", tree_sets[0], "worst"),
-        ("worst_2", tree_sets[1], "worst"),
+        ("best_1", mode_tree_sets["best"][0], "best"),
+        ("best_2", mode_tree_sets["best"][1], "best"),
+        ("representative_1", mode_tree_sets["representative"][0], "representative"),
+        ("representative_2", mode_tree_sets["representative"][1], "representative"),
+        ("worst_1", mode_tree_sets["worst"][0], "worst"),
+        ("worst_2", mode_tree_sets["worst"][1], "worst"),
     ]
 
     for sheet_name, tree_set, mode in sheet_configs:
