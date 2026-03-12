@@ -2422,7 +2422,7 @@ CONIFER_GENERA = {"Abies", "Larix", "Picea", "Pinus", "Pseudotsuga"}
 def create_figure_qualitative(
     experiment_dir: str = "experiments/finetune-8-512-16384",
     data_path: str = None,
-    n_rows: int = 4,
+    n_rows: int = 6,
     n_generated: int = 4,
     tree_ids: list[int] = None,
     canonicalize_clouds: bool = False,
@@ -2636,6 +2636,18 @@ def create_figure_qualitative(
         plt.close(fig)
         buf.seek(0)
         img = np.array(Image.open(buf))
+        # Crop transparent/white margins
+        if img.shape[2] == 4:
+            alpha = img[:, :, 3]
+            rows_with_content = np.where(alpha > 0)[0]
+            cols_with_content = np.where(alpha > 0)[1]
+            if len(rows_with_content) > 0:
+                pad = 2  # pixels
+                r0 = max(0, rows_with_content.min() - pad)
+                r1 = min(img.shape[0], rows_with_content.max() + pad + 1)
+                c0 = max(0, cols_with_content.min() - pad)
+                c1 = min(img.shape[1], cols_with_content.max() + pad + 1)
+                img = img[r0:r1, c0:c1]
         return img
 
     def _load_and_prepare_clouds(tree_id, sample_infos, canonicalize_clouds_flag):
@@ -2741,19 +2753,14 @@ def create_figure_qualitative(
             return padded
 
         # Build composite figure with imshow
-        # MDPI text width ~17cm = 6.69in
+        # MDPI full page: 17cm × 23.5cm (6.69in × 9.25in)
         fig_width = 6.69
+        fig_height = 9.25
         label_col_frac = 0.16  # fraction of width for species label column
-        header_frac = 0.05  # fraction of height for column headers
+        header_frac = 0.03  # fraction of height for column headers
 
         grid_width = 1.0 - label_col_frac
         col_frac = grid_width / n_cols
-
-        total_img_h = sum(row_heights)
-        total_img_w = sum(col_widths)
-        aspect = total_img_h / max(total_img_w, 1)
-        fig_height = fig_width * aspect * 0.9  # slightly compress vertically
-        fig_height = max(fig_height, 2.0)
 
         fig, axes = plt.subplots(
             actual_rows, n_cols,
