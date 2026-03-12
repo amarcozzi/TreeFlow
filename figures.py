@@ -2504,120 +2504,55 @@ def create_figure_qualitative(
     else:
         print(f"WARNING: {pairs_path} not found — falling back to random sample selection")
 
-    # --- Select trees: species-diverse, different trees per quality mode ---
-    def _compute_tree_median_cd(eligible_df):
-        """Compute median Chamfer distance per tree from df_pairs."""
-        if df_pairs is None:
-            return {}
-        median_cd = df_pairs.groupby("real_id")["chamfer_dist"].median()
-        return median_cd.to_dict()
-
-    def _select_species_diverse_trees(eligible_df, n_trees=4, used=None,
-                                      prefer_cd=None, rng=rng):
-        """Select n_trees with unique species, balanced conifer/broadleaf,
-        spread across height range.
-
-        prefer_cd: if 'best', prefer low median CD trees; 'worst', prefer high;
-                   'representative', prefer trees near the global median CD.
-        """
-        if used is None:
-            used = set()
-        avail = eligible_df[~eligible_df["file_id"].isin(used)].copy()
-
-        # Split into conifers / broadleaves
-        conifers = avail[avail["genus"].isin(CONIFER_GENERA)].copy()
-        broadleaves = avail[~avail["genus"].isin(CONIFER_GENERA)].copy()
-
-        # Target: 2 conifers + 2 broadleaves (adjust if not enough)
-        n_con = min(2, len(conifers["species"].unique()))
-        n_broad = min(n_trees - n_con, len(broadleaves["species"].unique()))
-        n_con = min(n_trees - n_broad, len(conifers["species"].unique()))
-
-        tree_median_cd = _compute_tree_median_cd(avail)
-
-        def _pick_from_group(group_df, n_pick):
-            """Pick n_pick trees: one per species, spread across height range."""
-            # Get unique species, pick the n_pick most common ones
-            species_counts = group_df["species"].value_counts()
-            candidate_species = species_counts.head(max(n_pick * 2, len(species_counts))).index.tolist()
-
-            # For each candidate species, pick a representative tree
-            candidates = []
-            for sp in candidate_species:
-                sp_trees = group_df[group_df["species"] == sp].copy()
-                if len(sp_trees) == 0:
-                    continue
-                # Pick tree near median height for this species
-                median_h = sp_trees["tree_H"].median()
-                sp_trees["_h_dist"] = (sp_trees["tree_H"] - median_h).abs()
-                # If we have CD preference, weight by that too
-                if prefer_cd and tree_median_cd:
-                    for idx, row in sp_trees.iterrows():
-                        cd = tree_median_cd.get(row["file_id"])
-                        if cd is not None:
-                            sp_trees.loc[idx, "_cd"] = cd
-                    if "_cd" in sp_trees.columns:
-                        if prefer_cd == "best":
-                            sp_trees = sp_trees.sort_values("_cd")
-                        elif prefer_cd == "worst":
-                            sp_trees = sp_trees.sort_values("_cd", ascending=False)
-                        elif prefer_cd == "representative":
-                            global_median = np.median(list(tree_median_cd.values()))
-                            sp_trees["_cd_dist"] = (sp_trees["_cd"] - global_median).abs()
-                            sp_trees = sp_trees.sort_values("_cd_dist")
-                candidates.append(sp_trees.iloc[0])
-
-            if len(candidates) == 0:
-                return []
-
-            cand_df = pd.DataFrame(candidates)
-            # Sort by height and pick n_pick spread across the range
-            cand_df = cand_df.sort_values("tree_H").reset_index(drop=True)
-            if len(cand_df) <= n_pick:
-                return cand_df["file_id"].tolist()
-            # Pick evenly spaced indices
-            indices = np.linspace(0, len(cand_df) - 1, n_pick).astype(int)
-            return cand_df.iloc[indices]["file_id"].tolist()
-
+    # --- Select trees: unique species per row, different trees per mode ---
+    def _pick_unique_species(pool_df, n, rng):
+        """Pick n trees with unique species from pool_df."""
         picked = []
-        picked.extend(_pick_from_group(conifers, n_con))
-        picked.extend(_pick_from_group(broadleaves, n_broad))
-
-        # If we still need more, fill from whatever is available
-        if len(picked) < n_trees:
-            remaining = avail[~avail["file_id"].isin(set(picked) | used)]
-            remaining_species = remaining[~remaining["species"].isin(
-                avail[avail["file_id"].isin(picked)]["species"].values
-            )]
-            if len(remaining_species) > 0:
-                extra = remaining_species.sample(
-                    min(n_trees - len(picked), len(remaining_species)), random_state=rng
-                )
-                picked.extend(extra["file_id"].tolist())
-
-        return picked[:n_trees]
+        seen_species = set()
+        shuffled = pool_df.sample(frac=1, random_state=rng)
+        for _, row in shuffled.iterrows():
+            if row["species"] not in seen_species:
+                picked.append(row["file_id"])
+                seen_species.add(row["species"])
+            if len(picked) >= n:
+                break
+        return picked
 
     if tree_ids is not None:
-        # Manual override: all modes use these trees
         manual_ids = [str(tid).zfill(5) for tid in tree_ids]
         manual_ids = [mid for mid in manual_ids if mid in eligible_tree_ids]
         mode_tree_sets = {m: [manual_ids, manual_ids] for m in ["best", "representative", "worst"]}
         print(f"Manual tree_ids: {manual_ids}")
     else:
-        # Select DIFFERENT trees for each quality mode, 2 sets per mode
+        # Rank trees by median Chamfer distance, split into thirds
+        if df_pairs is not None:
+            tree_cd = df_pairs.groupby("real_id")["chamfer_dist"].median()
+            eligible_real = eligible_real.copy()
+            eligible_real["_median_cd"] = eligible_real["file_id"].map(tree_cd)
+            eligible_real = eligible_real.dropna(subset=["_median_cd"])
+            eligible_real = eligible_real.sort_values("_median_cd").reset_index(drop=True)
+            n = len(eligible_real)
+            third = n // 3
+            pools = {
+                "best": eligible_real.iloc[:third],
+                "representative": eligible_real.iloc[third:2*third],
+                "worst": eligible_real.iloc[2*third:],
+            }
+        else:
+            pools = {m: eligible_real for m in ["best", "representative", "worst"]}
+
         all_used = set()
         mode_tree_sets = {}
         for mode in ["best", "representative", "worst"]:
             sets = []
             for set_i in range(2):
-                trees = _select_species_diverse_trees(
-                    eligible_real, n_trees=n_rows, used=all_used,
-                    prefer_cd=mode, rng=rng,
-                )
+                pool = pools[mode]
+                pool = pool[~pool["file_id"].isin(all_used)]
+                trees = _pick_unique_species(pool, n_rows, rng)
                 sets.append(trees)
                 all_used.update(trees)
                 species_picked = eligible_real[eligible_real["file_id"].isin(trees)]["species"].tolist()
-                print(f"  {mode} set {set_i+1}: {trees} — {[s.replace('_', ' ') for s in species_picked]}")
+                print(f"  {mode} set {set_i+1}: {[s.replace('_', ' ') for s in species_picked]}")
             mode_tree_sets[mode] = sets
         print(f"Selected {len(all_used)} unique trees across all modes")
 
