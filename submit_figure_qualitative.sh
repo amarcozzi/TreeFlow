@@ -14,6 +14,6 @@ python figures.py \
     --figures qualitative \
     --experiment_dir experiments/finetune-8-512-16384 \
     --data_path data/preprocessed-16384 \
-    --n_rows 4 \
+    --n_rows 6 \
     --n_generated 4 \
     --seed 42

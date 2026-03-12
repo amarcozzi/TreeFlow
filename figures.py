@@ -3168,7 +3168,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", default="./data/preprocessed-16384")
     parser.add_argument("--output_dir", default="figures")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--n_rows", type=int, default=4)
+    parser.add_argument("--n_rows", type=int, default=6)
     parser.add_argument("--n_generated", type=int, default=4)
     parser.add_argument("--tree_ids", type=str, default=None,
                         help="Comma-separated tree IDs for sheet 1 (e.g. '12345,67890')")
