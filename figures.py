@@ -2642,6 +2642,8 @@ def create_figure_qualitative(
             median_cd = tree_pairs["chamfer_dist"].median()
             tree_pairs["_dist_to_median"] = (tree_pairs["chamfer_dist"] - median_cd).abs()
             selected = tree_pairs.nsmallest(n, "_dist_to_median")
+        elif mode == "random":
+            selected = tree_pairs.sample(n=min(n, len(tree_pairs)), random_state=rng)
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
@@ -2709,6 +2711,13 @@ def create_figure_qualitative(
             gen_path = zarr_dir / sample_file
             gen_cloud = zarr.load(str(gen_path)).astype(np.float32)
             gen_clouds.append(gen_cloud)
+
+        # Downsample real cloud to match generated sample size for fair comparison
+        if gen_clouds:
+            target_n = gen_clouds[0].shape[0]
+            if real_cloud.shape[0] > target_n:
+                idx = rng.choice(real_cloud.shape[0], target_n, replace=False)
+                real_cloud = real_cloud[idx]
 
         row_clouds = [real_cloud] + gen_clouds
         if canonicalize_clouds_flag:
@@ -2885,6 +2894,21 @@ def create_figure_qualitative(
     for sheet_name, tree_set, mode in sheet_configs:
         print(f"\n--- Sheet: {sheet_name} ({len(tree_set)} rows, mode={mode}) ---")
         compose_sheet(tree_set, mode, sheet_name, all_metadata)
+
+    # --- Generate random sheets: uniform random trees with random samples ---
+    n_random_sheets = 6
+    all_random_used = set(all_used) if tree_ids is None else set()
+    for ri in range(n_random_sheets):
+        avail = eligible_real[~eligible_real["file_id"].isin(all_random_used)]
+        if len(avail) < n_rows:
+            avail = eligible_real  # reset if exhausted
+            all_random_used = set()
+        random_trees = avail.sample(n=min(n_rows, len(avail)), random_state=rng)
+        random_tree_ids = random_trees["file_id"].tolist()
+        all_random_used.update(random_tree_ids)
+        sheet_name = f"random_{ri+1}"
+        print(f"\n--- Sheet: {sheet_name} ({len(random_tree_ids)} rows, mode=random) ---")
+        compose_sheet(random_tree_ids, "random", sheet_name, all_metadata)
 
     # Save metadata
     all_metadata["_config"] = {
