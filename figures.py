@@ -2504,16 +2504,23 @@ def create_figure_qualitative(
     else:
         print(f"WARNING: {pairs_path} not found — falling back to random sample selection")
 
-    # --- Select trees: unique species per row, different trees per mode ---
-    def _pick_unique_species(pool_df, n, rng):
-        """Pick n trees with unique species from pool_df."""
+    # --- Select trees: one per height bin, unique species, different trees per mode ---
+    def _pick_height_stratified(pool_df, n, used, rng):
+        """Pick n trees from pool_df, one per height bin, unique species."""
+        avail = pool_df[~pool_df["file_id"].isin(used)].copy()
+        if len(avail) == 0:
+            return []
+        # Create n equal-frequency height bins from available trees
+        avail["_hbin"] = pd.qcut(avail["tree_H"], q=min(n, len(avail)), duplicates="drop")
         picked = []
         seen_species = set()
-        shuffled = pool_df.sample(frac=1, random_state=rng)
-        for _, row in shuffled.iterrows():
-            if row["species"] not in seen_species:
-                picked.append(row["file_id"])
-                seen_species.add(row["species"])
+        for _, bin_df in avail.groupby("_hbin", observed=True):
+            candidates = bin_df[~bin_df["species"].isin(seen_species)]
+            if len(candidates) == 0:
+                candidates = bin_df  # fall back if all species taken
+            row = candidates.sample(1, random_state=rng).iloc[0]
+            picked.append(row["file_id"])
+            seen_species.add(row["species"])
             if len(picked) >= n:
                 break
         return picked
@@ -2546,9 +2553,7 @@ def create_figure_qualitative(
         for mode in ["best", "representative", "worst"]:
             sets = []
             for set_i in range(2):
-                pool = pools[mode]
-                pool = pool[~pool["file_id"].isin(all_used)]
-                trees = _pick_unique_species(pool, n_rows, rng)
+                trees = _pick_height_stratified(pools[mode], n_rows, all_used, rng)
                 sets.append(trees)
                 all_used.update(trees)
                 species_picked = eligible_real[eligible_real["file_id"].isin(trees)]["species"].tolist()
