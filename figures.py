@@ -3523,21 +3523,24 @@ def create_figure_cfg_sensitivity(
         p10 = grouped[metric].quantile(0.10).values
         p90 = grouped[metric].quantile(0.90).values
 
+        # Clip y-axis to 97.5th percentile so outliers don't crush the signal
+        y_upper = df[metric].quantile(0.975)
+
         # Individual pairs (subsample for readability)
         plot_df = df.sample(n=min(5000, len(df)), random_state=42)
         ax.scatter(
-            plot_df["cfg_scale"], plot_df[metric],
+            plot_df["cfg_scale"], plot_df[metric].clip(upper=y_upper),
             s=3, alpha=0.06, color="C0", rasterized=True,
         )
 
         # 10th–90th percentile band
         ax.fill_between(
-            bin_centers, p10, p90,
+            bin_centers, p10, np.minimum(p90, y_upper),
             alpha=0.12, color="C1", label="10th–90th pctl",
         )
         # IQR band
         ax.fill_between(
-            bin_centers, q25, q75,
+            bin_centers, q25, np.minimum(q75, y_upper),
             alpha=0.30, color="C1", label="IQR",
         )
         # Median line
@@ -3546,6 +3549,7 @@ def create_figure_cfg_sensitivity(
             linewidth=1.5, markersize=4, zorder=5, label="Median",
         )
 
+        ax.set_ylim(bottom=0, top=y_upper * 1.05)
         ax.set_xlabel(r"CFG scale $\omega$")
         ax.set_ylabel(metric_labels[metric])
         ax.legend(fontsize=7, loc="best")
