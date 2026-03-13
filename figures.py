@@ -2792,7 +2792,7 @@ def create_figure_qualitative(
             x = label_col_frac + col_j * col_frac + col_frac / 2
             y = 1.0 - header_frac * 0.4
             fig.text(x, y, col_labels[col_j], ha="center", va="center",
-                     fontsize=8, fontweight="bold")
+                     fontsize=8)
 
         # Row labels (species + height) in the label column
         row_y_positions = []
@@ -2811,12 +2811,13 @@ def create_figure_qualitative(
             real_row = real_meta[real_meta["file_id"] == tree_id].iloc[0]
             species = real_row.get("species", "unknown").replace("_", " ")
             height_m = id_to_height[tree_id]
+            data_type = real_row.get("data_type", "unknown").upper()
             # Position label right-aligned, close to the image grid
             label_x = label_col_frac - 0.01
             label_y = row_y_positions[row_i]
             fig.text(
                 label_x, label_y,
-                f"{species}\nH = {height_m:.1f} m",
+                f"{species}\nH = {height_m:.1f} m\n{data_type}",
                 ha="right", va="center", fontsize=8, fontstyle="italic",
             )
 
