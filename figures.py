@@ -2965,10 +2965,14 @@ def plot_stem_tracker_figure(
     # Ensure XY ranges are equal (so the tree isn't distorted in plan view)
     xy_range = max(ranges[0], ranges[1])
     half_xy = xy_range * (1 + pad) / 2.0
-    half_z = ranges[2] * (1 + pad) / 2.0
+    # Ground the tree: minimal padding below, normal above
+    z_lo = cloud[:, 2].min() - ranges[2] * 0.02
+    z_hi = cloud[:, 2].max() + ranges[2] * pad
+    full_z = z_hi - z_lo
+    z_mid = (z_lo + z_hi) / 2.0
 
     # Figure aspect ratio matches the 3D box proportions
-    fig3d = plt.figure(figsize=(5, 5 * half_z / max(half_xy, 1e-6)), dpi=render_dpi)
+    fig3d = plt.figure(figsize=(5, 5 * (full_z / 2.0) / max(half_xy, 1e-6)), dpi=render_dpi)
     ax1 = fig3d.add_subplot(111, projection="3d")
     ax1.scatter(
         cloud[idx, 0],
@@ -2991,8 +2995,8 @@ def plot_stem_tracker_figure(
 
     ax1.set_xlim(centroid[0] - half_xy, centroid[0] + half_xy)
     ax1.set_ylim(centroid[1] - half_xy, centroid[1] + half_xy)
-    ax1.set_zlim(centroid[2] - half_z, centroid[2] + half_z)
-    ax1.set_box_aspect([half_xy, half_xy, half_z])
+    ax1.set_zlim(z_lo, z_hi)
+    ax1.set_box_aspect([half_xy, half_xy, full_z / 2.0])
     ax1.view_init(elev=15, azim=135)
     ax1.xaxis.pane.fill = False
     ax1.yaxis.pane.fill = False
@@ -3151,6 +3155,420 @@ def create_figure_stem_tracker(
         print(f"  Saved metadata: {meta_path}")
 
 
+def plot_hcb_figure(
+    zarr_path: str,
+    height_m: float,
+    output_path: str,
+    num_spine_bins: int = 20,
+    seed: int = 42,
+):
+    """Generate a 1×2 appendix figure for HCB detection via modified Kneedle.
+
+    Left:  3D point cloud with spine, HCB disk, and max crown radius ring.
+    Right: Kneedle detection graph (cumulative mean-r, diagonal, distance
+           function, detected knee point).
+
+    Args:
+        zarr_path: Path to a single tree's zarr file (normalized coordinates).
+        height_m: Tree height in meters.
+        output_path: Where to save the PDF.
+        num_spine_bins: Number of vertical bins for the stem tracker.
+        seed: Random seed for point subsampling.
+
+    Returns:
+        True if the figure was saved, False if HCB detection was degenerate.
+    """
+    import io
+    import zarr
+    from PIL import Image
+    from evaluate_v3 import compute_mean_r_per_slice, compute_hcb
+
+    # ---- Load normalized cloud ----
+    cloud_norm = zarr.load(str(zarr_path)).astype(np.float32)
+    scale = height_m / 2.0
+
+    # ---- Compute (r, s) cylindrical coordinates on normalized cloud ----
+    r, s, spine_raw, poly_x, poly_y = compute_rs_spine(
+        cloud_norm, num_bins=num_spine_bins
+    )
+
+    z = cloud_norm[:, 2]
+    z_min, z_max = z.min(), z.max()
+    eps = 1e-6
+    s_max = s.max() + eps if s.max() > 0 else eps
+
+    # ---- Mean-r per slice and HCB detection ----
+    slice_centers, mean_r_per_slice = compute_mean_r_per_slice(s, r, s_max)
+    hcb_val, kneedle_data = compute_hcb(slice_centers, mean_r_per_slice, s_max)
+
+    if np.isnan(hcb_val) or not kneedle_data:
+        print(f"  WARNING: degenerate HCB for {zarr_path}, skipping")
+        return False
+
+    hcb_m = float(hcb_val * height_m)
+    max_crown_r_norm = mean_r_per_slice.max()
+    max_crown_r_m = float(max_crown_r_norm * scale)
+    max_r_slice_idx = int(np.argmax(mean_r_per_slice))
+
+    # ---- Scale cloud to display space ----
+    cloud_m = cloud_norm * height_m
+
+    # ---- Subsample for 3D scatter ----
+    rng = np.random.default_rng(seed)
+    n_show = min(8000, len(cloud_m))
+    idx = rng.choice(len(cloud_m), n_show, replace=False)
+
+    # ---- Figure setup ----
+    prev_rc = {
+        k: plt.rcParams[k]
+        for k in [
+            "font.family",
+            "font.size",
+            "axes.labelsize",
+            "xtick.labelsize",
+            "ytick.labelsize",
+        ]
+    }
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.size": 9,
+            "axes.labelsize": 10,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+        }
+    )
+
+    render_dpi = 300
+
+    # ---- Render 3D panel to image (same approach as plot_stem_tracker_figure) ----
+    centroid = cloud_m.mean(axis=0)
+    pad = 0.15
+    ranges = np.ptp(cloud_m, axis=0)
+    xy_range = max(ranges[0], ranges[1])
+    half_xy = xy_range * (1 + pad) / 2.0
+    # Ground the tree: minimal padding below, normal above
+    z_lo = cloud_m[:, 2].min() - ranges[2] * 0.02
+    z_hi = cloud_m[:, 2].max() + ranges[2] * pad
+    full_z = z_hi - z_lo
+
+    fig3d = plt.figure(
+        figsize=(5, 5 * (full_z / 2.0) / max(half_xy, 1e-6)), dpi=render_dpi
+    )
+    ax3d = fig3d.add_subplot(111, projection="3d")
+
+    ax3d.scatter(
+        cloud_m[idx, 0], cloud_m[idx, 1], cloud_m[idx, 2],
+        c=cloud_m[idx, 2], cmap="viridis", s=0.8, alpha=0.4, rasterized=True,
+    )
+
+    # HCB horizontal disk
+    hcb_z_norm = z_min + hcb_val * (z_max - z_min)
+    hcb_z_m = hcb_z_norm * height_m
+    hcb_cx = float(poly_x(hcb_z_norm)) * height_m
+    hcb_cy = float(poly_y(hcb_z_norm)) * height_m
+    theta = np.linspace(0, 2 * np.pi, 60)
+    plane_r = 0.3 * (z_max - z_min) * height_m
+    plane_x = hcb_cx + plane_r * np.cos(theta)
+    plane_y = hcb_cy + plane_r * np.sin(theta)
+    plane_z = np.full_like(theta, hcb_z_m)
+    ax3d.plot(plane_x, plane_y, plane_z, color="#2ca02c", linewidth=2.5, zorder=8)
+    ax3d.plot_trisurf(
+        plane_x, plane_y, plane_z, color="#2ca02c", alpha=0.15, zorder=7,
+    )
+
+    # Max crown radius ring
+    if max_crown_r_norm > 0:
+        s_center = slice_centers[max_r_slice_idx]
+        spine_z_fine = np.linspace(z_min, z_max, 500)
+        dpx = poly_x.deriv()
+        dpy = poly_y.deriv()
+        ds_dz = np.sqrt(dpx(spine_z_fine) ** 2 + dpy(spine_z_fine) ** 2 + 1.0)
+        dz_vals = np.diff(spine_z_fine)
+        ds_vals = 0.5 * (ds_dz[:-1] + ds_dz[1:]) * dz_vals
+        s_fine = np.zeros(len(spine_z_fine))
+        s_fine[1:] = np.cumsum(ds_vals)
+        ring_z_norm = float(np.interp(s_center, s_fine, spine_z_fine))
+        ring_z_m = ring_z_norm * height_m
+        ring_cx = float(poly_x(ring_z_norm)) * height_m
+        ring_cy = float(poly_y(ring_z_norm)) * height_m
+        ring_x = ring_cx + max_crown_r_norm * height_m * np.cos(theta)
+        ring_y = ring_cy + max_crown_r_norm * height_m * np.sin(theta)
+        ring_zz = np.full_like(theta, ring_z_m)
+        ax3d.plot(
+            ring_x, ring_y, ring_zz,
+            color="#ff7f0e", linewidth=2.5, zorder=9,
+        )
+
+    ax3d.set_xlim(centroid[0] - half_xy, centroid[0] + half_xy)
+    ax3d.set_ylim(centroid[1] - half_xy, centroid[1] + half_xy)
+    ax3d.set_zlim(z_lo, z_hi)
+    ax3d.set_box_aspect([half_xy, half_xy, full_z / 2.0])
+    ax3d.view_init(elev=15, azim=135)
+    ax3d.xaxis.pane.fill = False
+    ax3d.yaxis.pane.fill = False
+    ax3d.zaxis.pane.fill = False
+    ax3d.xaxis.pane.set_edgecolor("lightgray")
+    ax3d.yaxis.pane.set_edgecolor("lightgray")
+    ax3d.zaxis.pane.set_edgecolor("lightgray")
+    ax3d.grid(True, alpha=0.2)
+    ax3d.set_xticklabels([])
+    ax3d.set_yticklabels([])
+    ax3d.set_zticklabels([])
+    ax3d.set_xlabel("")
+    ax3d.set_ylabel("")
+    ax3d.set_zlabel("")
+
+    buf = io.BytesIO()
+    fig3d.savefig(
+        buf, format="png", dpi=render_dpi,
+        bbox_inches="tight", pad_inches=0.05, facecolor="white",
+    )
+    plt.close(fig3d)
+    buf.seek(0)
+    img_3d = np.array(Image.open(buf))
+
+    # ---- Compose final figure: 3D image left, kneedle plot right ----
+    fig = plt.figure(figsize=(10, 5))
+
+    ax_img = fig.add_axes([0.02, 0.02, 0.44, 0.96])
+    ax_img.imshow(img_3d)
+    ax_img.set_axis_off()
+
+    ax_k = fig.add_axes([0.54, 0.12, 0.34, 0.80])
+
+    # ---- Kneedle detection plot ----
+    x_n = kneedle_data["x_norm"]
+    y_n = kneedle_data["y_norm"]
+    d_curve = kneedle_data["d"]
+    ki = kneedle_data["knee_idx"]
+
+    ax_k.plot(x_n, y_n, color="steelblue", linewidth=1.8, label=r"Cumulative $\bar{r}$")
+    ax_k.plot([0, 1], [0, 1], color="0.6", linestyle="--", linewidth=0.8, label="Unit diagonal")
+    ax_k.fill_between(x_n, x_n, y_n, alpha=0.10, color="steelblue")
+    ax_k.axvline(x_n[ki], color="#2ca02c", linewidth=1.5, linestyle="-",
+                 label=f"HCB = {hcb_m:.1f} m")
+    ax_k.plot(x_n[ki], y_n[ki], "o", color="#2ca02c", markersize=7, zorder=10)
+
+    # Distance curve on secondary axis — black labels, muted line
+    ax_d = ax_k.twinx()
+    ax_d.plot(x_n, d_curve, color="0.55", linewidth=1.0, linestyle="-",
+              alpha=0.65, label=r"$d_k$")
+    ax_d.set_ylabel(r"Weighted distance $d_k$", fontsize=10)
+    ax_d.tick_params(axis="y", labelsize=8)
+
+    ax_k.set_xlabel("Normalized arc length", fontsize=10)
+    ax_k.set_ylabel(r"Normalized cumulative $\bar{r}$", fontsize=10)
+
+    # Combined legend
+    lines_k, labels_k = ax_k.get_legend_handles_labels()
+    lines_d, labels_d = ax_d.get_legend_handles_labels()
+    ax_k.legend(
+        lines_k + lines_d, labels_k + labels_d,
+        fontsize=8, loc="lower right",
+        framealpha=0.9, edgecolor="0.8", fancybox=False,
+    )
+
+    # ---- Save ----
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    plt.rcParams.update(prev_rc)
+    print(f"Saved HCB figure: {output_path}")
+    return True
+
+
+def create_figure_hcb(
+    data_path: str = "./data/preprocessed-16384",
+    output_dir: str = "figures",
+    tree_ids: list[int] | None = None,
+    seed: int = 42,
+):
+    """CLI-facing wrapper: resolve tree IDs from dataset metadata, then plot HCB.
+
+    Args:
+        data_path: Path to preprocessed dataset directory (with metadata.csv).
+        output_dir: Directory to save PDFs into.
+        tree_ids: List of tree IDs to plot. If None, prints available IDs.
+        seed: Random seed for point subsampling.
+    """
+    data_path = Path(data_path)
+    meta_csv = data_path / "metadata.csv"
+    df = pd.read_csv(meta_csv)
+    df["file_id"] = df["filename"].apply(lambda x: Path(x).stem)
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if tree_ids is None:
+        print("No tree IDs specified. Available trees:")
+        for _, row in df.iterrows():
+            print(
+                f"  {int(row['treeID']):5d}  {row['species']:30s}  "
+                f"H={row['tree_H']:.1f}m  ({row['split']})"
+            )
+        return
+
+    metadata = {}
+    for tree_id in tree_ids:
+        tree_rows = df[df["treeID"] == tree_id]
+        if tree_rows.empty:
+            print(f"Tree {tree_id} not found in {meta_csv}")
+            continue
+
+        row = tree_rows.iloc[0]
+        height_m = float(row["tree_H"])
+        species = row["species"]
+        file_id = row["file_id"]
+        data_type = row["data_type"]
+        dataset = row["dataset"]
+        split = row["split"]
+        zarr_path = data_path / f"{file_id}.zarr"
+
+        if not zarr_path.exists():
+            print(f"Zarr not found: {zarr_path}")
+            continue
+
+        species_safe = species.replace(" ", "_")
+        output_path = (
+            out_dir / f"figure_appendix_hcb_{species_safe}_{tree_id}.pdf"
+        )
+        print(f"HCB figure: tree {tree_id}, {species}, H={height_m:.1f}m")
+        success = plot_hcb_figure(
+            str(zarr_path),
+            height_m,
+            str(output_path),
+            seed=seed,
+        )
+
+        if success:
+            metadata[str(tree_id)] = {
+                "tree_id": int(tree_id),
+                "file_id": file_id,
+                "species": species,
+                "height_m": round(height_m, 2),
+                "data_type": data_type,
+                "dataset": dataset,
+                "split": split,
+                "output_path": str(output_path),
+            }
+
+    if metadata:
+        meta_path = out_dir / "figure_hcb.json"
+        with open(meta_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        print(f"  Saved metadata: {meta_path}")
+
+
+def create_figure_cfg_sensitivity(
+    experiment_dir: str = "experiments/finetune-8-512-16384",
+    output_dir: str = "figures",
+    n_bins: int = 12,
+):
+    """
+    2x3 panel figure: each conditioning-fidelity metric vs. CFG scale omega.
+
+    Each panel shows individual pairs as faded scatter, the binned median as a
+    line, the IQR (25th-75th percentile) as dark shading, and the 10th-90th
+    percentile range as light shading.
+
+    Args:
+        experiment_dir: Experiment directory with samples/evaluation_v3/df_pairs.csv.
+        output_dir: Where to write the PDF and JSON metadata.
+        n_bins: Number of equal-width bins across the CFG range.
+    """
+    experiment_dir = Path(experiment_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Load data ────────────────────────────────────────────────────────
+    pair_csv = experiment_dir / "samples" / "evaluation_v3" / "df_pairs.csv"
+    if not pair_csv.exists():
+        print(f"Error: {pair_csv} not found")
+        return
+    df = pd.read_csv(pair_csv)
+    print(f"CFG sensitivity: loaded {len(df)} pairs, "
+          f"{df['real_id'].nunique()} unique trees")
+
+    metrics = [
+        "chamfer_dist", "delta_h_max_cr", "delta_max_crown_r",
+        "delta_hcb", "vert_kde_jsd", "hist_2d_jsd",
+    ]
+    metric_labels = {
+        "chamfer_dist":      "Chamfer distance (m)",
+        "delta_h_max_cr":    r"$|\Delta|$ Height at max CR (m)",
+        "delta_max_crown_r": r"$|\Delta|$ Max crown radius (m)",
+        "delta_hcb":         r"$|\Delta|$ Height to crown base (m)",
+        "vert_kde_jsd":      "Vertical KDE JSD",
+        "hist_2d_jsd":       "2D histogram JSD",
+    }
+
+    # ── Bin CFG scale ────────────────────────────────────────────────────
+    cfg_min, cfg_max = df["cfg_scale"].min(), df["cfg_scale"].max()
+    bin_edges = np.linspace(cfg_min, cfg_max, n_bins + 1)
+    df["cfg_bin"] = pd.cut(df["cfg_scale"], bins=bin_edges, include_lowest=True)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    grouped = df.groupby("cfg_bin", observed=True)
+
+    # ── Plot ─────────────────────────────────────────────────────────────
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8), constrained_layout=True)
+    axes = axes.ravel()
+
+    for ax, metric in zip(axes, metrics):
+        medians = grouped[metric].median().values
+        q25 = grouped[metric].quantile(0.25).values
+        q75 = grouped[metric].quantile(0.75).values
+        p10 = grouped[metric].quantile(0.10).values
+        p90 = grouped[metric].quantile(0.90).values
+
+        # Individual pairs (subsample for readability)
+        plot_df = df.sample(n=min(5000, len(df)), random_state=42)
+        ax.scatter(
+            plot_df["cfg_scale"], plot_df[metric],
+            s=3, alpha=0.06, color="C0", rasterized=True,
+        )
+
+        # 10th–90th percentile band
+        ax.fill_between(
+            bin_centers, p10, p90,
+            alpha=0.12, color="C1", label="10th–90th pctl",
+        )
+        # IQR band
+        ax.fill_between(
+            bin_centers, q25, q75,
+            alpha=0.30, color="C1", label="IQR",
+        )
+        # Median line
+        ax.plot(
+            bin_centers, medians, "o-", color="C1",
+            linewidth=1.5, markersize=4, zorder=5, label="Median",
+        )
+
+        ax.set_xlabel(r"CFG scale $\omega$")
+        ax.set_ylabel(metric_labels[metric])
+        ax.legend(fontsize=7, loc="best")
+
+    out_path = output_dir / "figure_cfg_sensitivity.pdf"
+    fig.savefig(out_path, format="pdf", bbox_inches="tight", dpi=300)
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+    # ── Metadata ─────────────────────────────────────────────────────────
+    meta = {
+        "n_pairs": len(df),
+        "n_real_trees": int(df["real_id"].nunique()),
+        "cfg_range": [round(float(cfg_min), 3), round(float(cfg_max), 3)],
+        "n_bins": n_bins,
+        "metrics": metrics,
+    }
+    meta_path = output_dir / "figure_cfg_sensitivity.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  Saved metadata: {meta_path}")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -3159,7 +3577,7 @@ if __name__ == "__main__":
         "--figures",
         nargs="+",
         default=["spine_audit"],
-        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit, crown_audit, qualitative, stem_tracker)",
+        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit, crown_audit, qualitative, stem_tracker, hcb, cfg_sensitivity)",
     )
     parser.add_argument(
         "--experiment_dir", default="experiments/transformer-8-512-4096"
@@ -3239,8 +3657,20 @@ if __name__ == "__main__":
             create_figure_stem_tracker(
                 data_path=args.data_path,
                 output_dir=args.output_dir,
-                tree_ids=[12917, 12776, 17199, 11286, 16927],
+                tree_ids=[12776, 17199],
                 seed=args.seed,
+            )
+        elif fig_name == "hcb":
+            create_figure_hcb(
+                data_path=args.data_path,
+                output_dir=args.output_dir,
+                tree_ids=[12776, 17199],
+                seed=args.seed,
+            )
+        elif fig_name == "cfg_sensitivity":
+            create_figure_cfg_sensitivity(
+                experiment_dir=args.experiment_dir,
+                output_dir=args.output_dir,
             )
         else:
             print(f"Unknown figure: {fig_name}")
