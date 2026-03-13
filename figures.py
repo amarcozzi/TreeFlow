@@ -2506,21 +2506,21 @@ def create_figure_qualitative(
 
     # --- Select trees: one per height bin, unique species, different trees per mode ---
     def _pick_height_stratified(pool_df, n, used, rng):
-        """Pick n trees from pool_df, one per height bin, unique species."""
+        """Pick n trees from pool_df, one per height bin, unique genus."""
         avail = pool_df[~pool_df["file_id"].isin(used)].copy()
         if len(avail) == 0:
             return []
         # Create n equal-frequency height bins from available trees
         avail["_hbin"] = pd.qcut(avail["tree_H"], q=min(n, len(avail)), duplicates="drop")
         picked = []
-        seen_species = set()
+        seen_genus = set()
         for _, bin_df in avail.groupby("_hbin", observed=True):
-            candidates = bin_df[~bin_df["species"].isin(seen_species)]
+            candidates = bin_df[~bin_df["genus"].isin(seen_genus)]
             if len(candidates) == 0:
-                candidates = bin_df  # fall back if all species taken
+                candidates = bin_df  # fall back if all genera taken
             row = candidates.sample(1, random_state=rng).iloc[0]
             picked.append(row["file_id"])
-            seen_species.add(row["species"])
+            seen_genus.add(row["genus"])
             if len(picked) >= n:
                 break
         return picked
@@ -2842,16 +2842,14 @@ def create_figure_qualitative(
         print(f"\n--- Sheet: {sheet_name} ({len(tree_set)} rows, mode={mode}) ---")
         compose_sheet(tree_set, mode, sheet_name, all_metadata)
 
-    # --- Generate random sheets: uniform random trees with random samples ---
+    # --- Generate random sheets: random trees with genus/height diversity ---
     n_random_sheets = 6
     all_random_used = set(all_used) if tree_ids is None else set()
     for ri in range(n_random_sheets):
-        avail = eligible_real[~eligible_real["file_id"].isin(all_random_used)]
-        if len(avail) < n_rows:
-            avail = eligible_real  # reset if exhausted
-            all_random_used = set()
-        random_trees = avail.sample(n=min(n_rows, len(avail)), random_state=rng)
-        random_tree_ids = random_trees["file_id"].tolist()
+        random_tree_ids = _pick_height_stratified(eligible_real, n_rows, all_random_used, rng)
+        if len(random_tree_ids) < n_rows:
+            all_random_used = set()  # reset if exhausted
+            random_tree_ids = _pick_height_stratified(eligible_real, n_rows, all_random_used, rng)
         all_random_used.update(random_tree_ids)
         sheet_name = f"random_{ri+1}"
         print(f"\n--- Sheet: {sheet_name} ({len(random_tree_ids)} rows, mode=random) ---")
