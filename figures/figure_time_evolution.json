@@ -1,0 +1,21 @@
+{
+  "tree_id": "06069",
+  "species": "Pseudotsuga_menziesii",
+  "height_m": 32.38,
+  "data_type": "ULS",
+  "cfg_scale": 3.0,
+  "solver_method": "dopri5",
+  "time_points": [
+    0.0,
+    0.5,
+    0.7,
+    0.8,
+    0.9,
+    0.95,
+    0.975,
+    1.0
+  ],
+  "num_points": 16384,
+  "seed": 42,
+  "experiment_dir": "experiments/finetune-8-512-16384"
+}
