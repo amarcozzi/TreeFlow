@@ -1,0 +1,15 @@
+{
+  "species": "Pinus_sylvestris",
+  "data_type": "TLS",
+  "heights": [
+    5.0,
+    12.0,
+    20.0,
+    30.0
+  ],
+  "cfg_scale": 3.0,
+  "solver_method": "dopri5",
+  "num_points": 16384,
+  "seed": 9028,
+  "experiment_dir": "experiments/finetune-8-512-16384"
+}
