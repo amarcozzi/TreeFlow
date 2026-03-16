@@ -3805,8 +3805,6 @@ def create_figure_time_evolution(
         solver_method=solver_method,
         return_intermediates=True,
         intermediate_times=time_points,
-        atol=1e-7,
-        rtol=1e-7,
     )
     # trajectory shape: (T, num_points, 3) in normalized coords
 
