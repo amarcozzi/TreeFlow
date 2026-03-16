@@ -2452,6 +2452,7 @@ def create_figure_qualitative(
     # Load metadata
     if data_path is None:
         from generate_samples import load_experiment_config
+
         config = load_experiment_config(experiment_dir)
         data_path = config.get("data_path", "./data/preprocessed-16384")
     data_path = Path(data_path)
@@ -2484,8 +2485,7 @@ def create_figure_qualitative(
 
     # Only consider trees that have enough generated samples
     eligible_tree_ids = [
-        tid for tid, samples in tree_to_samples.items()
-        if len(samples) >= n_generated
+        tid for tid, samples in tree_to_samples.items() if len(samples) >= n_generated
     ]
     eligible_real = real_meta[real_meta["file_id"].isin(eligible_tree_ids)].copy()
     print(f"Eligible trees (>= {n_generated} samples): {len(eligible_real)}")
@@ -2500,9 +2500,13 @@ def create_figure_qualitative(
         df_pairs["gen_id"] = df_pairs["gen_id"].apply(lambda x: str(x).zfill(5))
         # Only keep eligible trees
         df_pairs = df_pairs[df_pairs["real_id"].isin(eligible_tree_ids)].copy()
-        print(f"Loaded df_pairs.csv: {len(df_pairs)} pairs for {df_pairs['real_id'].nunique()} trees")
+        print(
+            f"Loaded df_pairs.csv: {len(df_pairs)} pairs for {df_pairs['real_id'].nunique()} trees"
+        )
     else:
-        print(f"WARNING: {pairs_path} not found — falling back to random sample selection")
+        print(
+            f"WARNING: {pairs_path} not found — falling back to random sample selection"
+        )
 
     # --- Select trees: one per height bin, unique species, different trees per mode ---
     def _pick_height_stratified(pool_df, n, used, rng):
@@ -2511,7 +2515,9 @@ def create_figure_qualitative(
         if len(avail) == 0:
             return []
         # Create n equal-frequency height bins from available trees
-        avail["_hbin"] = pd.qcut(avail["tree_H"], q=min(n, len(avail)), duplicates="drop")
+        avail["_hbin"] = pd.qcut(
+            avail["tree_H"], q=min(n, len(avail)), duplicates="drop"
+        )
         picked = []
         seen_genus = set()
         for _, bin_df in avail.groupby("_hbin", observed=True):
@@ -2528,7 +2534,9 @@ def create_figure_qualitative(
     if tree_ids is not None:
         manual_ids = [str(tid).zfill(5) for tid in tree_ids]
         manual_ids = [mid for mid in manual_ids if mid in eligible_tree_ids]
-        mode_tree_sets = {m: [manual_ids, manual_ids] for m in ["best", "representative", "worst"]}
+        mode_tree_sets = {
+            m: [manual_ids, manual_ids] for m in ["best", "representative", "worst"]
+        }
         print(f"Manual tree_ids: {manual_ids}")
     else:
         # Rank trees by median Chamfer distance, split into thirds
@@ -2537,13 +2545,15 @@ def create_figure_qualitative(
             eligible_real = eligible_real.copy()
             eligible_real["_median_cd"] = eligible_real["file_id"].map(tree_cd)
             eligible_real = eligible_real.dropna(subset=["_median_cd"])
-            eligible_real = eligible_real.sort_values("_median_cd").reset_index(drop=True)
+            eligible_real = eligible_real.sort_values("_median_cd").reset_index(
+                drop=True
+            )
             n = len(eligible_real)
             third = n // 3
             pools = {
                 "best": eligible_real.iloc[:third],
-                "representative": eligible_real.iloc[third:2*third],
-                "worst": eligible_real.iloc[2*third:],
+                "representative": eligible_real.iloc[third : 2 * third],
+                "worst": eligible_real.iloc[2 * third :],
             }
         else:
             pools = {m: eligible_real for m in ["best", "representative", "worst"]}
@@ -2556,8 +2566,12 @@ def create_figure_qualitative(
                 trees = _pick_height_stratified(pools[mode], n_rows, all_used, rng)
                 sets.append(trees)
                 all_used.update(trees)
-                species_picked = eligible_real[eligible_real["file_id"].isin(trees)]["species"].tolist()
-                print(f"  {mode} set {set_i+1}: {[s.replace('_', ' ') for s in species_picked]}")
+                species_picked = eligible_real[eligible_real["file_id"].isin(trees)][
+                    "species"
+                ].tolist()
+                print(
+                    f"  {mode} set {set_i+1}: {[s.replace('_', ' ') for s in species_picked]}"
+                )
             mode_tree_sets[mode] = sets
         print(f"Selected {len(all_used)} unique trees across all modes")
 
@@ -2580,7 +2594,9 @@ def create_figure_qualitative(
         elif mode == "representative":
             # Pick samples closest to the median CD
             median_cd = tree_pairs["chamfer_dist"].median()
-            tree_pairs["_dist_to_median"] = (tree_pairs["chamfer_dist"] - median_cd).abs()
+            tree_pairs["_dist_to_median"] = (
+                tree_pairs["chamfer_dist"] - median_cd
+            ).abs()
             selected = tree_pairs.nsmallest(n, "_dist_to_median")
         elif mode == "random":
             selected = tree_pairs.sample(n=min(n, len(tree_pairs)), random_state=rng)
@@ -2619,9 +2635,14 @@ def create_figure_qualitative(
         fig = plt.figure(figsize=(2.0, 2.5))
         ax = fig.add_subplot(111, projection="3d")
         ax.scatter(
-            pts[:, 0], pts[:, 1], pts[:, 2],
-            c=pts[:, 2], cmap="viridis", s=point_size,
-            alpha=0.8, rasterized=True,
+            pts[:, 0],
+            pts[:, 1],
+            pts[:, 2],
+            c=pts[:, 2],
+            cmap="viridis",
+            s=point_size,
+            alpha=0.8,
+            rasterized=True,
         )
         ax.set_xlim(mids[0] - ranges[0] / 2, mids[0] + ranges[0] / 2)
         ax.set_ylim(mids[1] - ranges[1] / 2, mids[1] + ranges[1] / 2)
@@ -2631,8 +2652,14 @@ def create_figure_qualitative(
         ax.set_axis_off()
 
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0,
-                    dpi=render_dpi, transparent=True)
+        fig.savefig(
+            buf,
+            format="png",
+            bbox_inches="tight",
+            pad_inches=0,
+            dpi=render_dpi,
+            transparent=True,
+        )
         plt.close(fig)
         buf.seek(0)
         img = np.array(Image.open(buf))
@@ -2740,7 +2767,9 @@ def create_figure_qualitative(
             max_h = max(img.shape[0] for img in row_images[row_i])
             row_heights.append(max_h)
             for col_j in range(n_cols):
-                col_widths[col_j] = max(col_widths[col_j], row_images[row_i][col_j].shape[1])
+                col_widths[col_j] = max(
+                    col_widths[col_j], row_images[row_i][col_j].shape[1]
+                )
 
         def _pad_image(img, target_h, target_w):
             """Center-pad an RGBA image to target dimensions with white background."""
@@ -2749,7 +2778,7 @@ def create_figure_qualitative(
             padded = np.full((target_h, target_w, channels), 255, dtype=np.uint8)
             y_off = (target_h - h) // 2
             x_off = (target_w - w) // 2
-            padded[y_off:y_off+h, x_off:x_off+w] = img
+            padded[y_off : y_off + h, x_off : x_off + w] = img
             return padded
 
         # Build composite figure with imshow
@@ -2763,12 +2792,16 @@ def create_figure_qualitative(
         col_frac = grid_width / n_cols
 
         fig, axes = plt.subplots(
-            actual_rows, n_cols,
+            actual_rows,
+            n_cols,
             figsize=(fig_width, fig_height),
             gridspec_kw={
-                "left": label_col_frac, "right": 1.0,
-                "top": 1.0 - header_frac, "bottom": 0.0,
-                "wspace": 0.02, "hspace": 0.02,
+                "left": label_col_frac,
+                "right": 1.0,
+                "top": 1.0 - header_frac,
+                "bottom": 0.0,
+                "wspace": 0.02,
+                "hspace": 0.02,
             },
         )
         if actual_rows == 1:
@@ -2781,7 +2814,8 @@ def create_figure_qualitative(
                 ax = axes[row_i, col_j]
                 img = _pad_image(
                     row_images[row_i][col_j],
-                    row_heights[row_i], col_widths[col_j],
+                    row_heights[row_i],
+                    col_widths[col_j],
                 )
                 ax.imshow(img)
                 ax.set_axis_off()
@@ -2791,8 +2825,7 @@ def create_figure_qualitative(
         for col_j in range(n_cols):
             x = label_col_frac + col_j * col_frac + col_frac / 2
             y = 1.0 - header_frac * 0.4
-            fig.text(x, y, col_labels[col_j], ha="center", va="center",
-                     fontsize=8)
+            fig.text(x, y, col_labels[col_j], ha="center", va="center", fontsize=8)
 
         # Row labels (species + height) in the label column
         row_y_positions = []
@@ -2816,13 +2849,19 @@ def create_figure_qualitative(
             label_x = label_col_frac - 0.01
             label_y = row_y_positions[row_i]
             fig.text(
-                label_x, label_y,
+                label_x,
+                label_y,
                 f"{species}\nH = {height_m:.1f} m\n{data_type}",
-                ha="right", va="center", fontsize=8, fontstyle="italic",
+                ha="right",
+                va="center",
+                fontsize=8,
+                fontstyle="italic",
             )
 
         sheet_path = output_dir / f"figure_qualitative_{sheet_name}.pdf"
-        fig.savefig(sheet_path, format="pdf", dpi=600, bbox_inches="tight", pad_inches=0.02)
+        fig.savefig(
+            sheet_path, format="pdf", dpi=600, bbox_inches="tight", pad_inches=0.02
+        )
         plt.close(fig)
         print(f"  Saved: {sheet_path}")
 
@@ -2847,13 +2886,19 @@ def create_figure_qualitative(
     n_random_sheets = 6
     all_random_used = set(all_used) if tree_ids is None else set()
     for ri in range(n_random_sheets):
-        random_tree_ids = _pick_height_stratified(eligible_real, n_rows, all_random_used, rng)
+        random_tree_ids = _pick_height_stratified(
+            eligible_real, n_rows, all_random_used, rng
+        )
         if len(random_tree_ids) < n_rows:
             all_random_used = set()  # reset if exhausted
-            random_tree_ids = _pick_height_stratified(eligible_real, n_rows, all_random_used, rng)
+            random_tree_ids = _pick_height_stratified(
+                eligible_real, n_rows, all_random_used, rng
+            )
         all_random_used.update(random_tree_ids)
         sheet_name = f"random_{ri+1}"
-        print(f"\n--- Sheet: {sheet_name} ({len(random_tree_ids)} rows, mode=random) ---")
+        print(
+            f"\n--- Sheet: {sheet_name} ({len(random_tree_ids)} rows, mode=random) ---"
+        )
         compose_sheet(random_tree_ids, "random", sheet_name, all_metadata)
 
     # Save metadata
@@ -2972,7 +3017,9 @@ def plot_stem_tracker_figure(
     z_mid = (z_lo + z_hi) / 2.0
 
     # Figure aspect ratio matches the 3D box proportions
-    fig3d = plt.figure(figsize=(5, 5 * (full_z / 2.0) / max(half_xy, 1e-6)), dpi=render_dpi)
+    fig3d = plt.figure(
+        figsize=(5, 5 * (full_z / 2.0) / max(half_xy, 1e-6)), dpi=render_dpi
+    )
     ax1 = fig3d.add_subplot(111, projection="3d")
     ax1.scatter(
         cloud[idx, 0],
@@ -3258,8 +3305,14 @@ def plot_hcb_figure(
     ax3d = fig3d.add_subplot(111, projection="3d")
 
     ax3d.scatter(
-        cloud_m[idx, 0], cloud_m[idx, 1], cloud_m[idx, 2],
-        c=cloud_m[idx, 2], cmap="viridis", s=0.8, alpha=0.4, rasterized=True,
+        cloud_m[idx, 0],
+        cloud_m[idx, 1],
+        cloud_m[idx, 2],
+        c=cloud_m[idx, 2],
+        cmap="viridis",
+        s=0.8,
+        alpha=0.4,
+        rasterized=True,
     )
 
     # HCB horizontal disk
@@ -3274,7 +3327,12 @@ def plot_hcb_figure(
     plane_z = np.full_like(theta, hcb_z_m)
     ax3d.plot(plane_x, plane_y, plane_z, color="#2ca02c", linewidth=2.5, zorder=8)
     ax3d.plot_trisurf(
-        plane_x, plane_y, plane_z, color="#2ca02c", alpha=0.15, zorder=7,
+        plane_x,
+        plane_y,
+        plane_z,
+        color="#2ca02c",
+        alpha=0.15,
+        zorder=7,
     )
 
     # Max crown radius ring
@@ -3296,8 +3354,12 @@ def plot_hcb_figure(
         ring_y = ring_cy + max_crown_r_norm * height_m * np.sin(theta)
         ring_zz = np.full_like(theta, ring_z_m)
         ax3d.plot(
-            ring_x, ring_y, ring_zz,
-            color="#ff7f0e", linewidth=2.5, zorder=9,
+            ring_x,
+            ring_y,
+            ring_zz,
+            color="#ff7f0e",
+            linewidth=2.5,
+            zorder=9,
         )
 
     ax3d.set_xlim(centroid[0] - half_xy, centroid[0] + half_xy)
@@ -3321,8 +3383,12 @@ def plot_hcb_figure(
 
     buf = io.BytesIO()
     fig3d.savefig(
-        buf, format="png", dpi=render_dpi,
-        bbox_inches="tight", pad_inches=0.05, facecolor="white",
+        buf,
+        format="png",
+        dpi=render_dpi,
+        bbox_inches="tight",
+        pad_inches=0.05,
+        facecolor="white",
     )
     plt.close(fig3d)
     buf.seek(0)
@@ -3344,16 +3410,35 @@ def plot_hcb_figure(
     ki = kneedle_data["knee_idx"]
 
     ax_k.plot(x_n, y_n, color="steelblue", linewidth=1.8, label=r"Cumulative $\bar{r}$")
-    ax_k.plot([0, 1], [0, 1], color="0.6", linestyle="--", linewidth=0.8, label="Unit diagonal")
+    ax_k.plot(
+        [0, 1],
+        [0, 1],
+        color="0.6",
+        linestyle="--",
+        linewidth=0.8,
+        label="Unit diagonal",
+    )
     ax_k.fill_between(x_n, x_n, y_n, alpha=0.10, color="steelblue")
-    ax_k.axvline(x_n[ki], color="#2ca02c", linewidth=1.5, linestyle="-",
-                 label=f"HCB = {hcb_m:.1f} m")
+    ax_k.axvline(
+        x_n[ki],
+        color="#2ca02c",
+        linewidth=1.5,
+        linestyle="-",
+        label=f"HCB = {hcb_m:.1f} m",
+    )
     ax_k.plot(x_n[ki], y_n[ki], "o", color="#2ca02c", markersize=7, zorder=10)
 
     # Distance curve on secondary axis — black labels, muted line
     ax_d = ax_k.twinx()
-    ax_d.plot(x_n, d_curve, color="0.55", linewidth=1.0, linestyle="-",
-              alpha=0.65, label=r"$d_k$")
+    ax_d.plot(
+        x_n,
+        d_curve,
+        color="0.55",
+        linewidth=1.0,
+        linestyle="-",
+        alpha=0.65,
+        label=r"$d_k$",
+    )
     ax_d.set_ylabel(r"Weighted distance $d_k$", fontsize=10)
     ax_d.tick_params(axis="y", labelsize=8)
 
@@ -3364,9 +3449,13 @@ def plot_hcb_figure(
     lines_k, labels_k = ax_k.get_legend_handles_labels()
     lines_d, labels_d = ax_d.get_legend_handles_labels()
     ax_k.legend(
-        lines_k + lines_d, labels_k + labels_d,
-        fontsize=8, loc="lower right",
-        framealpha=0.9, edgecolor="0.8", fancybox=False,
+        lines_k + lines_d,
+        labels_k + labels_d,
+        fontsize=8,
+        loc="lower right",
+        framealpha=0.9,
+        edgecolor="0.8",
+        fancybox=False,
     )
 
     # ---- Save ----
@@ -3431,9 +3520,7 @@ def create_figure_hcb(
             continue
 
         species_safe = species.replace(" ", "_")
-        output_path = (
-            out_dir / f"figure_appendix_hcb_{species_safe}_{tree_id}.pdf"
-        )
+        output_path = out_dir / f"figure_appendix_hcb_{species_safe}_{tree_id}.pdf"
         print(f"HCB figure: tree {tree_id}, {species}, H={height_m:.1f}m")
         success = plot_hcb_figure(
             str(zarr_path),
@@ -3488,20 +3575,26 @@ def create_figure_cfg_sensitivity(
         print(f"Error: {pair_csv} not found")
         return
     df = pd.read_csv(pair_csv)
-    print(f"CFG sensitivity: loaded {len(df)} pairs, "
-          f"{df['real_id'].nunique()} unique trees")
+    print(
+        f"CFG sensitivity: loaded {len(df)} pairs, "
+        f"{df['real_id'].nunique()} unique trees"
+    )
 
     metrics = [
-        "chamfer_dist", "delta_h_max_cr", "delta_max_crown_r",
-        "delta_hcb", "vert_kde_jsd", "hist_2d_jsd",
+        "chamfer_dist",
+        "delta_h_max_cr",
+        "delta_max_crown_r",
+        "delta_hcb",
+        "vert_kde_jsd",
+        "hist_2d_jsd",
     ]
     metric_labels = {
-        "chamfer_dist":      "Chamfer distance (m)",
-        "delta_h_max_cr":    r"$|\Delta|$ Height at max CR (m)",
+        "chamfer_dist": "Chamfer distance (m)",
+        "delta_h_max_cr": r"$|\Delta|$ Height at max CR (m)",
         "delta_max_crown_r": r"$|\Delta|$ Max crown radius (m)",
-        "delta_hcb":         r"$|\Delta|$ Height to crown base (m)",
-        "vert_kde_jsd":      "Vertical KDE JSD",
-        "hist_2d_jsd":       "2D histogram JSD",
+        "delta_hcb": r"$|\Delta|$ Height to crown base (m)",
+        "vert_kde_jsd": "Vertical KDE JSD",
+        "hist_2d_jsd": "2D histogram JSD",
     }
 
     # ── Bin CFG scale ────────────────────────────────────────────────────
@@ -3529,24 +3622,42 @@ def create_figure_cfg_sensitivity(
         # Individual pairs (subsample for readability)
         plot_df = df.sample(n=min(5000, len(df)), random_state=42)
         ax.scatter(
-            plot_df["cfg_scale"], plot_df[metric].clip(upper=y_upper),
-            s=3, alpha=0.06, color="C0", rasterized=True,
+            plot_df["cfg_scale"],
+            plot_df[metric].clip(upper=y_upper),
+            s=3,
+            alpha=0.06,
+            color="C0",
+            rasterized=True,
         )
 
         # 10th–90th percentile band
         ax.fill_between(
-            bin_centers, p10, np.minimum(p90, y_upper),
-            alpha=0.12, color="C1", label="10th–90th pctl",
+            bin_centers,
+            p10,
+            np.minimum(p90, y_upper),
+            alpha=0.12,
+            color="C1",
+            label="10th–90th pctl",
         )
         # IQR band
         ax.fill_between(
-            bin_centers, q25, np.minimum(q75, y_upper),
-            alpha=0.30, color="C1", label="IQR",
+            bin_centers,
+            q25,
+            np.minimum(q75, y_upper),
+            alpha=0.30,
+            color="C1",
+            label="IQR",
         )
         # Median line
         ax.plot(
-            bin_centers, medians, "o-", color="C1",
-            linewidth=1.5, markersize=4, zorder=5, label="Median",
+            bin_centers,
+            medians,
+            "o-",
+            color="C1",
+            linewidth=1.5,
+            markersize=4,
+            zorder=5,
+            label="Median",
         )
 
         ax.set_ylim(bottom=0, top=y_upper * 1.05)
@@ -3636,6 +3747,7 @@ def create_figure_time_evolution(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     from dataset import create_datasets
+
     _, _, _, species_list, type_list = create_datasets(
         data_path=str(data_path),
         rotation_augment=False,
@@ -3675,8 +3787,10 @@ def create_figure_time_evolution(
     species_name = species_name_raw.replace("_", " ")
     data_type = data_type_raw.upper()
 
-    print(f"Time evolution: tree {tree_id_str}, {species_name}, "
-          f"H={height_m:.1f}m, {data_type}, cfg={cfg_scale}")
+    print(
+        f"Time evolution: tree {tree_id_str}, {species_name}, "
+        f"H={height_m:.1f}m, {data_type}, cfg={cfg_scale}"
+    )
 
     # ── Generate trajectory ──────────────────────────────────────────────
     num_points = config.get("max_points", 16384)
@@ -3702,36 +3816,37 @@ def create_figure_time_evolution(
 
     print(f"  Trajectory shape: {trajectory_m.shape}")
 
-    # ── Rendering ────────────────────────────────────────────────────────
-    render_dpi = 300
-    point_size = 0.3
+    # ── Rendering (matches create_figure_qualitative style) ────────────
+    point_size = 0.4
     elev, azim = 20, 45
-
-    # Shared axis limits: union of all snapshots
-    all_pts = np.concatenate(list(trajectory_m), axis=0)
     margin = 0.05
-    mids, ranges = [], []
-    for dim in range(3):
-        lo, hi = all_pts[:, dim].min(), all_pts[:, dim].max()
-        span = hi - lo
-        pad = span * margin
-        ranges.append(max(span + 2 * pad, 0.1))
-        mids.append((lo + hi) / 2)
+    render_dpi = 300
 
-    # Shared colormap bounds from final tree (t=1)
-    final_pts = trajectory_m[-1]
-    vmin_z = final_pts[:, 2].min()
-    vmax_z = final_pts[:, 2].max()
+    def _panel_limits(pts):
+        """Compute per-panel axis limits with padding."""
+        mids, ranges = [], []
+        for dim in range(3):
+            lo, hi = pts[:, dim].min(), pts[:, dim].max()
+            span = hi - lo
+            pad = span * margin
+            ranges.append(max(span + 2 * pad, 0.1))
+            mids.append((lo + hi) / 2)
+        return mids, ranges
 
-    def render_snapshot(pts, mids, ranges, vmin, vmax):
-        """Render a single snapshot to an RGBA image."""
+    def render_snapshot(pts):
+        """Render a single 3D point cloud to a tight RGBA image."""
+        mids, ranges = _panel_limits(pts)
         fig = plt.figure(figsize=(2.0, 2.5))
         ax = fig.add_subplot(111, projection="3d")
         ax.scatter(
-            pts[:, 0], pts[:, 1], pts[:, 2],
-            c=pts[:, 2], cmap="viridis", s=point_size,
-            vmin=vmin, vmax=vmax,
-            alpha=0.8, rasterized=True,
+            pts[:, 0],
+            pts[:, 1],
+            pts[:, 2],
+            c=pts[:, 2],
+            cmap="viridis",
+            s=point_size,
+            alpha=0.8,
+            rasterized=True,
         )
         ax.set_xlim(mids[0] - ranges[0] / 2, mids[0] + ranges[0] / 2)
         ax.set_ylim(mids[1] - ranges[1] / 2, mids[1] + ranges[1] / 2)
@@ -3741,16 +3856,21 @@ def create_figure_time_evolution(
         ax.set_axis_off()
 
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0,
-                    dpi=render_dpi, transparent=True)
+        fig.savefig(
+            buf,
+            format="png",
+            bbox_inches="tight",
+            pad_inches=0,
+            dpi=render_dpi,
+            transparent=True,
+        )
         plt.close(fig)
         buf.seek(0)
         img = np.array(Image.open(buf))
-        # Crop transparent margins
         if img.shape[2] == 4:
-            alpha = img[:, :, 3]
-            rows_with_content = np.where(alpha > 0)[0]
-            cols_with_content = np.where(alpha > 0)[1]
+            alpha_ch = img[:, :, 3]
+            rows_with_content = np.where(alpha_ch > 0)[0]
+            cols_with_content = np.where(alpha_ch > 0)[1]
             if len(rows_with_content) > 0:
                 pad_px = 2
                 r0 = max(0, rows_with_content.min() - pad_px)
@@ -3764,11 +3884,10 @@ def create_figure_time_evolution(
     panel_images = []
     for t_idx in range(n_panels):
         print(f"  Rendering t={time_points[t_idx]:.1f}...")
-        img = render_snapshot(trajectory_m[t_idx], mids, ranges, vmin_z, vmax_z)
+        img = render_snapshot(trajectory_m[t_idx])
         panel_images.append(img)
 
     # ── Compose grid ─────────────────────────────────────────────────────
-    # Pad images to uniform size
     max_h = max(img.shape[0] for img in panel_images)
     max_w = max(img.shape[1] for img in panel_images)
 
@@ -3778,21 +3897,24 @@ def create_figure_time_evolution(
         padded = np.full((target_h, target_w, channels), 255, dtype=np.uint8)
         y_off = (target_h - h) // 2
         x_off = (target_w - w) // 2
-        padded[y_off:y_off + h, x_off:x_off + w] = img
+        padded[y_off : y_off + h, x_off : x_off + w] = img
         return padded
 
     fig_width = 6.69  # MDPI full page width
     aspect = (n_rows * max_h) / (n_cols * max_w)
-    fig_height = fig_width * aspect * 1.1  # extra for labels
-    header_frac = 0.06
+    fig_height = fig_width * aspect * 1.15  # room for column headers
 
     fig, axes = plt.subplots(
-        n_rows, n_cols,
+        n_rows,
+        n_cols,
         figsize=(fig_width, fig_height),
         gridspec_kw={
-            "left": 0.02, "right": 0.98,
-            "top": 1.0 - header_frac, "bottom": 0.02,
-            "wspace": 0.02, "hspace": 0.05,
+            "left": 0.0,
+            "right": 1.0,
+            "top": 0.93,
+            "bottom": 0.0,
+            "wspace": 0.02,
+            "hspace": 0.02,
         },
     )
     if n_rows == 1:
@@ -3806,23 +3928,25 @@ def create_figure_time_evolution(
         ax.imshow(img)
         ax.set_axis_off()
 
-    # Panel labels
-    col_frac = 0.96 / n_cols
-    for idx in range(n_panels):
-        col_j = idx % n_cols
-        row_i = idx // n_cols
-        x = 0.02 + col_j * col_frac + col_frac / 2
-        # Position below each panel
-        grid_h = 1.0 - header_frac - 0.02
-        row_h = grid_h / n_rows
-        y = (1.0 - header_frac) - row_i * row_h - row_h + 0.005
-        fig.text(x, y, f"$t = {time_points[idx]:.1f}$",
-                 ha="center", va="bottom", fontsize=9)
-
-    # Title
-    fig.text(0.5, 1.0 - header_frac * 0.4,
-             f"{species_name}, H = {height_m:.1f} m, CFG = {cfg_scale}",
-             ha="center", va="center", fontsize=10, fontstyle="italic")
+    # Column headers (top row labels for each column)
+    col_frac = 1.0 / n_cols
+    for col_j in range(n_cols):
+        for row_i in range(n_rows):
+            idx = row_i * n_cols + col_j
+            x = col_j * col_frac + col_frac / 2
+            y = (
+                0.96
+                if row_i == 0
+                else 0.93 - (row_i / n_rows) * 0.93 + 0.93 / n_rows + 0.01
+            )
+            fig.text(
+                x,
+                y,
+                f"$t = {time_points[idx]:.1f}$",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
 
     out_path = output_dir / "figure_time_evolution.pdf"
     fig.savefig(out_path, format="pdf", dpi=600, bbox_inches="tight", pad_inches=0.02)
@@ -3866,8 +3990,12 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n_rows", type=int, default=6)
     parser.add_argument("--n_generated", type=int, default=4)
-    parser.add_argument("--tree_ids", type=str, default=None,
-                        help="Comma-separated tree IDs for sheet 1 (e.g. '12345,67890')")
+    parser.add_argument(
+        "--tree_ids",
+        type=str,
+        default=None,
+        help="Comma-separated tree IDs for sheet 1 (e.g. '12345,67890')",
+    )
     parser.add_argument("--canonicalize", action="store_true")
     args = parser.parse_args()
 
@@ -3952,7 +4080,7 @@ if __name__ == "__main__":
                 output_dir=args.output_dir,
             )
         elif fig_name == "time_evolution":
-            tree_id = "13875"
+            tree_id = "6069"
             if args.tree_ids:
                 tree_id = args.tree_ids.split(",")[0]
             create_figure_time_evolution(
