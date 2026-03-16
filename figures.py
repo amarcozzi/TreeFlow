@@ -3668,10 +3668,12 @@ def create_figure_time_evolution(
     tree_row = tree_row.iloc[0]
 
     height_m = float(tree_row["tree_H"])
-    species_idx = int(tree_row["species_idx"])
-    type_idx = int(tree_row["type_idx"])
-    species_name = tree_row.get("species", "unknown").replace("_", " ")
-    data_type = tree_row.get("data_type", "unknown").upper()
+    species_name_raw = tree_row["species"]
+    data_type_raw = tree_row["data_type"]
+    species_idx = species_list.index(species_name_raw)
+    type_idx = type_list.index(data_type_raw)
+    species_name = species_name_raw.replace("_", " ")
+    data_type = data_type_raw.upper()
 
     print(f"Time evolution: tree {tree_id_str}, {species_name}, "
           f"H={height_m:.1f}m, {data_type}, cfg={cfg_scale}")
