@@ -3646,7 +3646,9 @@ def create_figure_time_evolution(
         cache_test=False,
     )
 
-    args = SimpleNamespace(**config, species_list=species_list, type_list=type_list)
+    config["species_list"] = species_list
+    config["type_list"] = type_list
+    args = SimpleNamespace(**config)
     model = get_model(args, device=device)
 
     # Find latest checkpoint
