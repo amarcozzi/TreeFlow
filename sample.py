@@ -25,6 +25,8 @@ def sample_conditional(
     batch_size: int = 0,
     return_intermediates: bool = False,
     intermediate_times: List[float] = None,
+    atol: float = 1e-5,
+    rtol: float = 1e-5,
 ) -> np.ndarray:
     """
     Generate samples for a single tree with specified CFG value(s).
@@ -142,10 +144,10 @@ def sample_conditional(
         solver_kwargs["return_intermediates"] = True
 
     if solver_method == "dopri5":
-        result = solver.sample(x_init, method="dopri5", step_size=None, **solver_kwargs)
+        result = solver.sample(x_init, method="dopri5", step_size=None, atol=atol, rtol=rtol, **solver_kwargs)
     else:
         step_size = 1.0 / num_steps
-        result = solver.sample(x_init, method=solver_method, step_size=step_size, **solver_kwargs)
+        result = solver.sample(x_init, method=solver_method, step_size=step_size, atol=atol, rtol=rtol, **solver_kwargs)
 
     if return_intermediates:
         # result is a sequence of tensors, one per time step: each (num_samples, num_points, 3)
