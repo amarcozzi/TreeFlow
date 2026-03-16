@@ -137,7 +137,7 @@ def sample_conditional(
     solver_kwargs = {}
     if return_intermediates:
         if intermediate_times is None:
-            intermediate_times = [0.0, 0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 1.0]
+            intermediate_times = [0.0, 0.5, 0.7, 0.8, 0.9, 0.95, 0.975, 1.0]
         solver_kwargs["time_grid"] = torch.tensor(intermediate_times, device=device)
         solver_kwargs["return_intermediates"] = True
 

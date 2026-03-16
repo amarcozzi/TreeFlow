@@ -3725,7 +3725,7 @@ def create_figure_time_evolution(
     from sample import sample_conditional
 
     if time_points is None:
-        time_points = [0.0, 0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 1.0]
+        time_points = [0.0, 0.5, 0.7, 0.8, 0.9, 0.95, 0.975, 1.0]
 
     n_panels = n_rows * n_cols
     if len(time_points) != n_panels:
@@ -3902,7 +3902,7 @@ def create_figure_time_evolution(
 
     fig_width = 6.69  # MDPI full page width
     aspect = (n_rows * max_h) / (n_cols * max_w)
-    fig_height = fig_width * aspect * 1.15  # room for column headers
+    fig_height = fig_width * aspect * 1.1
 
     fig, axes = plt.subplots(
         n_rows,
@@ -3911,10 +3911,10 @@ def create_figure_time_evolution(
         gridspec_kw={
             "left": 0.0,
             "right": 1.0,
-            "top": 0.93,
-            "bottom": 0.0,
+            "top": 1.0,
+            "bottom": 0.05,
             "wspace": 0.02,
-            "hspace": 0.02,
+            "hspace": 0.08,
         },
     )
     if n_rows == 1:
@@ -3927,26 +3927,9 @@ def create_figure_time_evolution(
         img = _pad_image(panel_images[idx], max_h, max_w)
         ax.imshow(img)
         ax.set_axis_off()
-
-    # Column headers (top row labels for each column)
-    col_frac = 1.0 / n_cols
-    for col_j in range(n_cols):
-        for row_i in range(n_rows):
-            idx = row_i * n_cols + col_j
-            x = col_j * col_frac + col_frac / 2
-            y = (
-                0.96
-                if row_i == 0
-                else 0.93 - (row_i / n_rows) * 0.93 + 0.93 / n_rows + 0.01
-            )
-            fig.text(
-                x,
-                y,
-                f"$t = {time_points[idx]:.1f}$",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-            )
+        t_val = time_points[idx]
+        t_str = f"{t_val:.2f}" if t_val != int(t_val) else f"{t_val:.1f}"
+        ax.set_title(f"$t = {t_str}$", fontsize=8, pad=0, y=-0.08)
 
     out_path = output_dir / "figure_time_evolution.pdf"
     fig.savefig(out_path, format="pdf", dpi=600, bbox_inches="tight", pad_inches=0.02)
