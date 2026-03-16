@@ -3955,6 +3955,250 @@ def create_figure_time_evolution(
     print(f"  Saved metadata: {meta_path}")
 
 
+def create_figure_height_interpolation(
+    experiment_dir: str = "experiments/finetune-8-512-16384",
+    data_path: str = "./data/preprocessed-16384",
+    species: str = "Pinus_sylvestris",
+    data_type: str = "TLS",
+    heights: list[float] = None,
+    cfg_scale: float = 3.0,
+    solver_method: str = "dopri5",
+    seed: int = 42,
+    output_dir: str = "figures",
+):
+    """
+    Height interpolation figure: same species generated at multiple heights.
+
+    Shows that the model has learned to interpolate across the height
+    conditioning variable, producing plausible morphology at each scale.
+    All panels share axis limits so relative tree sizes are visually comparable.
+
+    Args:
+        experiment_dir: Path to trained model experiment directory.
+        data_path: Path to preprocessed dataset directory.
+        species: Species name (underscore-separated, e.g. 'Pinus_sylvestris').
+        data_type: Scanner type string (e.g. 'TLS', 'ULS').
+        heights: List of target heights in meters. Defaults to [5, 12, 20, 30].
+        cfg_scale: Classifier-free guidance scale.
+        solver_method: ODE solver method.
+        seed: Random seed for reproducibility.
+        output_dir: Directory to save output PDF and JSON.
+    """
+    import io
+    import torch
+    from pathlib import Path
+    from PIL import Image
+    from types import SimpleNamespace
+
+    from models import get_model
+    from generate_samples import load_experiment_config, load_checkpoint
+    from sample import sample_conditional
+
+    if heights is None:
+        heights = [5.0, 12.0, 20.0, 30.0]
+
+    n_cols = len(heights)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    experiment_dir = Path(experiment_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    data_path = Path(data_path)
+
+    # ── Load model ───────────────────────────────────────────────────────
+    config = load_experiment_config(experiment_dir)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    from dataset import create_datasets
+
+    _, _, _, species_list, type_list = create_datasets(
+        data_path=str(data_path),
+        rotation_augment=False,
+        shuffle_augment=False,
+        max_points=config.get("max_points", 16384),
+        cache_train=False,
+        cache_val=False,
+        cache_test=False,
+    )
+
+    config["species_list"] = species_list
+    config["type_list"] = type_list
+    args = SimpleNamespace(**config)
+    model = get_model(args, device=device)
+
+    # Find latest checkpoint
+    ckpt_dir = experiment_dir / "checkpoints"
+    ckpts = sorted(ckpt_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime)
+    if not ckpts:
+        raise FileNotFoundError(f"No checkpoints found in {ckpt_dir}")
+    model = load_checkpoint(ckpts[-1], model, device)
+
+    # ── Look up conditioning indices ─────────────────────────────────────
+    species_idx = species_list.index(species)
+    type_idx = type_list.index(data_type)
+    species_display = species.replace("_", " ")
+
+    print(
+        f"Height interpolation: {species_display} ({data_type}), "
+        f"heights={heights}, cfg={cfg_scale}"
+    )
+
+    # ── Generate one sample per height ───────────────────────────────────
+    num_points = config.get("max_points", 16384)
+    clouds_m = []
+    for h in heights:
+        print(f"  Generating h={h:.0f}m...")
+        pts = sample_conditional(
+            model=model,
+            num_points=num_points,
+            device=device,
+            target_height=h,
+            species_idx=species_idx,
+            type_idx=type_idx,
+            cfg_values=cfg_scale,
+            solver_method=solver_method,
+        )
+        # Denormalize to meters and ground
+        pts_m = (pts / 2.0) * h
+        pts_m[:, 2] -= pts_m[:, 2].min()
+        clouds_m.append(pts_m)
+
+    # ── Compute shared axis limits ───────────────────────────────────────
+    all_pts = np.concatenate(clouds_m, axis=0)
+    margin = 0.05
+    mids, ranges = [], []
+    for dim in range(3):
+        lo, hi = all_pts[:, dim].min(), all_pts[:, dim].max()
+        span = hi - lo
+        pad = span * margin
+        ranges.append(max(span + 2 * pad, 0.1))
+        mids.append((lo + hi) / 2)
+
+    # Shared colormap bounds (absolute height)
+    vmin = 0.0
+    vmax = max(c[:, 2].max() for c in clouds_m)
+
+    # ── Rendering ────────────────────────────────────────────────────────
+    point_size = 0.4
+    elev, azim = 20, 45
+    render_dpi = 300
+
+    def render_tree(pts):
+        """Render a single 3D point cloud to a tight RGBA image."""
+        fig = plt.figure(figsize=(2.0, 2.5))
+        ax = fig.add_subplot(111, projection="3d")
+        ax.scatter(
+            pts[:, 0],
+            pts[:, 1],
+            pts[:, 2],
+            c=pts[:, 2],
+            cmap="viridis",
+            vmin=vmin,
+            vmax=vmax,
+            s=point_size,
+            alpha=0.8,
+            rasterized=True,
+        )
+        ax.set_xlim(mids[0] - ranges[0] / 2, mids[0] + ranges[0] / 2)
+        ax.set_ylim(mids[1] - ranges[1] / 2, mids[1] + ranges[1] / 2)
+        ax.set_zlim(mids[2] - ranges[2] / 2, mids[2] + ranges[2] / 2)
+        ax.set_box_aspect(ranges)
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_axis_off()
+
+        buf = io.BytesIO()
+        fig.savefig(
+            buf,
+            format="png",
+            bbox_inches="tight",
+            pad_inches=0,
+            dpi=render_dpi,
+            transparent=True,
+        )
+        plt.close(fig)
+        buf.seek(0)
+        img = np.array(Image.open(buf))
+        if img.shape[2] == 4:
+            alpha_ch = img[:, :, 3]
+            rows_with_content = np.where(alpha_ch > 0)[0]
+            cols_with_content = np.where(alpha_ch > 0)[1]
+            if len(rows_with_content) > 0:
+                pad_px = 2
+                r0 = max(0, rows_with_content.min() - pad_px)
+                r1 = min(img.shape[0], rows_with_content.max() + pad_px + 1)
+                c0 = max(0, cols_with_content.min() - pad_px)
+                c1 = min(img.shape[1], cols_with_content.max() + pad_px + 1)
+                img = img[r0:r1, c0:c1]
+        return img
+
+    # Render all panels
+    panel_images = []
+    for i, (h, pts) in enumerate(zip(heights, clouds_m)):
+        print(f"  Rendering h={h:.0f}m...")
+        img = render_tree(pts)
+        panel_images.append(img)
+
+    # ── Compose grid ─────────────────────────────────────────────────────
+    max_h = max(img.shape[0] for img in panel_images)
+    max_w = max(img.shape[1] for img in panel_images)
+
+    def _pad_image(img, target_h, target_w):
+        h, w = img.shape[:2]
+        channels = img.shape[2] if img.ndim == 3 else 1
+        padded = np.full((target_h, target_w, channels), 255, dtype=np.uint8)
+        # Bottom-align: tall tree at top, short tree sits at ground level
+        y_off = target_h - h
+        x_off = (target_w - w) // 2
+        padded[y_off : y_off + h, x_off : x_off + w] = img
+        return padded
+
+    fig_width = 6.69  # MDPI full page width
+    aspect = max_h / (n_cols * max_w)
+    fig_height = fig_width * aspect * 1.1
+
+    fig, axes = plt.subplots(
+        1,
+        n_cols,
+        figsize=(fig_width, fig_height),
+        gridspec_kw={
+            "left": 0.0,
+            "right": 1.0,
+            "top": 1.0,
+            "bottom": 0.05,
+            "wspace": 0.02,
+        },
+    )
+
+    for idx in range(n_cols):
+        ax = axes[idx]
+        img = _pad_image(panel_images[idx], max_h, max_w)
+        ax.imshow(img)
+        ax.set_axis_off()
+        ax.set_title(f"$h = {heights[idx]:.0f}$\\,m", fontsize=8, pad=0, y=-0.08)
+
+    out_path = output_dir / "figure_height_interpolation.pdf"
+    fig.savefig(out_path, format="pdf", dpi=600, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+    # ── Metadata ─────────────────────────────────────────────────────────
+    meta = {
+        "species": species,
+        "data_type": data_type,
+        "heights": heights,
+        "cfg_scale": cfg_scale,
+        "solver_method": solver_method,
+        "num_points": num_points,
+        "seed": seed,
+        "experiment_dir": str(experiment_dir),
+    }
+    meta_path = output_dir / "figure_height_interpolation.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  Saved metadata: {meta_path}")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -3963,7 +4207,7 @@ if __name__ == "__main__":
         "--figures",
         nargs="+",
         default=["spine_audit"],
-        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit, crown_audit, qualitative, stem_tracker, hcb, cfg_sensitivity, time_evolution)",
+        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit, crown_audit, qualitative, stem_tracker, hcb, cfg_sensitivity, time_evolution, height_interpolation)",
     )
     parser.add_argument(
         "--experiment_dir", default="experiments/transformer-8-512-4096"
@@ -4070,6 +4314,13 @@ if __name__ == "__main__":
                 experiment_dir=args.experiment_dir,
                 data_path=args.data_path,
                 tree_id=tree_id,
+                seed=args.seed,
+                output_dir=args.output_dir,
+            )
+        elif fig_name == "height_interpolation":
+            create_figure_height_interpolation(
+                experiment_dir=args.experiment_dir,
+                data_path=args.data_path,
                 seed=args.seed,
                 output_dir=args.output_dir,
             )
