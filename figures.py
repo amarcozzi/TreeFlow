@@ -3963,7 +3963,7 @@ def create_figure_height_interpolation(
     heights: list[float] = None,
     cfg_scale: float = 3.0,
     solver_method: str = "dopri5",
-    seed: int = 42,
+    seed: int = 6234,
     output_dir: str = "figures",
 ):
     """
@@ -4064,28 +4064,26 @@ def create_figure_height_interpolation(
         pts_m[:, 2] -= pts_m[:, 2].min()
         clouds_m.append(pts_m)
 
-    # ── Compute shared axis limits ───────────────────────────────────────
-    all_pts = np.concatenate(clouds_m, axis=0)
-    margin = 0.05
-    mids, ranges = [], []
-    for dim in range(3):
-        lo, hi = all_pts[:, dim].min(), all_pts[:, dim].max()
-        span = hi - lo
-        pad = span * margin
-        ranges.append(max(span + 2 * pad, 0.1))
-        mids.append((lo + hi) / 2)
-
-    # Shared colormap bounds (absolute height)
-    vmin = 0.0
-    vmax = max(c[:, 2].max() for c in clouds_m)
-
     # ── Rendering ────────────────────────────────────────────────────────
     point_size = 0.4
     elev, azim = 20, 45
     render_dpi = 300
+    margin = 0.05
+
+    def _panel_limits(pts):
+        """Compute per-panel axis limits with padding."""
+        panel_mids, panel_ranges = [], []
+        for dim in range(3):
+            lo, hi = pts[:, dim].min(), pts[:, dim].max()
+            span = hi - lo
+            pad = span * margin
+            panel_ranges.append(max(span + 2 * pad, 0.1))
+            panel_mids.append((lo + hi) / 2)
+        return panel_mids, panel_ranges
 
     def render_tree(pts):
         """Render a single 3D point cloud to a tight RGBA image."""
+        panel_mids, panel_ranges = _panel_limits(pts)
         fig = plt.figure(figsize=(2.0, 2.5))
         ax = fig.add_subplot(111, projection="3d")
         ax.scatter(
@@ -4094,16 +4092,14 @@ def create_figure_height_interpolation(
             pts[:, 2],
             c=pts[:, 2],
             cmap="viridis",
-            vmin=vmin,
-            vmax=vmax,
             s=point_size,
             alpha=0.8,
             rasterized=True,
         )
-        ax.set_xlim(mids[0] - ranges[0] / 2, mids[0] + ranges[0] / 2)
-        ax.set_ylim(mids[1] - ranges[1] / 2, mids[1] + ranges[1] / 2)
-        ax.set_zlim(mids[2] - ranges[2] / 2, mids[2] + ranges[2] / 2)
-        ax.set_box_aspect(ranges)
+        ax.set_xlim(panel_mids[0] - panel_ranges[0] / 2, panel_mids[0] + panel_ranges[0] / 2)
+        ax.set_ylim(panel_mids[1] - panel_ranges[1] / 2, panel_mids[1] + panel_ranges[1] / 2)
+        ax.set_zlim(panel_mids[2] - panel_ranges[2] / 2, panel_mids[2] + panel_ranges[2] / 2)
+        ax.set_box_aspect(panel_ranges)
         ax.view_init(elev=elev, azim=azim)
         ax.set_axis_off()
 
@@ -4147,8 +4143,7 @@ def create_figure_height_interpolation(
         h, w = img.shape[:2]
         channels = img.shape[2] if img.ndim == 3 else 1
         padded = np.full((target_h, target_w, channels), 255, dtype=np.uint8)
-        # Bottom-align: tall tree at top, short tree sits at ground level
-        y_off = target_h - h
+        y_off = (target_h - h) // 2
         x_off = (target_w - w) // 2
         padded[y_off : y_off + h, x_off : x_off + w] = img
         return padded
@@ -4175,7 +4170,7 @@ def create_figure_height_interpolation(
         img = _pad_image(panel_images[idx], max_h, max_w)
         ax.imshow(img)
         ax.set_axis_off()
-        ax.set_title(f"$h = {heights[idx]:.0f}$\\,m", fontsize=8, pad=0, y=-0.08)
+        ax.set_title(f"$h = {heights[idx]:.0f}$ m", fontsize=8, pad=0, y=-0.08)
 
     out_path = output_dir / "figure_height_interpolation.pdf"
     fig.savefig(out_path, format="pdf", dpi=600, bbox_inches="tight", pad_inches=0.02)
