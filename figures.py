@@ -3573,6 +3573,277 @@ def create_figure_cfg_sensitivity(
     print(f"  Saved metadata: {meta_path}")
 
 
+def create_figure_time_evolution(
+    experiment_dir: str = "experiments/finetune-8-512-16384",
+    data_path: str = "./data/preprocessed-16384",
+    tree_id: str = "13875",
+    cfg_scale: float = 3.0,
+    time_points: list[float] = None,
+    n_rows: int = 2,
+    n_cols: int = 4,
+    solver_method: str = "dopri5",
+    seed: int = 42,
+    output_dir: str = "figures",
+):
+    """
+    Create time evolution figure: point cloud evolving from noise (t=0) to tree (t=1).
+
+    Renders intermediate ODE solver snapshots as a 2x4 grid showing the
+    generation process for a single tree.
+
+    Args:
+        experiment_dir: Path to trained model experiment directory.
+        data_path: Path to preprocessed dataset directory.
+        tree_id: File ID of the tree to generate (zero-padded to 5 digits).
+        cfg_scale: Classifier-free guidance scale.
+        time_points: List of time values to capture (must have n_rows * n_cols entries).
+        n_rows: Number of grid rows.
+        n_cols: Number of grid columns.
+        solver_method: ODE solver method.
+        seed: Random seed for reproducibility.
+        output_dir: Directory to save output PDF and JSON.
+    """
+    import io
+    import torch
+    from pathlib import Path
+    from PIL import Image
+    from types import SimpleNamespace
+
+    from models import get_model
+    from generate_samples import load_experiment_config, load_checkpoint
+    from sample import sample_conditional
+
+    if time_points is None:
+        time_points = [0.0, 0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 1.0]
+
+    n_panels = n_rows * n_cols
+    if len(time_points) != n_panels:
+        raise ValueError(
+            f"time_points has {len(time_points)} entries but grid is "
+            f"{n_rows}x{n_cols} = {n_panels} panels"
+        )
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    experiment_dir = Path(experiment_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    data_path = Path(data_path)
+
+    # ── Load model ───────────────────────────────────────────────────────
+    config = load_experiment_config(experiment_dir)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    from dataset import create_datasets
+    _, _, _, species_list, type_list = create_datasets(
+        data_path=str(data_path),
+        rotation_augment=False,
+        shuffle_augment=False,
+        max_points=config.get("max_points", 16384),
+        cache_train=False,
+        cache_val=False,
+        cache_test=False,
+    )
+
+    args = SimpleNamespace(**config, species_list=species_list, type_list=type_list)
+    model = get_model(args, device=device)
+
+    # Find latest checkpoint
+    ckpt_dir = experiment_dir / "checkpoints"
+    ckpts = sorted(ckpt_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime)
+    if not ckpts:
+        raise FileNotFoundError(f"No checkpoints found in {ckpt_dir}")
+    model = load_checkpoint(ckpts[-1], model, device)
+
+    # ── Look up tree metadata ────────────────────────────────────────────
+    tree_id_str = str(tree_id).zfill(5)
+    meta_csv = pd.read_csv(data_path / "metadata.csv")
+    meta_csv["file_id"] = meta_csv["filename"].apply(lambda x: Path(x).stem)
+    tree_row = meta_csv[meta_csv["file_id"] == tree_id_str]
+    if len(tree_row) == 0:
+        raise ValueError(f"Tree {tree_id_str} not found in metadata.csv")
+    tree_row = tree_row.iloc[0]
+
+    height_m = float(tree_row["tree_H"])
+    species_idx = int(tree_row["species_idx"])
+    type_idx = int(tree_row["type_idx"])
+    species_name = tree_row.get("species", "unknown").replace("_", " ")
+    data_type = tree_row.get("data_type", "unknown").upper()
+
+    print(f"Time evolution: tree {tree_id_str}, {species_name}, "
+          f"H={height_m:.1f}m, {data_type}, cfg={cfg_scale}")
+
+    # ── Generate trajectory ──────────────────────────────────────────────
+    num_points = config.get("max_points", 16384)
+    trajectory = sample_conditional(
+        model=model,
+        num_points=num_points,
+        device=device,
+        target_height=height_m,
+        species_idx=species_idx,
+        type_idx=type_idx,
+        cfg_values=cfg_scale,
+        solver_method=solver_method,
+        return_intermediates=True,
+        intermediate_times=time_points,
+    )
+    # trajectory shape: (T, num_points, 3) in normalized coords
+
+    # Denormalize to meters
+    trajectory_m = (trajectory / 2.0) * height_m
+    # Ground each snapshot so z_min = 0
+    for i in range(len(trajectory_m)):
+        trajectory_m[i, :, 2] -= trajectory_m[i, :, 2].min()
+
+    print(f"  Trajectory shape: {trajectory_m.shape}")
+
+    # ── Rendering ────────────────────────────────────────────────────────
+    render_dpi = 300
+    point_size = 0.3
+    elev, azim = 20, 45
+
+    # Shared axis limits: union of all snapshots
+    all_pts = np.concatenate(list(trajectory_m), axis=0)
+    margin = 0.05
+    mids, ranges = [], []
+    for dim in range(3):
+        lo, hi = all_pts[:, dim].min(), all_pts[:, dim].max()
+        span = hi - lo
+        pad = span * margin
+        ranges.append(max(span + 2 * pad, 0.1))
+        mids.append((lo + hi) / 2)
+
+    # Shared colormap bounds from final tree (t=1)
+    final_pts = trajectory_m[-1]
+    vmin_z = final_pts[:, 2].min()
+    vmax_z = final_pts[:, 2].max()
+
+    def render_snapshot(pts, mids, ranges, vmin, vmax):
+        """Render a single snapshot to an RGBA image."""
+        fig = plt.figure(figsize=(2.0, 2.5))
+        ax = fig.add_subplot(111, projection="3d")
+        ax.scatter(
+            pts[:, 0], pts[:, 1], pts[:, 2],
+            c=pts[:, 2], cmap="viridis", s=point_size,
+            vmin=vmin, vmax=vmax,
+            alpha=0.8, rasterized=True,
+        )
+        ax.set_xlim(mids[0] - ranges[0] / 2, mids[0] + ranges[0] / 2)
+        ax.set_ylim(mids[1] - ranges[1] / 2, mids[1] + ranges[1] / 2)
+        ax.set_zlim(mids[2] - ranges[2] / 2, mids[2] + ranges[2] / 2)
+        ax.set_box_aspect(ranges)
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_axis_off()
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0,
+                    dpi=render_dpi, transparent=True)
+        plt.close(fig)
+        buf.seek(0)
+        img = np.array(Image.open(buf))
+        # Crop transparent margins
+        if img.shape[2] == 4:
+            alpha = img[:, :, 3]
+            rows_with_content = np.where(alpha > 0)[0]
+            cols_with_content = np.where(alpha > 0)[1]
+            if len(rows_with_content) > 0:
+                pad_px = 2
+                r0 = max(0, rows_with_content.min() - pad_px)
+                r1 = min(img.shape[0], rows_with_content.max() + pad_px + 1)
+                c0 = max(0, cols_with_content.min() - pad_px)
+                c1 = min(img.shape[1], cols_with_content.max() + pad_px + 1)
+                img = img[r0:r1, c0:c1]
+        return img
+
+    # Render all panels
+    panel_images = []
+    for t_idx in range(n_panels):
+        print(f"  Rendering t={time_points[t_idx]:.1f}...")
+        img = render_snapshot(trajectory_m[t_idx], mids, ranges, vmin_z, vmax_z)
+        panel_images.append(img)
+
+    # ── Compose grid ─────────────────────────────────────────────────────
+    # Pad images to uniform size
+    max_h = max(img.shape[0] for img in panel_images)
+    max_w = max(img.shape[1] for img in panel_images)
+
+    def _pad_image(img, target_h, target_w):
+        h, w = img.shape[:2]
+        channels = img.shape[2] if img.ndim == 3 else 1
+        padded = np.full((target_h, target_w, channels), 255, dtype=np.uint8)
+        y_off = (target_h - h) // 2
+        x_off = (target_w - w) // 2
+        padded[y_off:y_off + h, x_off:x_off + w] = img
+        return padded
+
+    fig_width = 6.69  # MDPI full page width
+    aspect = (n_rows * max_h) / (n_cols * max_w)
+    fig_height = fig_width * aspect * 1.1  # extra for labels
+    header_frac = 0.06
+
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(fig_width, fig_height),
+        gridspec_kw={
+            "left": 0.02, "right": 0.98,
+            "top": 1.0 - header_frac, "bottom": 0.02,
+            "wspace": 0.02, "hspace": 0.05,
+        },
+    )
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]
+
+    for idx in range(n_panels):
+        row_i = idx // n_cols
+        col_j = idx % n_cols
+        ax = axes[row_i, col_j]
+        img = _pad_image(panel_images[idx], max_h, max_w)
+        ax.imshow(img)
+        ax.set_axis_off()
+
+    # Panel labels
+    col_frac = 0.96 / n_cols
+    for idx in range(n_panels):
+        col_j = idx % n_cols
+        row_i = idx // n_cols
+        x = 0.02 + col_j * col_frac + col_frac / 2
+        # Position below each panel
+        grid_h = 1.0 - header_frac - 0.02
+        row_h = grid_h / n_rows
+        y = (1.0 - header_frac) - row_i * row_h - row_h + 0.005
+        fig.text(x, y, f"$t = {time_points[idx]:.1f}$",
+                 ha="center", va="bottom", fontsize=9)
+
+    # Title
+    fig.text(0.5, 1.0 - header_frac * 0.4,
+             f"{species_name}, H = {height_m:.1f} m, CFG = {cfg_scale}",
+             ha="center", va="center", fontsize=10, fontstyle="italic")
+
+    out_path = output_dir / "figure_time_evolution.pdf"
+    fig.savefig(out_path, format="pdf", dpi=600, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+    # ── Metadata ─────────────────────────────────────────────────────────
+    meta = {
+        "tree_id": tree_id_str,
+        "species": tree_row.get("species", "unknown"),
+        "height_m": round(height_m, 2),
+        "data_type": data_type,
+        "cfg_scale": cfg_scale,
+        "solver_method": solver_method,
+        "time_points": time_points,
+        "num_points": num_points,
+        "seed": seed,
+        "experiment_dir": str(experiment_dir),
+    }
+    meta_path = output_dir / "figure_time_evolution.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  Saved metadata: {meta_path}")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -3581,7 +3852,7 @@ if __name__ == "__main__":
         "--figures",
         nargs="+",
         default=["spine_audit"],
-        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit, crown_audit, qualitative, stem_tracker, hcb, cfg_sensitivity)",
+        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit, crown_audit, qualitative, stem_tracker, hcb, cfg_sensitivity, time_evolution)",
     )
     parser.add_argument(
         "--experiment_dir", default="experiments/transformer-8-512-4096"
@@ -3674,6 +3945,17 @@ if __name__ == "__main__":
         elif fig_name == "cfg_sensitivity":
             create_figure_cfg_sensitivity(
                 experiment_dir=args.experiment_dir,
+                output_dir=args.output_dir,
+            )
+        elif fig_name == "time_evolution":
+            tree_id = "13875"
+            if args.tree_ids:
+                tree_id = args.tree_ids.split(",")[0]
+            create_figure_time_evolution(
+                experiment_dir=args.experiment_dir,
+                data_path=args.data_path,
+                tree_id=tree_id,
+                seed=args.seed,
                 output_dir=args.output_dir,
             )
         else:
