@@ -12,5 +12,6 @@ conda activate treeflow
 python evaluate_v3.py \
     --experiment_name finetune-8-512-16384 \
     --data_path data/preprocessed-16384 \
+    --max_points 16384 \
     --num_workers 48 \
     --seed 42
