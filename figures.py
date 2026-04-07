@@ -3556,13 +3556,13 @@ def create_figure_cfg_sensitivity(
     """
     CFG sensitivity figure for the appendix.
 
-    A 2x3 grid showing each conditioning fidelity metric as a function of the
-    classifier-free guidance scale omega. Each panel shows the binned median
-    of per-pair metric values (line), the interquartile range (band), and the
-    intra-class baseline from Table 1 as a horizontal dashed reference.
+    A single-panel figure showing all six conditioning fidelity metrics as
+    functions of the classifier-free guidance scale omega, normalized by
+    their corresponding intra-class baseline values from Table 1. A horizontal
+    dashed line at y=1 marks the intra-class baseline. Lines below the
+    baseline indicate generation quality at least matching intra-class pairs.
 
-    Baselines are read from samples/evaluation_v3/tables/table_1_global.txt
-    when present and silently omitted otherwise.
+    Baselines are read from samples/evaluation_v3/tables/table_1_global.txt.
 
     Args:
         experiment_dir: Experiment directory with samples/evaluation_v3/.
@@ -3570,8 +3570,6 @@ def create_figure_cfg_sensitivity(
         n_bins: Number of equal-width bins across the CFG range.
     """
     import re
-    from matplotlib.lines import Line2D
-    from matplotlib.patches import Patch
 
     experiment_dir = Path(experiment_dir)
     output_dir = Path(output_dir)
@@ -3597,132 +3595,130 @@ def create_figure_cfg_sensitivity(
         "vert_kde_jsd",
         "hist_2d_jsd",
     ]
-    # (axis label, table-1 row label fragment used to look up the baseline)
+    # (legend label, table-1 row label fragment, line color)
     metric_meta = {
         "chamfer_dist": (
+            "Chamfer distance",
             "Chamfer distance (m)",
-            "Chamfer distance (m)",
+            "#1f77b4",
         ),
         "delta_h_max_cr": (
-            r"$\Delta$ Height at max crown radius (m)",
+            r"$\Delta$ Height at max crown radius",
             "Δ Height at max crown R (m)",
+            "#ff7f0e",
         ),
         "delta_max_crown_r": (
-            r"$\Delta$ Max crown radius (m)",
+            r"$\Delta$ Max crown radius",
             "Δ Max crown radius (m)",
+            "#2ca02c",
         ),
         "delta_hcb": (
-            r"$\Delta$ Height to crown base (m)",
+            r"$\Delta$ Height to crown base",
             "Δ Height to crown base (m)",
+            "#d62728",
         ),
         "vert_kde_jsd": (
             "Vertical KDE divergence",
             "Vertical KDE JSD",
+            "#9467bd",
         ),
         "hist_2d_jsd": (
             "2D histogram divergence",
             "2D histogram JSD",
+            "#8c564b",
         ),
     }
 
-    # ── Read intra-class baselines from Table 1 if available ────────────
-    baselines: dict[str, float | None] = {m: None for m in metrics}
+    # ── Read intra-class baselines from Table 1 ─────────────────────────
     table_path = eval_dir / "tables" / "table_1_global.txt"
-    if table_path.exists():
-        # Each metric row in the table ends with three floats: gen, intra, inter
-        num_re = re.compile(r"(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s*$")
-        for line in table_path.read_text().splitlines():
-            num_match = num_re.search(line)
-            if not num_match:
-                continue
-            for key, (_, label) in metric_meta.items():
-                if label in line and baselines[key] is None:
-                    baselines[key] = float(num_match.group(2))
-                    break
-        n_found = sum(b is not None for b in baselines.values())
-        print(f"  Loaded {n_found}/6 intra-class baselines from {table_path.name}")
-    else:
-        print(f"  Note: {table_path} not found — baselines omitted")
+    if not table_path.exists():
+        print(f"Error: {table_path} not found — cannot normalize")
+        return
+    baselines: dict[str, float] = {}
+    num_re = re.compile(r"(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s*$")
+    for line in table_path.read_text().splitlines():
+        num_match = num_re.search(line)
+        if not num_match:
+            continue
+        for key, (_, label, _) in metric_meta.items():
+            if label in line and key not in baselines:
+                baselines[key] = float(num_match.group(2))
+                break
+    missing = [m for m in metrics if m not in baselines]
+    if missing:
+        print(f"Error: failed to parse baselines for {missing}")
+        return
+    print(
+        "  Loaded intra-class baselines: "
+        + ", ".join(f"{m}={baselines[m]:.3f}" for m in metrics)
+    )
 
-    # ── Bin CFG scale ────────────────────────────────────────────────────
+    # ── Bin CFG and compute per-bin median ──────────────────────────────
     cfg_min, cfg_max = df["cfg_scale"].min(), df["cfg_scale"].max()
     bin_edges = np.linspace(cfg_min, cfg_max, n_bins + 1)
     df["cfg_bin"] = pd.cut(df["cfg_scale"], bins=bin_edges, include_lowest=True)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
     grouped = df.groupby("cfg_bin", observed=True)
 
-    # ── Plot ─────────────────────────────────────────────────────────────
-    median_color = "#1f77b4"
-    band_color = "#1f77b4"
-    baseline_color = "#444444"
+    norm_medians: dict[str, np.ndarray] = {}
+    for metric in metrics:
+        med = grouped[metric].median().values
+        norm_medians[metric] = med / baselines[metric]
 
-    fig, axes = plt.subplots(
-        2, 3, figsize=(11, 6), sharex=True, constrained_layout=True
+    # ── Plot ────────────────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(7.0, 4.0), constrained_layout=True)
+
+    # Intra-class reference at y=1
+    ax.axhline(
+        1.0,
+        color="#444444",
+        linestyle="--",
+        linewidth=1.2,
+        zorder=2,
     )
 
-    for ax, metric in zip(axes.ravel(), metrics):
-        medians = grouped[metric].median().values
-        q25 = grouped[metric].quantile(0.25).values
-        q75 = grouped[metric].quantile(0.75).values
-
-        ax.fill_between(
-            bin_centers, q25, q75,
-            color=band_color, alpha=0.22, linewidth=0,
-        )
+    for metric in metrics:
+        label, _, color = metric_meta[metric]
         ax.plot(
-            bin_centers, medians,
-            marker="o", color=median_color,
-            linewidth=1.6, markersize=4.5,
+            bin_centers,
+            norm_medians[metric],
+            marker="o",
+            color=color,
+            linewidth=1.6,
+            markersize=4.5,
+            label=label,
             zorder=5,
         )
 
-        baseline = baselines[metric]
-        if baseline is not None:
-            ax.axhline(
-                baseline,
-                color=baseline_color, linestyle="--",
-                linewidth=1.2, zorder=4,
-            )
+    ax.set_xlim(cfg_min, cfg_max)
+    ax.set_xlabel(r"Classifier-free guidance scale $\omega$", fontsize=11)
+    ax.set_ylabel("Median metric / intra-class baseline", fontsize=11)
+    ax.tick_params(axis="both", labelsize=10)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.4)
+    ax.set_axisbelow(True)
 
-        # Y-limits snug to median + IQR + baseline
-        upper_candidates = [float(np.nanmax(q75)), float(np.nanmax(medians))]
-        if baseline is not None:
-            upper_candidates.append(baseline)
-        y_top = max(upper_candidates) * 1.18
-        ax.set_ylim(bottom=0, top=y_top)
-        ax.set_xlim(cfg_min, cfg_max)
+    # Y-limits include both the data and the y=1 reference
+    all_vals = np.concatenate([norm_medians[m] for m in metrics])
+    y_top = max(1.08, float(np.nanmax(all_vals)) * 1.06)
+    y_bot = min(0.6, float(np.nanmin(all_vals)) * 0.92)
+    ax.set_ylim(y_bot, y_top)
 
-        ax.set_ylabel(metric_meta[metric][0], fontsize=10)
-        ax.tick_params(axis="both", labelsize=9)
-        ax.grid(True, axis="y", linestyle=":", alpha=0.4)
-        ax.set_axisbelow(True)
+    # Inline label for the baseline reference, anchored to the right edge
+    ax.text(
+        cfg_max - 0.02 * (cfg_max - cfg_min),
+        1.0,
+        " intra-class baseline",
+        fontsize=8.5,
+        color="#444444",
+        ha="right",
+        va="bottom",
+    )
 
-    for ax in axes[-1]:
-        ax.set_xlabel(r"Classifier-free guidance scale $\omega$", fontsize=10)
-
-    # Single shared legend at the top of the figure
-    legend_elements = [
-        Line2D(
-            [0], [0], marker="o", color=median_color,
-            markersize=4.5, linewidth=1.6, label="Binned median",
-        ),
-        Patch(facecolor=band_color, alpha=0.22, label="Interquartile range"),
-    ]
-    if any(b is not None for b in baselines.values()):
-        legend_elements.append(
-            Line2D(
-                [0], [0], color=baseline_color, linestyle="--",
-                linewidth=1.2, label="Intra-class baseline",
-            )
-        )
-
-    fig.legend(
-        handles=legend_elements,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 1.04),
-        ncol=len(legend_elements),
+    ax.legend(
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
         frameon=False,
-        fontsize=10,
+        fontsize=9.5,
     )
 
     out_path = output_dir / "figure_cfg_sensitivity.pdf"
@@ -3737,8 +3733,12 @@ def create_figure_cfg_sensitivity(
         "cfg_range": [round(float(cfg_min), 3), round(float(cfg_max), 3)],
         "n_bins": n_bins,
         "metrics": metrics,
-        "intra_class_baselines": {
-            m: (float(b) if b is not None else None) for m, b in baselines.items()
+        "intra_class_baselines": {m: float(baselines[m]) for m in metrics},
+        "normalized_median_at_omega_min": {
+            m: float(norm_medians[m][0]) for m in metrics
+        },
+        "normalized_median_at_omega_max": {
+            m: float(norm_medians[m][-1]) for m in metrics
         },
     }
     meta_path = output_dir / "figure_cfg_sensitivity.json"
