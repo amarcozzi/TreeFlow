@@ -701,7 +701,7 @@ def create_figure_2(
     # Label for source distribution
     ax_c.text(
         1.5,
-        3.75,
+        3.6,
         r"$X_0$ (Source)" + "\n" + r"$\mathcal{N}(0, I)$",
         fontsize=12,
         color="#1565C0",
@@ -713,7 +713,7 @@ def create_figure_2(
     # Label for target distribution
     ax_c.text(
         7.5,
-        3.75,
+        3.6,
         r"$X_1$ (Target)" + "\n" + r"$p_{\mathrm{data}}$",
         fontsize=12,
         color="#C62828",
@@ -723,8 +723,8 @@ def create_figure_2(
     )
 
     # Axis labels
-    ax_c.set_xlabel("X-axis", fontsize=12)
-    ax_c.set_ylabel("Y-axis", fontsize=12)
+    # ax_c.set_xlabel("X-axis", fontsize=12)
+    # ax_c.set_ylabel("Y-axis", fontsize=12)
 
     # Set axis limits for horizontal layout
     ax_c.set_xlim(-0.5, 9.5)
@@ -764,12 +764,13 @@ def create_figure_2(
     fig_c.patch.set_facecolor("white")
     ax_c.set_facecolor("white")
 
+    ax_c.set_xticks([])
+    ax_c.set_yticks([])
+
     plt.tight_layout()
-    fig_c.savefig(
-        output_dir / "figure_2_a.png", format="png", bbox_inches="tight", dpi=300
-    )
+    fig_c.savefig(output_dir / "figure_2_a.pdf", bbox_inches="tight", dpi=300)
     plt.close(fig_c)
-    print(f"  Saved: {output_dir}/figure_2_a.png")
+    print(f"  Saved: {output_dir}/figure_2_a.pdf")
 
     print(f"\nAll figures saved to {output_dir}/")
 
@@ -3651,9 +3652,9 @@ def create_figure_cfg_sensitivity(
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
 
     # Per-tree median within each (tree, cfg_bin); aggregate across trees per bin
-    per_tree_per_bin = df.groupby(
-        ["real_id", "cfg_bin"], observed=True
-    )[metrics].median()
+    per_tree_per_bin = df.groupby(["real_id", "cfg_bin"], observed=True)[
+        metrics
+    ].median()
 
     bin_central = per_tree_per_bin.groupby("cfg_bin", observed=True).mean()
     bin_q25 = per_tree_per_bin.groupby("cfg_bin", observed=True).quantile(0.25)
@@ -3674,13 +3675,20 @@ def create_figure_cfg_sensitivity(
         q75 = bin_q75[metric].values
 
         ax.fill_between(
-            bin_centers, q25, q75,
-            color=band_color, alpha=0.22, linewidth=0,
+            bin_centers,
+            q25,
+            q75,
+            color=band_color,
+            alpha=0.22,
+            linewidth=0,
         )
         ax.plot(
-            bin_centers, central,
-            marker="o", color=line_color,
-            linewidth=1.7, markersize=5.0,
+            bin_centers,
+            central,
+            marker="o",
+            color=line_color,
+            linewidth=1.7,
+            markersize=5.0,
             zorder=5,
         )
 
@@ -3688,8 +3696,10 @@ def create_figure_cfg_sensitivity(
         if baseline is not None:
             ax.axhline(
                 baseline,
-                color=baseline_color, linestyle="--",
-                linewidth=1.2, zorder=4,
+                color=baseline_color,
+                linestyle="--",
+                linewidth=1.2,
+                zorder=4,
             )
 
         # Y-limits snug around the central line, IQR, and baseline
@@ -3711,20 +3721,29 @@ def create_figure_cfg_sensitivity(
     # Single shared legend at the top of the figure
     legend_elements = [
         Line2D(
-            [0], [0], marker="o", color=line_color,
-            markersize=5.0, linewidth=1.7,
+            [0],
+            [0],
+            marker="o",
+            color=line_color,
+            markersize=5.0,
+            linewidth=1.7,
             label="Mean of per-tree medians (per $\\omega$ bin)",
         ),
         Patch(
-            facecolor=band_color, alpha=0.22,
+            facecolor=band_color,
+            alpha=0.22,
             label="IQR of per-tree medians",
         ),
     ]
     if any(b is not None for b in baselines.values()):
         legend_elements.append(
             Line2D(
-                [0], [0], color=baseline_color, linestyle="--",
-                linewidth=1.2, label="Intra-class baseline (Table 1)",
+                [0],
+                [0],
+                color=baseline_color,
+                linestyle="--",
+                linewidth=1.2,
+                label="Intra-class baseline (Table 1)",
             )
         )
 
@@ -3752,12 +3771,8 @@ def create_figure_cfg_sensitivity(
         "intra_class_baselines": {
             m: (float(b) if b is not None else None) for m, b in baselines.items()
         },
-        "central_at_omega_min": {
-            m: float(bin_central[m].iloc[0]) for m in metrics
-        },
-        "central_at_omega_max": {
-            m: float(bin_central[m].iloc[-1]) for m in metrics
-        },
+        "central_at_omega_min": {m: float(bin_central[m].iloc[0]) for m in metrics},
+        "central_at_omega_max": {m: float(bin_central[m].iloc[-1]) for m in metrics},
     }
     meta_path = output_dir / "figure_cfg_sensitivity.json"
     with open(meta_path, "w") as f:
@@ -4177,9 +4192,15 @@ def create_figure_height_interpolation(
             alpha=0.8,
             rasterized=True,
         )
-        ax.set_xlim(panel_mids[0] - panel_ranges[0] / 2, panel_mids[0] + panel_ranges[0] / 2)
-        ax.set_ylim(panel_mids[1] - panel_ranges[1] / 2, panel_mids[1] + panel_ranges[1] / 2)
-        ax.set_zlim(panel_mids[2] - panel_ranges[2] / 2, panel_mids[2] + panel_ranges[2] / 2)
+        ax.set_xlim(
+            panel_mids[0] - panel_ranges[0] / 2, panel_mids[0] + panel_ranges[0] / 2
+        )
+        ax.set_ylim(
+            panel_mids[1] - panel_ranges[1] / 2, panel_mids[1] + panel_ranges[1] / 2
+        )
+        ax.set_zlim(
+            panel_mids[2] - panel_ranges[2] / 2, panel_mids[2] + panel_ranges[2] / 2
+        )
         ax.set_box_aspect(panel_ranges)
         ax.view_init(elev=elev, azim=azim)
         ax.set_axis_off()
