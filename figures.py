@@ -4166,22 +4166,28 @@ def create_figure_height_interpolation(
     render_dpi = 300
     margin = 0.05
 
-    def _panel_limits(pts):
-        """Compute per-panel axis limits with padding."""
-        panel_mids, panel_ranges = [], []
-        for dim in range(3):
-            lo, hi = pts[:, dim].min(), pts[:, dim].max()
-            span = hi - lo
-            pad = span * margin
-            panel_ranges.append(max(span + 2 * pad, 0.1))
-            panel_mids.append((lo + hi) / 2)
-        return panel_mids, panel_ranges
+    # Shared axis limits so trees render at their true relative height and
+    # with bottoms aligned at z=0 across all panels.
+    global_z_hi = max(pts[:, 2].max() for pts in clouds_m)
+    z_pad = global_z_hi * margin
+    z_lo = -z_pad * 0.2
+    z_hi = global_z_hi + z_pad
+
+    max_xy_span = 0.0
+    for pts in clouds_m:
+        for dim in (0, 1):
+            max_xy_span = max(max_xy_span, pts[:, dim].max() - pts[:, dim].min())
+    xy_range = max_xy_span * (1 + 2 * margin)
+
+    panel_figsize = (2.0, 3.0)
 
     def render_tree(pts):
-        """Render a single 3D point cloud to a tight RGBA image."""
-        panel_mids, panel_ranges = _panel_limits(pts)
-        fig = plt.figure(figsize=(2.0, 2.5))
-        ax = fig.add_subplot(111, projection="3d")
+        """Render a single 3D point cloud with shared world-space limits."""
+        x_mid = (pts[:, 0].min() + pts[:, 0].max()) / 2
+        y_mid = (pts[:, 1].min() + pts[:, 1].max()) / 2
+
+        fig = plt.figure(figsize=panel_figsize)
+        ax = fig.add_axes([0.0, 0.0, 1.0, 1.0], projection="3d")
         ax.scatter(
             pts[:, 0],
             pts[:, 1],
@@ -4192,16 +4198,10 @@ def create_figure_height_interpolation(
             alpha=0.8,
             rasterized=True,
         )
-        ax.set_xlim(
-            panel_mids[0] - panel_ranges[0] / 2, panel_mids[0] + panel_ranges[0] / 2
-        )
-        ax.set_ylim(
-            panel_mids[1] - panel_ranges[1] / 2, panel_mids[1] + panel_ranges[1] / 2
-        )
-        ax.set_zlim(
-            panel_mids[2] - panel_ranges[2] / 2, panel_mids[2] + panel_ranges[2] / 2
-        )
-        ax.set_box_aspect(panel_ranges)
+        ax.set_xlim(x_mid - xy_range / 2, x_mid + xy_range / 2)
+        ax.set_ylim(y_mid - xy_range / 2, y_mid + xy_range / 2)
+        ax.set_zlim(z_lo, z_hi)
+        ax.set_box_aspect((xy_range, xy_range, z_hi - z_lo))
         ax.view_init(elev=elev, azim=azim)
         ax.set_axis_off()
 
@@ -4209,26 +4209,13 @@ def create_figure_height_interpolation(
         fig.savefig(
             buf,
             format="png",
-            bbox_inches="tight",
             pad_inches=0,
             dpi=render_dpi,
             transparent=True,
         )
         plt.close(fig)
         buf.seek(0)
-        img = np.array(Image.open(buf))
-        if img.shape[2] == 4:
-            alpha_ch = img[:, :, 3]
-            rows_with_content = np.where(alpha_ch > 0)[0]
-            cols_with_content = np.where(alpha_ch > 0)[1]
-            if len(rows_with_content) > 0:
-                pad_px = 2
-                r0 = max(0, rows_with_content.min() - pad_px)
-                r1 = min(img.shape[0], rows_with_content.max() + pad_px + 1)
-                c0 = max(0, cols_with_content.min() - pad_px)
-                c1 = min(img.shape[1], cols_with_content.max() + pad_px + 1)
-                img = img[r0:r1, c0:c1]
-        return img
+        return np.array(Image.open(buf))
 
     # Render all panels
     panel_images = []
@@ -4237,22 +4224,38 @@ def create_figure_height_interpolation(
         img = render_tree(pts)
         panel_images.append(img)
 
-    # ── Compose grid ─────────────────────────────────────────────────────
-    max_h = max(img.shape[0] for img in panel_images)
-    max_w = max(img.shape[1] for img in panel_images)
+    # All panels are rendered with identical figsize, dpi, axis bounds, and
+    # box_aspect, so they have matching pixel dimensions and z=0 projects to
+    # the same image row. Crop horizontal whitespace uniformly using the
+    # tallest-tree panel (which has the widest horizontal content extent)
+    # so every panel is trimmed to the same columns and bottoms stay aligned.
+    panel_h, panel_w = panel_images[0].shape[:2]
+    tallest_idx = int(np.argmax([pts[:, 2].max() for pts in clouds_m]))
+    alpha = panel_images[tallest_idx][:, :, 3]
+    cols_with_content = np.where(alpha.any(axis=0))[0]
+    pad_px = 6
+    if len(cols_with_content):
+        c0 = max(0, cols_with_content.min() - pad_px)
+        c1 = min(panel_w, cols_with_content.max() + pad_px + 1)
+    else:
+        c0, c1 = 0, panel_w
+    panel_images = [img[:, c0:c1] for img in panel_images]
 
-    def _pad_image(img, target_h, target_w):
-        h, w = img.shape[:2]
-        channels = img.shape[2] if img.ndim == 3 else 1
-        padded = np.full((target_h, target_w, channels), 255, dtype=np.uint8)
-        y_off = (target_h - h) // 2
-        x_off = (target_w - w) // 2
-        padded[y_off : y_off + h, x_off : x_off + w] = img
-        return padded
+    # Flatten transparent background to white for PDF embedding.
+    def _flatten(img):
+        if img.shape[2] != 4:
+            return img
+        rgb = img[..., :3].astype(np.float32)
+        a = img[..., 3:4].astype(np.float32) / 255.0
+        out = rgb * a + 255.0 * (1.0 - a)
+        return out.astype(np.uint8)
+
+    panel_images = [_flatten(img) for img in panel_images]
+    crop_h, crop_w = panel_images[0].shape[:2]
 
     fig_width = 6.69  # MDPI full page width
-    aspect = max_h / (n_cols * max_w)
-    fig_height = fig_width * aspect * 1.1
+    per_panel_w = fig_width / n_cols
+    fig_height = per_panel_w * (crop_h / crop_w) * 1.08
 
     fig, axes = plt.subplots(
         1,
@@ -4263,14 +4266,13 @@ def create_figure_height_interpolation(
             "right": 1.0,
             "top": 1.0,
             "bottom": 0.05,
-            "wspace": 0.02,
+            "wspace": 0.0,
         },
     )
 
     for idx in range(n_cols):
         ax = axes[idx]
-        img = _pad_image(panel_images[idx], max_h, max_w)
-        ax.imshow(img)
+        ax.imshow(panel_images[idx])
         ax.set_axis_off()
         ax.set_title(f"$h = {heights[idx]:.0f}$ m", fontsize=8, pad=0, y=-0.08)
 
