@@ -4241,15 +4241,19 @@ def create_figure_height_interpolation(
     # using the tallest tree's alpha content — every panel gets the same
     # rectangle, so bottom alignment and relative heights are preserved.
     panel_h, panel_w = panel_images[0].shape[:2]
-    tallest_idx = int(np.argmax([pts[:, 2].max() for pts in clouds_m]))
-    alpha = panel_images[tallest_idx][:, :, 3]
-    rows_with_content = np.where(alpha.any(axis=1))[0]
-    cols_with_content = np.where(alpha.any(axis=0))[0]
+    # Crop using the UNION of alpha content across all panels — any tree may
+    # have the widest horizontal or lowest vertical extent in the projection,
+    # so the shared crop rectangle must accommodate every panel.
+    union_alpha = np.zeros((panel_h, panel_w), dtype=bool)
+    for img in panel_images:
+        union_alpha |= img[:, :, 3] > 0
+    rows_with_content = np.where(union_alpha.any(axis=1))[0]
+    cols_with_content = np.where(union_alpha.any(axis=0))[0]
     pad_px = 6
-    # Larger pad beneath the content so trunks aren't flush with the image
-    # bottom — this is a visual margin, not a correction; bottom-alignment
-    # across panels comes from the shared z=0 in 3D coordinates.
-    ground_pad_px = int(round(0.04 * panel_h))
+    # Small asymmetric pad beneath content so trunks aren't flush with the
+    # image bottom. Bottom alignment across panels is guaranteed by the
+    # shared 3D coords (trunk bases at (0,0,0), identical projection cube).
+    ground_pad_px = int(round(0.02 * panel_h))
     if len(rows_with_content):
         r0 = max(0, rows_with_content.min() - pad_px)
         r1 = min(panel_h, rows_with_content.max() + ground_pad_px + 1)
@@ -4277,7 +4281,7 @@ def create_figure_height_interpolation(
     fig_width = 6.69  # MDPI full page width
     per_panel_w = fig_width / n_cols
     # Reserve a small strip at the bottom for the h=... labels.
-    label_strip = 0.08  # fraction of figure height
+    label_strip = 0.05  # fraction of figure height
     panel_aspect = crop_h / crop_w
     fig_height = per_panel_w * panel_aspect / (1.0 - label_strip)
 
@@ -4298,7 +4302,7 @@ def create_figure_height_interpolation(
         ax = axes[idx]
         ax.imshow(panel_images[idx])
         ax.set_axis_off()
-        ax.set_title(f"$h = {heights[idx]:.0f}$ m", fontsize=8, pad=0, y=-0.06)
+        ax.set_title(f"$h = {heights[idx]:.0f}$ m", fontsize=8, pad=0, y=-0.025)
 
     out_path = output_dir / "figure_height_interpolation.pdf"
     fig.savefig(out_path, format="pdf", dpi=600, bbox_inches="tight", pad_inches=0.02)
