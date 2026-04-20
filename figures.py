@@ -4225,21 +4225,27 @@ def create_figure_height_interpolation(
         panel_images.append(img)
 
     # All panels are rendered with identical figsize, dpi, axis bounds, and
-    # box_aspect, so they have matching pixel dimensions and z=0 projects to
-    # the same image row. Crop horizontal whitespace uniformly using the
-    # tallest-tree panel (which has the widest horizontal content extent)
-    # so every panel is trimmed to the same columns and bottoms stay aligned.
+    # box_aspect, so they have matching pixel dimensions and both z=0 and the
+    # top of the tallest tree project to the same image rows. Crop both axes
+    # using the tallest tree's alpha content — every panel gets the same
+    # rectangle, so bottom alignment and relative heights are preserved.
     panel_h, panel_w = panel_images[0].shape[:2]
     tallest_idx = int(np.argmax([pts[:, 2].max() for pts in clouds_m]))
     alpha = panel_images[tallest_idx][:, :, 3]
+    rows_with_content = np.where(alpha.any(axis=1))[0]
     cols_with_content = np.where(alpha.any(axis=0))[0]
     pad_px = 6
+    if len(rows_with_content):
+        r0 = max(0, rows_with_content.min() - pad_px)
+        r1 = min(panel_h, rows_with_content.max() + pad_px + 1)
+    else:
+        r0, r1 = 0, panel_h
     if len(cols_with_content):
         c0 = max(0, cols_with_content.min() - pad_px)
         c1 = min(panel_w, cols_with_content.max() + pad_px + 1)
     else:
         c0, c1 = 0, panel_w
-    panel_images = [img[:, c0:c1] for img in panel_images]
+    panel_images = [img[r0:r1, c0:c1] for img in panel_images]
 
     # Flatten transparent background to white for PDF embedding.
     def _flatten(img):
@@ -4255,7 +4261,10 @@ def create_figure_height_interpolation(
 
     fig_width = 6.69  # MDPI full page width
     per_panel_w = fig_width / n_cols
-    fig_height = per_panel_w * (crop_h / crop_w) * 1.08
+    # Reserve a small strip at the bottom for the h=... labels.
+    label_strip = 0.08  # fraction of figure height
+    panel_aspect = crop_h / crop_w
+    fig_height = per_panel_w * panel_aspect / (1.0 - label_strip)
 
     fig, axes = plt.subplots(
         1,
@@ -4265,7 +4274,7 @@ def create_figure_height_interpolation(
             "left": 0.0,
             "right": 1.0,
             "top": 1.0,
-            "bottom": 0.05,
+            "bottom": label_strip,
             "wspace": 0.0,
         },
     )
@@ -4274,7 +4283,7 @@ def create_figure_height_interpolation(
         ax = axes[idx]
         ax.imshow(panel_images[idx])
         ax.set_axis_off()
-        ax.set_title(f"$h = {heights[idx]:.0f}$ m", fontsize=8, pad=0, y=-0.08)
+        ax.set_title(f"$h = {heights[idx]:.0f}$ m", fontsize=8, pad=0, y=-0.06)
 
     out_path = output_dir / "figure_height_interpolation.pdf"
     fig.savefig(out_path, format="pdf", dpi=600, bbox_inches="tight", pad_inches=0.02)
