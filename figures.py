@@ -4167,10 +4167,11 @@ def create_figure_height_interpolation(
     margin = 0.05
 
     # Shared axis limits so trees render at their true relative height and
-    # with bottoms aligned at z=0 across all panels.
+    # with bottoms aligned at z=0 across all panels. A small negative z_lo
+    # gives visible ground space beneath every trunk in the projection.
     global_z_hi = max(pts[:, 2].max() for pts in clouds_m)
     z_pad = global_z_hi * margin
-    z_lo = -z_pad * 0.2
+    z_lo = -global_z_hi * 0.03
     z_hi = global_z_hi + z_pad
 
     max_xy_span = 0.0
@@ -4235,9 +4236,13 @@ def create_figure_height_interpolation(
     rows_with_content = np.where(alpha.any(axis=1))[0]
     cols_with_content = np.where(alpha.any(axis=0))[0]
     pad_px = 6
+    # Larger pad beneath the content so trunks aren't flush with the image
+    # bottom — this is a visual margin, not a correction; bottom-alignment
+    # across panels comes from the shared z=0 in 3D coordinates.
+    ground_pad_px = int(round(0.04 * panel_h))
     if len(rows_with_content):
         r0 = max(0, rows_with_content.min() - pad_px)
-        r1 = min(panel_h, rows_with_content.max() + pad_px + 1)
+        r1 = min(panel_h, rows_with_content.max() + ground_pad_px + 1)
     else:
         r0, r1 = 0, panel_h
     if len(cols_with_content):
