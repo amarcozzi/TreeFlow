@@ -4155,9 +4155,18 @@ def create_figure_height_interpolation(
             cfg_values=cfg_scale,
             solver_method=solver_method,
         )
-        # Denormalize to meters and ground
+        # Denormalize to meters and ground z at 0.
         pts_m = (pts / 2.0) * h
         pts_m[:, 2] -= pts_m[:, 2].min()
+        # Anchor each trunk base at (x, y) = (0, 0) using the xy centroid
+        # of the bottom 5% of points (robust to outliers near the crown).
+        base_cutoff = max(0.05 * float(pts_m[:, 2].max()), 0.25)
+        base_mask = pts_m[:, 2] < base_cutoff
+        if base_mask.sum() == 0:
+            base_mask = pts_m[:, 2] <= pts_m[:, 2].min() + 1e-6
+        base_xy = pts_m[base_mask, :2].mean(axis=0)
+        pts_m[:, 0] -= base_xy[0]
+        pts_m[:, 1] -= base_xy[1]
         clouds_m.append(pts_m)
 
     # ── Rendering ────────────────────────────────────────────────────────
@@ -4174,19 +4183,20 @@ def create_figure_height_interpolation(
     z_lo = -global_z_hi * 0.03
     z_hi = global_z_hi + z_pad
 
-    max_xy_span = 0.0
+    # Every cloud is now anchored with its trunk base at (x, y) = (0, 0),
+    # so xy_range is chosen to contain the largest absolute extent from the
+    # origin across all trees. Every panel uses the same symmetric xy window
+    # centered at 0, which makes (0, 0, 0) project to the same 2D pixel.
+    max_abs_xy = 0.0
     for pts in clouds_m:
         for dim in (0, 1):
-            max_xy_span = max(max_xy_span, pts[:, dim].max() - pts[:, dim].min())
-    xy_range = max_xy_span * (1 + 2 * margin)
+            max_abs_xy = max(max_abs_xy, float(np.abs(pts[:, dim]).max()))
+    xy_range = 2.0 * max_abs_xy * (1 + 2 * margin)
 
     panel_figsize = (2.0, 3.0)
 
     def render_tree(pts):
         """Render a single 3D point cloud with shared world-space limits."""
-        x_mid = (pts[:, 0].min() + pts[:, 0].max()) / 2
-        y_mid = (pts[:, 1].min() + pts[:, 1].max()) / 2
-
         fig = plt.figure(figsize=panel_figsize)
         ax = fig.add_axes([0.0, 0.0, 1.0, 1.0], projection="3d")
         ax.scatter(
@@ -4199,8 +4209,8 @@ def create_figure_height_interpolation(
             alpha=0.8,
             rasterized=True,
         )
-        ax.set_xlim(x_mid - xy_range / 2, x_mid + xy_range / 2)
-        ax.set_ylim(y_mid - xy_range / 2, y_mid + xy_range / 2)
+        ax.set_xlim(-xy_range / 2, xy_range / 2)
+        ax.set_ylim(-xy_range / 2, xy_range / 2)
         ax.set_zlim(z_lo, z_hi)
         ax.set_box_aspect((xy_range, xy_range, z_hi - z_lo))
         ax.view_init(elev=elev, azim=azim)
