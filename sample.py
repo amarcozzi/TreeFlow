@@ -22,6 +22,11 @@ def sample_conditional(
     cfg_values: Union[float, List[float]],
     num_steps: int = 50,
     solver_method: str = "dopri5",
+    batch_size: int = 0,
+    return_intermediates: bool = False,
+    intermediate_times: List[float] = None,
+    atol: float = 1e-5,
+    rtol: float = 1e-5,
 ) -> np.ndarray:
     """
     Generate samples for a single tree with specified CFG value(s).
@@ -37,10 +42,16 @@ def sample_conditional(
         cfg_values: Single CFG value or list of CFG values (one per sample)
         num_steps: Number of ODE solver steps (for non-adaptive solvers)
         solver_method: ODE solver method ('euler', 'midpoint', 'dopri5')
+        batch_size: Max samples per ODE solve. 0 = all at once.
+        return_intermediates: If True, return point clouds at each time in intermediate_times.
+        intermediate_times: List of time values to capture (default: [0.0, 0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 1.0]).
+                            Only used when return_intermediates=True.
 
     Returns:
-        np.ndarray: Point clouds of shape (num_samples, num_points, 3) in normalized coordinates
-                    If single cfg_value was provided, returns (num_points, 3)
+        np.ndarray: Point clouds of shape (num_samples, num_points, 3) in normalized coordinates.
+                    If single cfg_value was provided, returns (num_points, 3).
+                    If return_intermediates=True, returns (T, num_points, 3) for single cfg
+                    or (T, num_samples, num_points, 3) for batch, where T = len(intermediate_times).
     """
     model.eval()
 
@@ -50,6 +61,35 @@ def sample_conditional(
         cfg_values = [cfg_values]
 
     num_samples = len(cfg_values)
+
+    if return_intermediates and batch_size > 0 and batch_size < num_samples:
+        raise ValueError(
+            "return_intermediates=True cannot be combined with batch_size chunking "
+            "(trajectories cannot be stitched across chunks)"
+        )
+
+    # If batch_size is set and smaller than num_samples, chunk the generation
+    if batch_size > 0 and batch_size < num_samples:
+        all_results = []
+        for i in range(0, num_samples, batch_size):
+            chunk_cfg = cfg_values[i : i + batch_size]
+            chunk_result = sample_conditional(
+                model=model,
+                num_points=num_points,
+                device=device,
+                target_height=target_height,
+                species_idx=species_idx,
+                type_idx=type_idx,
+                cfg_values=chunk_cfg,
+                num_steps=num_steps,
+                solver_method=solver_method,
+                batch_size=0,  # no further chunking
+            )
+            all_results.append(chunk_result)
+        x_final = np.concatenate(all_results, axis=0)
+        if single_sample:
+            return x_final[0]
+        return x_final
 
     # Prepare batch (all samples share same conditioning except CFG)
     x_init = torch.randn(num_samples, num_points, 3, device=device)
@@ -64,25 +104,29 @@ def sample_conditional(
     # Check if we can skip conditional pass (all cfg values are 0)
     all_cfg_zero = (cfg_tensor == 0).all().item()
 
+    # Detect if CUDA is available for autocast
+    use_autocast = device.type == "cuda"
+
     # ODE Function with per-sample CFG
     def ode_fn(t, x):
-        batch_size = x.shape[0]
-        t_batch = torch.full((batch_size,), t, device=device, dtype=x.dtype)
+        bs = x.shape[0]
+        t_batch = torch.full((bs,), t, device=device, dtype=x.dtype)
 
-        # 1. Unconditional Pass
-        drop_mask_uncond = torch.ones(batch_size, dtype=torch.bool, device=device)
-        v_uncond = model(
-            x, t_batch, s_tensor, t_tensor, h_tensor, drop_mask=drop_mask_uncond
-        )
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_autocast):
+            # 1. Unconditional Pass
+            drop_mask_uncond = torch.ones(bs, dtype=torch.bool, device=device)
+            v_uncond = model(
+                x, t_batch, s_tensor, t_tensor, h_tensor, drop_mask=drop_mask_uncond
+            )
 
-        # 2. Conditional Pass (skip if all CFG values are 0)
-        if all_cfg_zero:
-            return v_uncond
+            # 2. Conditional Pass (skip if all CFG values are 0)
+            if all_cfg_zero:
+                return v_uncond
 
-        drop_mask_cond = torch.zeros(batch_size, dtype=torch.bool, device=device)
-        v_cond = model(
-            x, t_batch, s_tensor, t_tensor, h_tensor, drop_mask=drop_mask_cond
-        )
+            drop_mask_cond = torch.zeros(bs, dtype=torch.bool, device=device)
+            v_cond = model(
+                x, t_batch, s_tensor, t_tensor, h_tensor, drop_mask=drop_mask_cond
+            )
 
         # Apply per-sample CFG scaling: v = v_uncond + cfg * (v_cond - v_uncond)
         # cfg_tensor shape: (num_samples,) -> (num_samples, 1, 1)
@@ -92,13 +136,27 @@ def sample_conditional(
     # Solve ODE
     solver = ODESolver(velocity_model=ode_fn)
 
+    solver_kwargs = {}
+    if return_intermediates:
+        if intermediate_times is None:
+            intermediate_times = [0.0, 0.5, 0.7, 0.8, 0.9, 0.95, 0.975, 1.0]
+        solver_kwargs["time_grid"] = torch.tensor(intermediate_times, device=device)
+        solver_kwargs["return_intermediates"] = True
+
     if solver_method == "dopri5":
-        x_final = solver.sample(x_init, method="dopri5", step_size=None)
+        result = solver.sample(x_init, method="dopri5", step_size=None, atol=atol, rtol=rtol, **solver_kwargs)
     else:
         step_size = 1.0 / num_steps
-        x_final = solver.sample(x_init, method=solver_method, step_size=step_size)
+        result = solver.sample(x_init, method=solver_method, step_size=step_size, atol=atol, rtol=rtol, **solver_kwargs)
 
-    x_final = x_final.cpu().numpy()
+    if return_intermediates:
+        # result is a sequence of tensors, one per time step: each (num_samples, num_points, 3)
+        trajectory = torch.stack(list(result), dim=0).cpu().numpy()  # (T, num_samples, num_points, 3)
+        if single_sample:
+            return trajectory[:, 0]  # (T, num_points, 3)
+        return trajectory
+
+    x_final = result.cpu().numpy()
 
     # Return single sample without batch dimension if single cfg was provided
     if single_sample:

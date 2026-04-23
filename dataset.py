@@ -393,8 +393,8 @@ if __name__ == "__main__":
     try:
         sample_exp = 0.3
         train_ds, val_ds, test_ds, species_list, type_list = create_datasets(
-            data_path="./data/preprocessed-4096",
-            max_points=4096,
+            data_path="./data/preprocessed-16384",
+            max_points=16384,
             sample_exponent=sample_exp,
             cache_train=False,
             cache_val=False,
@@ -405,8 +405,10 @@ if __name__ == "__main__":
         # Visualize from val_ds to see effect of sample_exponent
         # (train_ds doesn't use sample_exponent - it's handled by collate_fn)
         print(f"\nVisualizing random val sample with sample_exponent={sample_exp}...")
-        idx = np.random.randint(len(val_ds))
-        visualize_augmentation(val_ds, idx, denormalize=False)
+        # idx = np.random.randint(len(val_ds))
+        # idx
+        idx = 939
+        visualize_augmentation(test_ds, idx, denormalize=False)
 
         # Histogram of point counts to show impact of sample_exponent
         n_iterations = 1000

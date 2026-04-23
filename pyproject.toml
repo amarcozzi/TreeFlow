@@ -1,0 +1,21 @@
+[project]
+name = "treeflow"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=1.12.0",
+    "black>=25.12.0",
+    "flow-matching>=1.0.10",
+    "laspy>=2.6.1",
+    "lazrs>=0.8.0",
+    "matplotlib>=3.10.7",
+    "numpy>=2.3.5",
+    "pandas>=2.3.3",
+    "pandas-stubs~=2.3.3",
+    "scikit-learn>=1.7.2",
+    "scipy-stubs~=1.16.3",
+    "torch>=2.9.1",
+    "tqdm>=4.67.1",
+    "zarr>=3.1.5",
+]

@@ -1,1239 +1,857 @@
 """
-treeflow/evaluate.py
+TreeFlow evaluation: morphological evaluation of generated tree point clouds.
 
-Evaluate generated tree point clouds against real trees using:
-- Per-pair metrics: CD, 2D histogram JSD, crown profile MAE (p50/p75/p98)
-- Baselines: intra-class (same species + scan type + height bin) and inter-class
-- Stratified 3D voxel JSD: per species, scan type, height bin
-- Breakdowns by species, height, scan type, and CFG scale
+Per-pair metrics:
+  - Chamfer distance (m) — symmetric, PCA-canonicalized clouds in metric coords
+  - Height at max crown radius (m) — from stem tracker
+  - Max crown radius (m) — from stem tracker
+  - Height to crown base (m) — from stem tracker
+  - Vertical KDE JSD — 1D density along z-axis
+  - 2D histogram JSD — radial × arc-length profile from stem tracker
+
+Tables:
+  1. Global summary with gen / intra-class / inter-class baselines + W₁
+  2. By genus (gen mean-of-medians + W₁)
+  3. By height bin (gen mean-of-medians + W₁)
 """
 
+import sys
 import json
+import time
+import argparse
+
+sys.stdout.reconfigure(line_buffering=True)
+
 import numpy as np
 import pandas as pd
-import argparse
 import zarr
 from pathlib import Path
-from itertools import combinations
 from scipy.spatial.distance import cdist
-from scipy.optimize import linear_sum_assignment
+from scipy.stats import gaussian_kde, wasserstein_distance
 from tqdm import tqdm
-import multiprocessing as mp
-import time
+from concurrent.futures import ProcessPoolExecutor
+
+from stem_tracker import compute_rs_spine
 
 
-# =============================================================================
-# Constants
-# =============================================================================
+# ── Constants ────────────────────────────────────────────────────────────────
 
 HEIGHT_BIN_EDGES = [0, 5, 10, 15, 20, 25, 30, 35, 40, float("inf")]
 HEIGHT_BIN_LABELS = [
-    "0-5",
-    "5-10",
-    "10-15",
-    "15-20",
-    "20-25",
-    "25-30",
-    "30-35",
-    "35-40",
-    "40+",
+    "0-5", "5-10", "10-15", "15-20", "20-25",
+    "25-30", "30-35", "35-40", "40+",
 ]
 
-PAIR_METRICS = [
-    "cd",
-    "histogram_jsd",
-    "crown_mae_p50",
-    "crown_mae_p75",
-    "crown_mae_p98",
-]
+METRICS = ["chamfer_dist", "delta_h_max_cr", "delta_max_crown_r", "delta_hcb",
+           "vert_kde_jsd", "hist_2d_jsd"]
 
+METRIC_DISPLAY = {
+    "chamfer_dist":      ("Chamfer distance",   "m"),
+    "delta_h_max_cr":    ("Δ Height at max crown R", "m"),
+    "delta_max_crown_r": ("Δ Max crown radius", "m"),
+    "delta_hcb":         ("Δ Height to crown base", "m"),
+    "vert_kde_jsd":      ("Vertical KDE JSD",  ""),
+    "hist_2d_jsd":       ("2D histogram JSD",  ""),
+}
+
+MORPH_PROPERTIES = ["h_max_cr", "max_crown_r", "hcb"]
+
+MORPH_DISPLAY = {
+    "h_max_cr":     ("Height at max crown R", "m"),
+    "max_crown_r":  ("Max crown radius", "m"),
+    "hcb":          ("Height to crown base", "m"),
+}
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
 def get_height_bin(h: float) -> str:
-    """Assign a height value to its 5m bin label."""
     for i, (lo, hi) in enumerate(zip(HEIGHT_BIN_EDGES[:-1], HEIGHT_BIN_EDGES[1:])):
         if lo <= h < hi:
             return HEIGHT_BIN_LABELS[i]
     return HEIGHT_BIN_LABELS[-1]
 
 
-# =============================================================================
-# Distance Functions
-# =============================================================================
+def jsd(p: np.ndarray, q: np.ndarray) -> float:
+    """Jensen-Shannon divergence between two probability vectors."""
+    eps = 1e-10
+    p = np.asarray(p, dtype=np.float64) + eps
+    q = np.asarray(q, dtype=np.float64) + eps
+    p /= p.sum()
+    q /= q.sum()
+    m = 0.5 * (p + q)
+    return float(0.5 * np.sum(p * np.log(p / m)) + 0.5 * np.sum(q * np.log(q / m)))
+
+
+def canonicalize(points: np.ndarray) -> np.ndarray:
+    """PCA-align XY axes, resolve sign ambiguity via cubic moment."""
+    pts = points.copy()
+    pts -= pts.mean(axis=0)
+    xy = pts[:, :2]
+    _, _, Vt = np.linalg.svd(xy - xy.mean(axis=0), full_matrices=False)
+    R = np.eye(3)
+    R[:2, :2] = Vt
+    pts = pts @ R.T
+    if np.sum(pts[:, 0] ** 3) < 0:
+        pts[:, 0] *= -1
+    return pts
 
 
 def chamfer_distance(p1: np.ndarray, p2: np.ndarray) -> float:
-    """
-    Compute Chamfer Distance between two point clouds.
-
-    Uses squared L2 distance (standard formulation).
-    Both clouds should be (N, 3).
-    """
-    dist_matrix = cdist(p1, p2, metric="sqeuclidean")
-    min_p1_to_p2 = dist_matrix.min(axis=1).mean()
-    min_p2_to_p1 = dist_matrix.min(axis=0).mean()
-    return float((min_p1_to_p2 + min_p2_to_p1) / 2)
+    """Symmetric Chamfer distance (euclidean, in meters)."""
+    D = cdist(p1, p2, metric="euclidean")
+    return float((D.min(axis=1).mean() + D.min(axis=0).mean()) / 2)
 
 
-def earth_movers_distance(p1: np.ndarray, p2: np.ndarray) -> float:
-    """
-    Compute Earth Mover's Distance (optimal bipartite matching) between two
-    point clouds of equal size using L2 cost.
+# ── Chamfer distance parallel helpers ────────────────────────────────────────
 
-    Both clouds must be (N, 3) with the same N.
-    """
-    dist_matrix = cdist(p1, p2, metric="euclidean")
-    row_ind, col_ind = linear_sum_assignment(dist_matrix)
-    return float(dist_matrix[row_ind, col_ind].mean())
+_CD_CLOUDS_A: dict[str, np.ndarray] = {}
+_CD_CLOUDS_B: dict[str, np.ndarray] = {}
 
 
-# =============================================================================
-# Shape Metrics (2D Histogram JSD, Crown Profile)
-# =============================================================================
+def _cd_worker(task: tuple[str, str]) -> float:
+    """Compute CD for one pair using module-level cloud dicts (fork-shared)."""
+    id_a, id_b = task
+    return chamfer_distance(_CD_CLOUDS_A[id_a], _CD_CLOUDS_B[id_b])
 
 
-def compute_rz(cloud: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Convert (N,3) point cloud to (r, z) in trunk-aligned cylindrical coordinates.
-
-    Uses SVD to find the principal axis (direction of maximum variance),
-    which corresponds to the main growth direction. r is perpendicular
-    distance from that axis, z is projection along it.
-    """
-    centroid = cloud.mean(axis=0)
-    centered = cloud - centroid
-
-    _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-    axis = Vt[0]
-
-    # Ensure axis points "up" (positive z component)
-    if axis[2] < 0:
-        axis = -axis
-
-    z = centered @ axis
-    r = np.linalg.norm(centered - np.outer(z, axis), axis=1)
-    return r, z
-
-
-def compute_bin_edges(
-    r_arrays: list[np.ndarray],
-    z_arrays: list[np.ndarray],
-    n_radial: int,
-    n_height: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Compute shared radial and height bin edges from multiple r,z arrays."""
-    all_r = np.concatenate(r_arrays)
-    all_z = np.concatenate(z_arrays)
-    eps = 1e-6
-    radial_edges = np.linspace(0, all_r.max() + eps, n_radial + 1)
-    height_edges = np.linspace(all_z.min() - eps, all_z.max() + eps, n_height + 1)
-    return radial_edges, height_edges
-
-
-def compute_2d_histogram_jsd(
-    rz_a: tuple[np.ndarray, np.ndarray],
-    rz_b: tuple[np.ndarray, np.ndarray],
-    radial_edges: np.ndarray,
-    height_edges: np.ndarray,
-) -> float:
-    """
-    Compute JSD between 2D (r, z) histograms of two point clouds.
-
-    Uses Laplace smoothing (add 1 to all bins) for numerical stability.
-    Returns JSD in [0, ln(2)].
-    """
-    r_a, z_a = rz_a
-    r_b, z_b = rz_b
-
-    hist_a, _, _ = np.histogram2d(r_a, z_a, bins=[radial_edges, height_edges])
-    hist_b, _, _ = np.histogram2d(r_b, z_b, bins=[radial_edges, height_edges])
-
-    # Laplace smoothing
-    hist_a = hist_a + 1.0
-    hist_b = hist_b + 1.0
-
-    p = (hist_a / hist_a.sum()).flatten()
-    q = (hist_b / hist_b.sum()).flatten()
-
-    m = 0.5 * (p + q)
-    jsd = float(0.5 * np.sum(p * np.log(p / m)) + 0.5 * np.sum(q * np.log(q / m)))
-    return jsd
-
-
-def compute_crown_profile(
-    r: np.ndarray, z: np.ndarray, height_edges: np.ndarray, min_points: int = 5
-) -> dict:
-    """
-    Compute crown radial profile: 50th/75th/98th percentile of r per height bin.
-
-    Bins with < min_points are set to NaN.
-    """
-    n_bins = len(height_edges) - 1
-    p50 = np.full(n_bins, np.nan)
-    p75 = np.full(n_bins, np.nan)
-    p98 = np.full(n_bins, np.nan)
-    counts = np.zeros(n_bins, dtype=int)
-
-    for i in range(n_bins):
-        mask = (z >= height_edges[i]) & (z < height_edges[i + 1])
-        counts[i] = mask.sum()
-        if counts[i] >= min_points:
-            r_bin = r[mask]
-            p50[i] = np.percentile(r_bin, 50)
-            p75[i] = np.percentile(r_bin, 75)
-            p98[i] = np.percentile(r_bin, 98)
-
-    return {"p50": p50, "p75": p75, "p98": p98, "counts": counts}
-
-
-def crown_profile_mae(profile_a: dict, profile_b: dict) -> dict[str, float]:
-    """
-    MAE between two crown profiles, excluding bins where either has < min_points.
-    """
-    results = {}
-    for key in ["p50", "p75", "p98"]:
-        valid = ~np.isnan(profile_a[key]) & ~np.isnan(profile_b[key])
-        if valid.sum() > 0:
-            results[key] = float(
-                np.mean(np.abs(profile_a[key][valid] - profile_b[key][valid]))
-            )
-        else:
-            results[key] = float("nan")
+def _compute_cd_parallel(
+    clouds_a: dict[str, np.ndarray],
+    clouds_b: dict[str, np.ndarray],
+    pairs: list[tuple[str, str]],
+    num_workers: int,
+    desc: str,
+) -> list[float]:
+    """Compute Chamfer distances for a list of (id_a, id_b) pairs in parallel."""
+    global _CD_CLOUDS_A, _CD_CLOUDS_B
+    _CD_CLOUDS_A = clouds_a
+    _CD_CLOUDS_B = clouds_b
+    if num_workers <= 1:
+        results = [_cd_worker(p) for p in tqdm(pairs, desc=desc)]
+    else:
+        with ProcessPoolExecutor(max_workers=num_workers) as pool:
+            results = list(tqdm(
+                pool.map(_cd_worker, pairs, chunksize=64),
+                total=len(pairs), desc=desc,
+            ))
+    _CD_CLOUDS_A = {}
+    _CD_CLOUDS_B = {}
     return results
 
 
-def compute_shape_metrics(
-    rz_a: tuple[np.ndarray, np.ndarray],
-    rz_b: tuple[np.ndarray, np.ndarray],
-    radial_edges: np.ndarray,
-    height_edges: np.ndarray,
-    profile_a: dict | None = None,
-) -> tuple[float, float, float, float]:
+# ── Shared crown-metric helpers ──────────────────────────────────────────────
+
+def compute_mean_r_per_slice(s, r, s_max, n_slices=30):
+    """Mean radial distance in each arc-length slice.
+
+    Returns (slice_centers, mean_r_per_slice) — both numpy arrays of length n_slices.
     """
-    Compute all shape metrics between two clouds given precomputed (r,z) and edges.
+    slice_edges = np.linspace(0, s_max, n_slices + 1)
+    slice_centers = 0.5 * (slice_edges[:-1] + slice_edges[1:])
+    mean_r_per_slice = np.zeros(n_slices)
+    for i in range(n_slices):
+        mask = (s >= slice_edges[i]) & (s < slice_edges[i + 1])
+        if mask.sum() > 0:
+            mean_r_per_slice[i] = r[mask].mean()
+    return slice_centers, mean_r_per_slice
 
-    Returns (histogram_jsd, crown_mae_p50, crown_mae_p75, crown_mae_p98).
+
+def compute_hcb(slice_centers, mean_r_per_slice, s_max):
+    """Detect height-to-crown-base via Kneedle on cumulative mean-r.
+
+    Returns (hcb_val, kneedle_data) where:
+        hcb_val     — float in [0, 1] normalised arc-length (nan if degenerate)
+        kneedle_data — dict with x_norm, y_norm, d, knee_idx (empty if degenerate)
     """
-    hjsd = compute_2d_histogram_jsd(rz_a, rz_b, radial_edges, height_edges)
-
-    if profile_a is None:
-        profile_a = compute_crown_profile(rz_a[0], rz_a[1], height_edges)
-    profile_b = compute_crown_profile(rz_b[0], rz_b[1], height_edges)
-    mae = crown_profile_mae(profile_a, profile_b)
-
-    return hjsd, mae["p50"], mae["p75"], mae["p98"]
-
-
-# =============================================================================
-# Data Loading
-# =============================================================================
+    if mean_r_per_slice.max() <= 0 or np.allclose(mean_r_per_slice, mean_r_per_slice[0]):
+        return float("nan"), {}
+    cumr = np.cumsum(mean_r_per_slice)
+    x_norm = (slice_centers - slice_centers[0]) / (slice_centers[-1] - slice_centers[0])
+    y_norm = (cumr - cumr[0]) / (cumr[-1] - cumr[0])
+    d = (x_norm - y_norm) * (1 - x_norm) ** 0.5
+    knee_idx = int(np.argmax(d))
+    hcb_val = slice_centers[knee_idx] / s_max
+    kneedle_data = {"x_norm": x_norm, "y_norm": y_norm, "d": d, "knee_idx": knee_idx}
+    return hcb_val, kneedle_data
 
 
-def normalize_tree_id(tree_id) -> str:
-    """Normalize tree ID to 5-digit zero-padded string format."""
-    return str(tree_id).zfill(5)
+# ── Feature extraction ───────────────────────────────────────────────────────
 
+def extract_features(cloud: np.ndarray, height_m: float) -> dict:
+    """Extract morphological features from one point cloud.
 
-def load_generated_metadata(experiment_dir: Path) -> pd.DataFrame:
+    Returns dict with:
+        h_max_cr      (m)  — height at max crown radius (arc-length position)
+        max_crown_r   (m)  — from stem tracker (max mean-r per arc-length slice)
+        hcb           (m)  — from stem tracker (arc-length density analysis)
+        vert_kde      (64,) — 1D KDE of z-axis (no stem tracker)
+        hist_2d       (512,) — 2D (r, s) histogram (stem tracker)
     """
-    Load generated samples metadata CSV from experiment directory.
+    z = cloud[:, 2]
+    z_min, z_max = z.min(), z.max()
+    scale = height_m / 2.0  # normalized → metric
 
-    Returns DataFrame with normalized source_tree_id.
-    """
-    samples_dir = experiment_dir / "samples"
-    csv_path = samples_dir / "samples_metadata.csv"
-    if not csv_path.exists():
-        raise FileNotFoundError(
-            f"Metadata not found: {csv_path}\n" "Run postprocess_samples.py first."
-        )
+    # Stem tracker → cylindrical coordinates (r, s)
+    r, s, _, _, _ = compute_rs_spine(cloud)
 
-    df = pd.read_csv(csv_path)
-    df["source_tree_id"] = df["source_tree_id"].apply(normalize_tree_id)
-    print(f"Loaded metadata for {len(df)} generated samples")
-    print(f"  Unique source trees: {df['source_tree_id'].nunique()}")
-    print(f"  Species: {df['species'].nunique()}")
-    if "cfg_scale" in df.columns:
-        print(
-            f"  CFG scale range: {df['cfg_scale'].min():.2f} - {df['cfg_scale'].max():.2f}"
-        )
-    return df
+    # 2. Vertical 1D KDE (uses raw z, not stem tracker)
+    kde_bins = 64
+    try:
+        kde = gaussian_kde(z)
+        z_eval = np.linspace(z_min, z_max, kde_bins)
+        vert_kde = kde(z_eval)
+        vert_kde = vert_kde / (vert_kde.sum() + 1e-30)
+    except Exception:
+        vert_kde = np.ones(kde_bins) / kde_bins
 
-
-def load_real_metadata(data_path: Path) -> pd.DataFrame:
-    """
-    Load real tree metadata, filter to test split, derive file_id and file_path.
-
-    Returns DataFrame with columns: file_id, file_path, species, data_type, tree_H, etc.
-    """
-    data_path = Path(data_path)
-    csv_path = data_path / "metadata.csv"
-    if not csv_path.exists():
-        raise FileNotFoundError(f"Metadata CSV not found: {csv_path}")
-
-    df = pd.read_csv(csv_path)
-    if "split" not in df.columns:
-        raise ValueError("CSV missing 'split' column. Run preprocess_laz.py first.")
-
-    # Derive file_id and file_path, filter for existence
-    df["file_id"] = df["filename"].apply(lambda x: Path(x).stem)
-    df["file_path"] = df["file_id"].apply(lambda x: str(data_path / f"{x}.zarr"))
-    df = df[df["file_path"].apply(lambda x: Path(x).exists())]
-
-    # Filter to test split
-    test_df = df[df["split"] == "test"].copy()
-    print(
-        f"Loaded real metadata: {len(test_df)} test trees (of {len(df)} with zarr files)"
+    # 3. 2D (r, s) histogram — bin edges relative to each tree's own range
+    hist_r_bins, hist_s_bins = 16, 32
+    eps = 1e-6
+    r_max = r.max() + eps
+    s_max = s.max() + eps if s.max() > 0 else eps
+    hist_2d, _, _ = np.histogram2d(
+        r, s,
+        bins=[np.linspace(0, r_max, hist_r_bins + 1),
+              np.linspace(0, s_max, hist_s_bins + 1)],
     )
-    return test_df
+    hist_2d = hist_2d.flatten()
+    total = hist_2d.sum()
+    if total > 0:
+        hist_2d = hist_2d / total
+
+    # 4. Mean-r per arc-length slice (shared by max crown radius + HCB)
+    slice_centers, mean_r_per_slice = compute_mean_r_per_slice(s, r, s_max)
+    max_crown_r = float(mean_r_per_slice.max())
+
+    # 5. Height at max crown radius (arc-length of widest slice, in meters)
+    h_max_cr = float(slice_centers[np.argmax(mean_r_per_slice)] / s_max * height_m)
+
+    # 6. Height to crown base (Kneedle on cumulative mean-r)
+    hcb_val, _ = compute_hcb(slice_centers, mean_r_per_slice, s_max)
+
+    return {
+        "h_max_cr":     h_max_cr,
+        "max_crown_r":  float(max_crown_r * scale),
+        "hcb":          float(hcb_val * height_m),
+        "vert_kde":     vert_kde,
+        "hist_2d":      hist_2d,
+    }
 
 
-def load_point_cloud(
-    path: str, max_points: int | None = None, rng: np.random.Generator | None = None
-) -> np.ndarray:
-    """Load a point cloud from a zarr file, optionally downsampling."""
-    points = zarr.load(path).astype(np.float32)
-    if max_points is not None and len(points) > max_points:
-        if rng is None:
-            rng = np.random.default_rng(42)
-        indices = rng.choice(len(points), size=max_points, replace=False)
-        points = points[indices]
-    return points
+# ── Worker functions ─────────────────────────────────────────────────────────
+
+def _extract_worker(task: dict) -> dict | None:
+    """Process one tree (real or generated): load zarr, extract features."""
+    try:
+        points = zarr.load(task["zarr_path"]).astype(np.float32)
+        if task.get("max_points") and len(points) > task["max_points"]:
+            rng = np.random.default_rng(task.get("seed", 42))
+            idx = rng.choice(len(points), size=task["max_points"], replace=False)
+            points = points[idx]
+        feats = extract_features(points, task["height_m"])
+        feats["tree_id"] = task["tree_id"]
+        # Canonicalized cloud in metric coordinates for Chamfer distance
+        feats["_canon_cloud"] = canonicalize(points) * (task["height_m"] / 2.0)
+        return feats
+    except Exception as e:
+        return {"tree_id": task["tree_id"], "_error": str(e)}
 
 
-# =============================================================================
-# Per-Tree Evaluation (Parallelized)
-# =============================================================================
+def _run_extraction(tasks: list[dict], num_workers: int, desc: str) -> list[dict]:
+    """Run feature extraction on a list of tasks, with progress bar."""
+    if num_workers <= 1:
+        results = [_extract_worker(t) for t in tqdm(tasks, desc=desc)]
+    else:
+        with ProcessPoolExecutor(max_workers=num_workers) as pool:
+            results = list(tqdm(
+                pool.map(_extract_worker, tasks, chunksize=8),
+                total=len(tasks), desc=desc,
+            ))
+    good = [r for r in results if r is not None and "_error" not in r]
+    bad  = [r for r in results if r is not None and "_error" in r]
+    if bad:
+        print(f"  {len(bad)} failures")
+        for b in bad[:5]:
+            print(f"    {b['tree_id']}: {b['_error']}")
+    return good
 
 
-def build_tree_tasks(
-    gen_metadata: pd.DataFrame,
-    real_metadata: pd.DataFrame,
+# ── Data loading ─────────────────────────────────────────────────────────────
+
+def load_metadata(data_path: Path, experiment_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load real (test split) and generated metadata.
+
+    Returns (real_meta, gen_meta) DataFrames.
+    """
+    # Real
+    csv = data_path / "metadata.csv"
+    real = pd.read_csv(csv)
+    real["file_id"] = real["filename"].apply(lambda x: Path(x).stem)
+    real["file_path"] = real["file_id"].apply(lambda x: str(data_path / f"{x}.zarr"))
+    real = real[real["file_path"].apply(lambda x: Path(x).exists())]
+    real = real[real["split"] == "test"].copy()
+    real["height_bin"] = real["tree_H"].apply(get_height_bin)
+    if "genus" not in real.columns:
+        real["genus"] = "unknown"
+    print(f"Real test trees: {len(real)}")
+
+    # Generated
+    gen_csv = experiment_dir / "samples" / "samples_metadata.csv"
+    gen = pd.read_csv(gen_csv)
+    gen["source_tree_id"] = gen["source_tree_id"].apply(lambda x: str(x).zfill(5))
+    # Join genus from real metadata
+    id_to_genus = real.set_index("file_id")["genus"].to_dict()
+    gen["genus"] = gen["source_tree_id"].map(id_to_genus).fillna("unknown")
+    gen["height_bin"] = gen["height_m"].apply(get_height_bin)
+    print(f"Generated samples: {len(gen)}")
+
+    return real, gen
+
+
+# ── Build the core dataframe ─────────────────────────────────────────────────
+
+def build_pair_dataframe(
+    real_meta: pd.DataFrame,
+    gen_meta: pd.DataFrame,
     zarr_dir: Path,
+    max_points: int,
+    num_workers: int,
     seed: int,
-    max_points: int | None = None,
-    histogram_radial_bins: int = 16,
-    histogram_height_bins: int = 32,
-) -> list[dict]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, np.ndarray]]:
+    """Extract features for all trees and build the pair dataframe.
+
+    Returns (df_pairs, df_real_feats, df_gen_feats, real_clouds).
+    real_clouds maps tree_id → canonicalized metric-scale point cloud.
     """
-    Build task dicts for parallel per-tree evaluation.
+    # Extract real features
+    real_tasks = [
+        {"tree_id": row["file_id"], "zarr_path": row["file_path"],
+         "height_m": float(row["tree_H"]), "max_points": max_points, "seed": seed}
+        for _, row in real_meta.iterrows()
+    ]
+    print(f"\nExtracting features for {len(real_tasks)} real trees...")
+    real_results = _run_extraction(real_tasks, num_workers, "Real trees")
 
-    Groups generated samples by source_tree_id and matches to real metadata.
-    """
-    # Index real metadata by file_id
-    real_lookup = {}
-    for _, row in real_metadata.iterrows():
-        real_lookup[row["file_id"]] = {
-            "file_path": row["file_path"],
-            "species": row["species"],
-            "data_type": row["data_type"],
-            "tree_H": row["tree_H"],
-        }
+    real_feats = {r["tree_id"]: r for r in real_results}
+    real_clouds = {r["tree_id"]: r["_canon_cloud"] for r in real_results}
 
-    # Group generated samples by source_tree_id
-    grouped = gen_metadata.groupby("source_tree_id")
+    # Extract generated features
+    gen_tasks = [
+        {"tree_id": Path(row["sample_file"]).stem,
+         "zarr_path": str(zarr_dir / row["sample_file"]),
+         "height_m": float(row["height_m"]), "max_points": max_points, "seed": seed}
+        for _, row in gen_meta.iterrows()
+        if pd.notna(row.get("height_m")) and float(row["height_m"]) > 0
+    ]
+    print(f"\nExtracting features for {len(gen_tasks)} generated trees...")
+    gen_results = _run_extraction(gen_tasks, num_workers, "Gen trees")
 
-    tasks = []
-    skipped_trees = 0
-    for tree_id, group in grouped:
-        if tree_id not in real_lookup:
-            skipped_trees += 1
+    gen_feats = {r["tree_id"]: r for r in gen_results}
+    gen_clouds = {r["tree_id"]: r["_canon_cloud"] for r in gen_results}
+
+    # Build gen_id → metadata lookup
+    gen_id_to_meta = {}
+    for _, row in gen_meta.iterrows():
+        gid = Path(row["sample_file"]).stem
+        gen_id_to_meta[gid] = row
+
+    # Build pair rows (without CD — added after parallel CD computation)
+    pair_keys = []  # (rid, gid) for CD
+    rows = []
+    for gid, gf in gen_feats.items():
+        meta = gen_id_to_meta.get(gid)
+        if meta is None:
+            continue
+        rid = meta["source_tree_id"]
+        rf = real_feats.get(rid)
+        if rf is None:
             continue
 
-        real_info = real_lookup[tree_id]
+        pair_keys.append((rid, gid))
+        rows.append({
+            "real_id": rid,
+            "gen_id": gid,
+            "genus": meta.get("genus", "unknown"),
+            "species": meta.get("species", "unknown"),
+            "height_bin": meta.get("height_bin", "unknown"),
+            "scan_type": meta.get("scan_type", "unknown"),
+            "height_m": float(meta.get("height_m", 0)),
+            "cfg_scale": float(meta.get("cfg_scale", 0)),
+            "delta_h_max_cr":    abs(gf["h_max_cr"]     - rf["h_max_cr"]),
+            "delta_max_crown_r": abs(gf["max_crown_r"]  - rf["max_crown_r"]),
+            "delta_hcb":         abs(gf["hcb"]          - rf["hcb"]),
+            "vert_kde_jsd":      jsd(rf["vert_kde"], gf["vert_kde"]),
+            "hist_2d_jsd":       jsd(rf["hist_2d"],  gf["hist_2d"]),
+        })
 
-        gen_samples = []
-        for _, row in group.iterrows():
-            sample_info = {
-                "sample_id": row["sample_id"],
-                "zarr_path": str(zarr_dir / f"{row['sample_file']}"),
-                "cfg_scale": float(row.get("cfg_scale", 0.0)),
-                "species": row["species"],
-                "height_m": float(row.get("height_m", real_info["tree_H"])),
-                "scan_type": row.get("scan_type", real_info["data_type"]),
-            }
-            gen_samples.append(sample_info)
-
-        tasks.append(
-            {
-                "source_tree_id": tree_id,
-                "real_path": real_info["file_path"],
-                "real_species": real_info["species"],
-                "real_data_type": real_info["data_type"],
-                "real_height": float(real_info["tree_H"]),
-                "gen_samples": gen_samples,
-                "seed": seed,
-                "max_points": max_points,
-                "histogram_radial_bins": histogram_radial_bins,
-                "histogram_height_bins": histogram_height_bins,
-            }
-        )
-
-    if skipped_trees > 0:
-        print(f"  Skipped {skipped_trees} trees not found in real test set")
-    print(f"  Built {len(tasks)} tree evaluation tasks")
-    return tasks
-
-
-def evaluate_tree_worker(task: dict) -> dict:
-    """
-    Worker: evaluate all generated samples for one real tree.
-
-    Computes CD, 2D histogram JSD, and crown profile MAE for each
-    generated sample against the real tree.
-    """
-    max_points = task.get("max_points")
-    seed = task.get("seed", 42)
-    n_radial = task.get("histogram_radial_bins", 16)
-    n_height = task.get("histogram_height_bins", 32)
-    rng = np.random.default_rng(seed)
-
-    real_cloud = load_point_cloud(task["real_path"], max_points=max_points, rng=rng)
-
-    # Load all generated clouds
-    gen_clouds = []
-    gen_infos = []
-    for gen_info in task["gen_samples"]:
-        try:
-            gen_cloud = load_point_cloud(gen_info["zarr_path"])
-            gen_clouds.append(gen_cloud)
-            gen_infos.append(gen_info)
-        except Exception:
-            continue
-
-    if not gen_clouds:
-        return {
-            "pairs": [],
-            "real_cloud": real_cloud,
-            "source_tree_id": task["source_tree_id"],
-        }
-
-    # Compute (r, z) for real and all gen
-    r_real, z_real = compute_rz(real_cloud)
-    gen_rz_list = [compute_rz(gc) for gc in gen_clouds]
-
-    # Shared bin edges for this tree (from real + all gen)
-    r_arrays = [r_real] + [rz[0] for rz in gen_rz_list]
-    z_arrays = [z_real] + [rz[1] for rz in gen_rz_list]
-    radial_edges, height_edges = compute_bin_edges(r_arrays, z_arrays, n_radial, n_height)
-
-    # Precompute real crown profile
-    real_rz = (r_real, z_real)
-    real_profile = compute_crown_profile(r_real, z_real, height_edges)
-
-    # Evaluate each generated sample
-    pairs = []
-    for gen_cloud, gen_rz, gen_info in zip(gen_clouds, gen_rz_list, gen_infos):
-        cd = chamfer_distance(real_cloud, gen_cloud)
-        hjsd, mae_p50, mae_p75, mae_p98 = compute_shape_metrics(
-            real_rz, gen_rz, radial_edges, height_edges, profile_a=real_profile
-        )
-
-        pairs.append(
-            {
-                "source_tree_id": task["source_tree_id"],
-                "sample_id": gen_info["sample_id"],
-                "species": gen_info["species"],
-                "height_m": gen_info["height_m"],
-                "scan_type": gen_info["scan_type"],
-                "cfg_scale": gen_info["cfg_scale"],
-                "cd": cd,
-                "histogram_jsd": hjsd,
-                "crown_mae_p50": mae_p50,
-                "crown_mae_p75": mae_p75,
-                "crown_mae_p98": mae_p98,
-            }
-        )
-
-    return {
-        "pairs": pairs,
-        "real_cloud": real_cloud,
-        "gen_cloud": gen_clouds[0] if gen_clouds else real_cloud,
-        "source_tree_id": task["source_tree_id"],
-    }
-
-
-def evaluate_all_trees(
-    tasks: list[dict], num_workers: int
-) -> tuple[pd.DataFrame, dict, dict]:
-    """
-    Evaluate all trees in parallel.
-
-    Returns:
-        pair_df: DataFrame with one row per generated sample
-        real_clouds: dict mapping source_tree_id -> np.ndarray
-        gen_clouds: dict mapping source_tree_id -> np.ndarray (one representative)
-    """
-    all_pairs = []
-    real_clouds = {}
-    gen_clouds = {}
-
-    print(f"Evaluating {len(tasks)} trees with {num_workers} workers...")
-    start = time.time()
-
-    with mp.Pool(num_workers) as pool:
-        results = list(
-            tqdm(
-                pool.imap_unordered(evaluate_tree_worker, tasks),
-                total=len(tasks),
-                desc="Per-tree metrics",
-            )
-        )
-
-    for result in results:
-        all_pairs.extend(result["pairs"])
-        real_clouds[result["source_tree_id"]] = result["real_cloud"]
-        gen_clouds[result["source_tree_id"]] = result["gen_cloud"]
-
-    elapsed = time.time() - start
-    print(f"  Completed {len(all_pairs)} pairs in {elapsed:.0f}s")
-
-    pair_df = pd.DataFrame(all_pairs)
-    return pair_df, real_clouds, gen_clouds
-
-
-def aggregate_per_tree(pair_df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate pair-level metrics to tree-level."""
-    agg = (
-        pair_df.groupby("source_tree_id")
-        .agg(
-            species=("species", "first"),
-            height_m=("height_m", "first"),
-            scan_type=("scan_type", "first"),
-            n_samples=("cd", "count"),
-            cd_mean=("cd", "mean"),
-            cd_std=("cd", "std"),
-            cd_median=("cd", "median"),
-            cd_min=("cd", "min"),
-            cd_max=("cd", "max"),
-            hjsd_mean=("histogram_jsd", "mean"),
-            hjsd_std=("histogram_jsd", "std"),
-            hjsd_median=("histogram_jsd", "median"),
-            hjsd_min=("histogram_jsd", "min"),
-            hjsd_max=("histogram_jsd", "max"),
-            crown_mae_p50_mean=("crown_mae_p50", "mean"),
-            crown_mae_p75_mean=("crown_mae_p75", "mean"),
-            crown_mae_p98_mean=("crown_mae_p98", "mean"),
-        )
-        .reset_index()
+    # Compute Chamfer distances in parallel
+    print(f"\nComputing Chamfer distances for {len(pair_keys)} gen pairs...")
+    cd_values = _compute_cd_parallel(
+        real_clouds, gen_clouds, pair_keys, num_workers, "CD (gen)",
     )
-    return agg
+    for row, cd in zip(rows, cd_values):
+        row["chamfer_dist"] = cd
 
+    df_pairs = pd.DataFrame(rows)
+    print(f"\nPair dataframe: {len(df_pairs)} rows, "
+          f"{df_pairs['real_id'].nunique()} unique real trees")
 
-# =============================================================================
-# Baselines (Parallelized)
-# =============================================================================
+    # Build feature dataframes for downstream (W₁, baselines)
+    df_real_feats = pd.DataFrame([
+        {"tree_id": tid, "h_max_cr": r["h_max_cr"],
+         "max_crown_r": r["max_crown_r"], "hcb": r["hcb"],
+         "vert_kde": r["vert_kde"], "hist_2d": r["hist_2d"]}
+        for tid, r in real_feats.items()
+    ]).set_index("tree_id")
 
+    df_gen_feats = pd.DataFrame([
+        {"gen_id": gid, "real_id": gen_id_to_meta[gid]["source_tree_id"],
+         "h_max_cr": r["h_max_cr"],
+         "max_crown_r": r["max_crown_r"], "hcb": r["hcb"]}
+        for gid, r in gen_feats.items()
+        if gid in gen_id_to_meta
+    ]).set_index("gen_id")
 
-def baseline_worker(task: dict) -> dict:
-    """
-    Worker: compute all per-pair metrics between two real point clouds.
-    """
-    max_points = task.get("max_points")
-    n_radial = task.get("histogram_radial_bins", 16)
-    n_height = task.get("histogram_height_bins", 32)
-    rng = np.random.default_rng(task.get("seed", 42))
-
-    cloud_a = load_point_cloud(task["path_a"], max_points=max_points, rng=rng)
-    cloud_b = load_point_cloud(task["path_b"], max_points=max_points, rng=rng)
-
-    cd = chamfer_distance(cloud_a, cloud_b)
-
-    rz_a = compute_rz(cloud_a)
-    rz_b = compute_rz(cloud_b)
-    radial_edges, height_edges = compute_bin_edges(
-        [rz_a[0], rz_b[0]], [rz_a[1], rz_b[1]], n_radial, n_height
-    )
-    hjsd, mae_p50, mae_p75, mae_p98 = compute_shape_metrics(
-        rz_a, rz_b, radial_edges, height_edges
-    )
-
-    return {
-        "species": task["species"],
-        "scan_type": task["scan_type"],
-        "height_bin": task["height_bin"],
-        "label": task["label"],
-        "cd": cd,
-        "histogram_jsd": hjsd,
-        "crown_mae_p50": mae_p50,
-        "crown_mae_p75": mae_p75,
-        "crown_mae_p98": mae_p98,
-    }
-
-
-def build_baseline_tasks(
-    real_metadata: pd.DataFrame,
-    interclass_pairs: int,
-    seed: int,
-    max_points: int | None = None,
-    histogram_radial_bins: int = 16,
-    histogram_height_bins: int = 32,
-) -> list[dict]:
-    """
-    Build baseline task dicts.
-
-    Intra-class: stratified by (species, scan_type, 5m height bin).
-    All C(n,2) pairs for every group with >= 2 trees.
-    Inter-class: random pairs from different species.
-    """
-    rng = np.random.default_rng(seed)
-
-    # Assign height bins
-    real_metadata = real_metadata.copy()
-    real_metadata["height_bin"] = real_metadata["tree_H"].apply(get_height_bin)
-
-    common_task_fields = {
-        "max_points": max_points,
-        "seed": seed,
-        "histogram_radial_bins": histogram_radial_bins,
-        "histogram_height_bins": histogram_height_bins,
-    }
-
-    tasks = []
-
-    # Intra-class: stratified by (species, data_type, height_bin)
-    groups = real_metadata.groupby(["species", "data_type", "height_bin"])
-    n_singleton = 0
-    for (species, scan_type, height_bin), group in groups:
-        rows = list(group.itertuples(index=False))
-        if len(rows) < 2:
-            n_singleton += 1
-            continue
-        for a, b in combinations(range(len(rows)), 2):
-            tasks.append(
-                {
-                    "path_a": rows[a].file_path,
-                    "path_b": rows[b].file_path,
-                    "species": species,
-                    "scan_type": scan_type,
-                    "height_bin": height_bin,
-                    "label": "intra",
-                    **common_task_fields,
-                }
-            )
-
-    # Inter-class: random pairs from different species
-    all_rows = list(real_metadata.itertuples(index=False))
-    for _ in range(interclass_pairs):
-        attempts = 0
-        while attempts < 100:
-            i, j = rng.choice(len(all_rows), size=2, replace=False)
-            if all_rows[i].species != all_rows[j].species:
-                break
-            attempts += 1
-        if attempts >= 100:
-            continue
-        tasks.append(
-            {
-                "path_a": all_rows[i].file_path,
-                "path_b": all_rows[j].file_path,
-                "species": "inter",
-                "scan_type": "mixed",
-                "height_bin": "mixed",
-                "label": "inter",
-                **common_task_fields,
-            }
+    # Add stratification columns to feature dataframes
+    id_to_row = real_meta.set_index("file_id")
+    for col in ["genus", "height_bin"]:
+        df_real_feats[col] = df_real_feats.index.map(
+            lambda x, c=col: id_to_row.loc[x, c] if x in id_to_row.index else "unknown"
+        )
+    for col in ["genus", "height_bin"]:
+        df_gen_feats[col] = df_gen_feats["real_id"].map(
+            lambda x, c=col: id_to_row.loc[x, c] if x in id_to_row.index else "unknown"
         )
 
-    intra_count = sum(1 for t in tasks if t["label"] == "intra")
-    inter_count = sum(1 for t in tasks if t["label"] == "inter")
-    n_groups = sum(1 for _, g in groups if len(g) >= 2)
-    print(
-        f"  {n_groups} stratified groups ({n_singleton} singletons skipped)"
-    )
-    print(
-        f"  Built {intra_count} intra-class + {inter_count} inter-class baseline tasks"
-    )
-    return tasks
+    return df_pairs, df_real_feats, df_gen_feats, real_clouds
 
 
-def compute_baselines(tasks: list[dict], num_workers: int) -> pd.DataFrame:
-    """Compute baseline metrics in parallel."""
-    if not tasks:
-        return pd.DataFrame(
-            columns=["species", "scan_type", "height_bin", "label"] + PAIR_METRICS
-        )
+# ── Baselines ────────────────────────────────────────────────────────────────
 
-    print(f"Computing baselines with {num_workers} workers...")
-    start = time.time()
-
-    with mp.Pool(num_workers) as pool:
-        results = list(
-            tqdm(
-                pool.imap_unordered(baseline_worker, tasks),
-                total=len(tasks),
-                desc="Baselines",
-            )
-        )
-
-    elapsed = time.time() - start
-    print(f"  Completed {len(results)} baseline pairs in {elapsed:.0f}s")
-
-    return pd.DataFrame(results)
-
-
-# =============================================================================
-# 3D Voxel JSD (Stratified)
-# =============================================================================
-
-
-def compute_jsd(
-    real_clouds: list[np.ndarray],
-    gen_clouds: list[np.ndarray],
-    bins: int | None = None,
-) -> float:
-    """
-    Compute Jensen-Shannon Divergence between real and generated point distributions.
-
-    Voxelizes the combined point pool into bins^3 voxels, then computes JSD
-    between the marginal occupancy distributions.
-
-    If bins is None, uses adaptive formula: min(28, int((n_points/10)^(1/3))).
-    """
-    real_all = np.concatenate(real_clouds, axis=0)
-    gen_all = np.concatenate(gen_clouds, axis=0)
-
-    if bins is None:
-        n_points = min(len(real_all), len(gen_all))
-        bins = min(28, int((n_points / 10) ** (1 / 3)))
-        bins = max(2, bins)
-
-    all_points = np.concatenate([real_all, gen_all], axis=0)
-    mins = all_points.min(axis=0)
-    maxs = all_points.max(axis=0)
-    eps = 1e-6
-    edges = [np.linspace(mins[d] - eps, maxs[d] + eps, bins + 1) for d in range(3)]
-
-    hist_real, _ = np.histogramdd(real_all, bins=edges)
-    hist_gen, _ = np.histogramdd(gen_all, bins=edges)
-
-    hist_real = hist_real.flatten().astype(np.float64)
-    hist_gen = hist_gen.flatten().astype(np.float64)
-
-    p = hist_real / (hist_real.sum() + 1e-30)
-    q = hist_gen / (hist_gen.sum() + 1e-30)
-
-    m = 0.5 * (p + q)
-    mask = m > 0
-    kl_pm = np.sum(p[mask] * np.log(p[mask] / m[mask] + 1e-30))
-    kl_qm = np.sum(q[mask] * np.log(q[mask] / m[mask] + 1e-30))
-
-    return float(0.5 * kl_pm + 0.5 * kl_qm)
-
-
-def compute_stratified_jsd(
-    tree_df: pd.DataFrame,
+def build_baselines(
+    df_real: pd.DataFrame,
     real_clouds: dict[str, np.ndarray],
-    gen_clouds_map: dict[str, np.ndarray],
-) -> dict:
+    num_workers: int = 1,
+    n_neighbors: int = 32,
+    seed: int = 42,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build intra-class and inter-class baseline pair dataframes.
+
+    Intra-class: same (genus, height_bin). Inter-class: different genus.
+    Each row has the same columns as df_pairs (minus gen_id).
+    Returns (df_intra, df_inter).
     """
-    Compute 3D voxel JSD stratified by species, scan type, and height bin.
+    rng = np.random.default_rng(seed)
+    all_ids = list(df_real.index)
+
+    def _build(neighbor_map: dict[str, list[str]], label: str) -> pd.DataFrame:
+        rows = []
+        pair_keys = []
+        for tid, neighbors in neighbor_map.items():
+            anchor = df_real.loc[tid]
+            anchor_kde = np.array(anchor["vert_kde"])
+            anchor_hist = np.array(anchor["hist_2d"])
+            for nid in neighbors:
+                if nid not in df_real.index:
+                    continue
+                nb = df_real.loc[nid]
+                pair_keys.append((tid, nid))
+                rows.append({
+                    "anchor_id": tid,
+                    "neighbor_id": nid,
+                    "delta_h_max_cr":    abs(anchor["h_max_cr"]     - nb["h_max_cr"]),
+                    "delta_max_crown_r": abs(anchor["max_crown_r"]  - nb["max_crown_r"]),
+                    "delta_hcb":         abs(anchor["hcb"]          - nb["hcb"]),
+                    "vert_kde_jsd":      jsd(anchor_kde, np.array(nb["vert_kde"])),
+                    "hist_2d_jsd":       jsd(anchor_hist, np.array(nb["hist_2d"])),
+                })
+        # Compute CD in parallel
+        cd_values = _compute_cd_parallel(
+            real_clouds, real_clouds, pair_keys, num_workers,
+            f"CD ({label})",
+        )
+        for row, cd in zip(rows, cd_values):
+            row["chamfer_dist"] = cd
+        df = pd.DataFrame(rows)
+        print(f"  {label}: {len(df)} pairs from {len(neighbor_map)} anchor trees")
+        return df
+
+    # Intra-class neighbors: same (genus, height_bin)
+    intra_map = {}
+    for _, grp in df_real.groupby(["genus", "height_bin"]):
+        ids = list(grp.index)
+        if len(ids) < 2:
+            continue
+        for tid in ids:
+            others = [x for x in ids if x != tid]
+            if len(others) >= n_neighbors:
+                chosen = rng.choice(others, size=n_neighbors, replace=False).tolist()
+            else:
+                chosen = rng.choice(others, size=n_neighbors, replace=True).tolist()
+            intra_map[tid] = chosen
+
+    # Inter-class neighbors: different genus
+    genus_map = df_real["genus"].to_dict()
+    inter_map = {}
+    for tid in all_ids:
+        others = [x for x in all_ids if x != tid and genus_map.get(x) != genus_map.get(tid)]
+        if not others:
+            continue
+        if len(others) >= n_neighbors:
+            chosen = rng.choice(others, size=n_neighbors, replace=False).tolist()
+        else:
+            chosen = rng.choice(others, size=n_neighbors, replace=True).tolist()
+        inter_map[tid] = chosen
+
+    print("Building baselines...")
+    df_intra = _build(intra_map, "Intra-class")
+    df_inter = _build(inter_map, "Inter-class")
+    return df_intra, df_inter
+
+
+# ── Population W₁ ───────────────────────────────────────────────────────────
+
+def compute_population_w1(
+    df_real: pd.DataFrame,
+    df_gen: pd.DataFrame,
+    group_col: str | None = None,
+) -> pd.DataFrame:
+    """W₁ between real and generated marginal distributions per property.
+
+    If group_col is given, computes per stratum. Otherwise global.
+    Returns DataFrame with columns: [group_col], property, display, unit, w1, n_real, n_gen.
     """
-    results = {}
+    rows = []
 
-    def _jsd_for_tids(tids):
-        real = [real_clouds[t] for t in tids if t in real_clouds]
-        gen = [gen_clouds_map[t] for t in tids if t in gen_clouds_map]
-        if len(real) >= 2 and len(gen) >= 2:
-            return compute_jsd(real, gen)
-        return None
+    def _w1_for_group(r_df, g_df, group_label=None):
+        for prop in MORPH_PROPERTIES:
+            vals_r = r_df[prop].dropna().values
+            vals_g = g_df[prop].dropna().values
+            if len(vals_r) < 5 or len(vals_g) < 5:
+                continue
+            w1 = float(wasserstein_distance(vals_r, vals_g))
+            display, unit = MORPH_DISPLAY[prop]
+            row = {"property": prop, "display": display, "unit": unit,
+                   "w1": w1, "n_real": len(vals_r), "n_gen": len(vals_g)}
+            if group_col and group_label is not None:
+                row[group_col] = group_label
+            rows.append(row)
 
-    # Overall
-    all_tids = tree_df["source_tree_id"].tolist()
-    results["overall"] = _jsd_for_tids(all_tids)
+    if group_col is None:
+        _w1_for_group(df_real, df_gen)
+    else:
+        for key, grp_r in df_real.groupby(group_col):
+            try:
+                grp_g = df_gen.groupby(group_col).get_group(key)
+            except KeyError:
+                continue
+            _w1_for_group(grp_r, grp_g, group_label=key)
 
-    # By species
-    results["by_species"] = {}
-    for species, group in tree_df.groupby("species"):
-        val = _jsd_for_tids(group["source_tree_id"].tolist())
-        if val is not None:
-            results["by_species"][species] = val
-
-    # By scan type
-    results["by_scan_type"] = {}
-    for scan_type, group in tree_df.groupby("scan_type"):
-        val = _jsd_for_tids(group["source_tree_id"].tolist())
-        if val is not None:
-            results["by_scan_type"][scan_type] = val
-
-    # By height bin
-    results["by_height_bin"] = {}
-    tree_df_h = tree_df.copy()
-    tree_df_h["height_bin"] = tree_df_h["height_m"].apply(get_height_bin)
-    for hb, group in tree_df_h.groupby("height_bin"):
-        val = _jsd_for_tids(group["source_tree_id"].tolist())
-        if val is not None:
-            results["by_height_bin"][hb] = val
-
-    return results
+    return pd.DataFrame(rows)
 
 
-# =============================================================================
-# Breakdowns
-# =============================================================================
+# ── Table building ───────────────────────────────────────────────────────────
 
+def _median_per_tree(df_pairs: pd.DataFrame) -> pd.DataFrame:
+    """Median of each metric across the K generations per conditioning tree.
 
-def compute_breakdowns(
-    pair_df: pd.DataFrame,
-    tree_df: pd.DataFrame,
-    stratified_jsd: dict,
-) -> dict:
-    """Compute metric breakdowns by species, height, scan type, and CFG scale.
-
-    Merges per-pair metric aggregations with stratified 3D voxel JSD into
-    unified tables per dimension.
+    Returns a DataFrame indexed by real_id with one row per conditioning tree.
+    Downstream tables then take the median of these per-tree medians, so each
+    conditioning tree contributes equally regardless of how many generations
+    survived filtering.
     """
-    breakdowns = {}
+    return df_pairs.groupby("real_id")[METRICS].median()
 
-    tree_agg = dict(
-        n_trees=("source_tree_id", "count"),
-        cd_mean=("cd_mean", "mean"),
-        cd_std=("cd_mean", "std"),
-        hjsd_mean=("hjsd_mean", "mean"),
-        hjsd_std=("hjsd_mean", "std"),
-        crown_mae_p50_mean=("crown_mae_p50_mean", "mean"),
-        crown_mae_p75_mean=("crown_mae_p75_mean", "mean"),
-        crown_mae_p98_mean=("crown_mae_p98_mean", "mean"),
-    )
 
-    # --- By Species ---
-    df = tree_df.groupby("species").agg(**tree_agg).reset_index()
-    jsd_map = stratified_jsd.get("by_species", {})
-    df["voxel_jsd"] = df["species"].map(jsd_map)
-    breakdowns["by_species"] = df
 
-    # --- By Height (5m bins) ---
-    tree_df = tree_df.copy()
-    tree_df["height_bin"] = tree_df["height_m"].apply(get_height_bin)
-    df = tree_df.groupby("height_bin", observed=True).agg(**tree_agg).reset_index()
-    jsd_map = stratified_jsd.get("by_height_bin", {})
-    df["voxel_jsd"] = df["height_bin"].map(jsd_map)
-    breakdowns["by_height"] = df
+def _format_val(v, fmt=".4f"):
+    return f"{v:{fmt}}" if pd.notna(v) else "—"
 
-    # --- By Scan Type ---
-    df = tree_df.groupby("scan_type").agg(**tree_agg).reset_index()
-    jsd_map = stratified_jsd.get("by_scan_type", {})
-    df["voxel_jsd"] = df["scan_type"].map(jsd_map)
-    breakdowns["by_scan_type"] = df
 
-    # --- By CFG Scale (pair-level, no voxel JSD) ---
-    if "cfg_scale" in pair_df.columns:
-        cfg_bins = np.arange(1.0, 5.0, 0.5)
-        cfg_labels = [f"{b:.1f}-{b + 0.5:.1f}" for b in cfg_bins[:-1]]
-        pair_df = pair_df.copy()
-        pair_df["cfg_bin"] = pd.cut(
-            pair_df["cfg_scale"], bins=cfg_bins, labels=cfg_labels, right=False
+def build_table_1(
+    df_pairs: pd.DataFrame,
+    df_intra: pd.DataFrame,
+    df_inter: pd.DataFrame,
+    w1_global: pd.DataFrame,
+) -> str:
+    """Table 1: Global summary.
+
+    For each metric: mean of per-tree medians for gen / intra / inter.
+    Plus population W₁.
+    """
+    # Per-tree medians, then mean across trees
+    gen_vals = _median_per_tree(df_pairs).mean()
+    intra_vals = df_intra.groupby("anchor_id")[METRICS].median().mean()
+    inter_vals = df_inter.groupby("anchor_id")[METRICS].median().mean()
+
+    lines = []
+    lines.append("TABLE 1: GLOBAL SUMMARY")
+    lines.append("=" * 100)
+
+    # Part A: Conditioning fidelity — mean of medians
+    lines.append("")
+    lines.append("(a) Conditioning fidelity — mean of per-tree medians")
+    lines.append("─" * 100)
+    header = f"  {'Metric':<35s} {'Gen':>8s} {'Intra':>8s} {'Inter':>8s}"
+    lines.append(header)
+    lines.append("─" * 100)
+
+    for m in METRICS:
+        display, unit = METRIC_DISPLAY[m]
+        label = f"{display} ({unit})" if unit else display
+        g = gen_vals[m]
+        i = intra_vals[m]
+        x = inter_vals[m]
+        lines.append(
+            f"  {label:<35s} {_format_val(g):>8s} {_format_val(i):>8s} "
+            f"{_format_val(x):>8s}"
         )
-        pair_agg = dict(
-            n_pairs=("cd", "count"),
-            cd_mean=("cd", "mean"),
-            cd_std=("cd", "std"),
-            hjsd_mean=("histogram_jsd", "mean"),
-            hjsd_std=("histogram_jsd", "std"),
-            crown_mae_p50_mean=("crown_mae_p50", "mean"),
-            crown_mae_p75_mean=("crown_mae_p75", "mean"),
-            crown_mae_p98_mean=("crown_mae_p98", "mean"),
+    lines.append("─" * 100)
+
+    # Part B: Population distributions
+    lines.append("")
+    lines.append("(b) Population distributions — W₁ distance (real vs generated)")
+    lines.append("─" * 72)
+    header = f"  {'Property':<35s} {'W₁':>10s} {'Unit':>6s} {'n_real':>7s} {'n_gen':>7s}"
+    lines.append(header)
+    lines.append("─" * 72)
+    for _, row in w1_global.iterrows():
+        lines.append(
+            f"  {row['display']:<35s} {row['w1']:>10.4f} {row['unit']:>6s} "
+            f"{int(row['n_real']):>7d} {int(row['n_gen']):>7d}"
         )
-        breakdowns["by_cfg"] = (
-            pair_df.groupby("cfg_bin", observed=True).agg(**pair_agg).reset_index()
-        )
+    lines.append("─" * 72)
 
-    return breakdowns
+    return "\n".join(lines)
 
 
-# =============================================================================
-# Output / Reporting
-# =============================================================================
+def build_stratified_table(
+    df_pairs: pd.DataFrame,
+    df_real_feats: pd.DataFrame,
+    w1_df: pd.DataFrame,
+    group_col: str,
+    title: str,
+) -> str:
+    """Tables 2/3: By genus or height bin.
 
+    Two sub-tables per stratum:
+      (a) Conditioning fidelity — gen mean-of-medians for all 6 metrics.
+      (b) Population W₁ per morphological property.
+    """
+    groups = sorted(df_pairs[group_col].dropna().unique(),
+                    key=lambda x: (HEIGHT_BIN_LABELS.index(x)
+                                   if x in HEIGHT_BIN_LABELS else 999, x))
 
-def _summarize_metric(series: pd.Series) -> dict:
-    """Compute summary stats for a single metric column."""
-    return {
-        "mean": float(series.mean()),
-        "std": float(series.std()),
-        "median": float(series.median()),
-        "n": int(len(series)),
+    # W₁ lookup
+    w1_lookup = {}
+    if not w1_df.empty and group_col in w1_df.columns:
+        for _, row in w1_df.iterrows():
+            w1_lookup[(row[group_col], row["property"])] = row["w1"]
+
+    # Short names for metrics
+    metric_short = {
+        "chamfer_dist": "CD",
+        "delta_h_max_cr": "Δ HmCR",
+        "delta_max_crown_r": "Δ CrR",
+        "delta_hcb": "Δ HCB",
+        "vert_kde_jsd": "V-KDE",
+        "hist_2d_jsd": "H2D",
     }
 
+    lines = []
+    lines.append(title)
+    lines.append("=" * 100)
 
-def _summarize_baselines(baseline_df: pd.DataFrame) -> dict:
-    """Build baselines summary dict from raw baseline DataFrame."""
-    intra_df = baseline_df[baseline_df["label"] == "intra"]
-    inter_df = baseline_df[baseline_df["label"] == "inter"]
+    # (a) Conditioning fidelity — mean of medians
+    lines.append("")
+    lines.append("(a) Conditioning fidelity — mean of per-tree medians")
+    lines.append("─" * 100)
 
-    summary = {"intra": {}, "inter": {}}
+    h_parts = [f"  {group_col:<15s} {'n':>5s}"]
+    for m in METRICS:
+        h_parts.append(f"{metric_short[m]:>10s}")
+    lines.append("".join(h_parts))
+    lines.append("─" * 100)
 
-    # Intra: overall + by stratification dimension
-    if len(intra_df) > 0:
-        summary["intra"]["overall"] = {
-            m: _summarize_metric(intra_df[m]) for m in PAIR_METRICS
-        }
-        for dim in ["species", "scan_type", "height_bin"]:
-            summary["intra"][f"by_{dim}"] = {}
-            for val, grp in intra_df.groupby(dim):
-                summary["intra"][f"by_{dim}"][str(val)] = {
-                    m: _summarize_metric(grp[m]) for m in PAIR_METRICS
-                }
+    for g in groups:
+        g_pairs = df_pairs[df_pairs[group_col] == g]
+        n = g_pairs["real_id"].nunique()
+        gen_vals = _median_per_tree(g_pairs).mean()
 
-    # Inter: overall only
-    if len(inter_df) > 0:
-        summary["inter"]["overall"] = {
-            m: _summarize_metric(inter_df[m]) for m in PAIR_METRICS
-        }
+        parts = [f"  {str(g)[:15]:<15s} {n:>5d}"]
+        for m in METRICS:
+            parts.append(f"{_format_val(gen_vals.get(m, float('nan'))):>10s}")
+        lines.append("".join(parts))
+    lines.append("─" * 100)
 
-    return summary
+    # (b) Population W₁
+    lines.append("")
+    lines.append("(b) Population W₁ (real vs generated)")
+    lines.append("─" * 100)
 
+    w1_h_parts = [f"  {group_col:<15s} {'n':>5s}"]
+    for prop in MORPH_PROPERTIES:
+        _, unit = MORPH_DISPLAY[prop]
+        short = {"h_max_cr": "W₁ HmCR", "max_crown_r": "W₁ CrR", "hcb": "W₁ HCB"}[prop]
+        w1_h_parts.append(f"{short + (' (' + unit + ')' if unit else ''):>16s}")
+    lines.append("".join(w1_h_parts))
+    lines.append("─" * 100)
+
+    for g in groups:
+        n = df_pairs[df_pairs[group_col] == g]["real_id"].nunique()
+        parts = [f"  {str(g)[:15]:<15s} {n:>5d}"]
+        for prop in MORPH_PROPERTIES:
+            w1 = w1_lookup.get((g, prop), float("nan"))
+            parts.append(f"{_format_val(w1, '.2f'):>16s}")
+        lines.append("".join(parts))
+    lines.append("─" * 100)
+
+    return "\n".join(lines)
+
+
+# ── Save and print ───────────────────────────────────────────────────────────
 
 def save_results(
-    pair_df: pd.DataFrame,
-    tree_df: pd.DataFrame,
-    baseline_df: pd.DataFrame,
-    stratified_jsd: dict,
-    breakdowns: dict,
     output_dir: Path,
+    df_pairs: pd.DataFrame,
+    df_real_feats: pd.DataFrame,
+    df_gen_feats: pd.DataFrame,
+    tables: dict[str, str],
+    w1_global: pd.DataFrame,
+    w1_genus: pd.DataFrame,
+    w1_height: pd.DataFrame,
+    run_args: dict | None = None,
 ):
-    """Save all evaluation results to the output directory."""
-    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    breakdowns_dir = output_dir / "breakdowns"
-    breakdowns_dir.mkdir(parents=True, exist_ok=True)
 
-    # Per-pair CSV
-    pair_csv = output_dir / "per_pair.csv"
-    pair_df.to_csv(pair_csv, index=False)
-    print(f"  Saved {len(pair_df)} pairs to {pair_csv}")
+    df_pairs.to_csv(output_dir / "df_pairs.csv", index=False)
+    print(f"  Saved df_pairs.csv ({len(df_pairs)} rows)")
 
-    # Per-tree CSV
-    tree_csv = output_dir / "per_tree.csv"
-    tree_df.to_csv(tree_csv, index=False)
-    print(f"  Saved {len(tree_df)} trees to {tree_csv}")
+    # Save feature dataframes (drop array columns for CSV)
+    scalar_cols = [c for c in df_real_feats.columns
+                   if c not in ("vert_kde", "hist_2d")]
+    df_real_feats[scalar_cols].to_csv(output_dir / "df_real_features.csv")
+    df_gen_feats.to_csv(output_dir / "df_gen_features.csv")
+    print(f"  Saved feature CSVs (real: {len(df_real_feats)}, gen: {len(df_gen_feats)})")
 
-    # Baselines CSV
-    baselines_csv = output_dir / "baselines.csv"
-    baseline_df.to_csv(baselines_csv, index=False)
-    print(f"  Saved {len(baseline_df)} baseline pairs to {baselines_csv}")
+    for name, w1_df in [("w1_global", w1_global), ("w1_genus", w1_genus),
+                        ("w1_height", w1_height)]:
+        if not w1_df.empty:
+            w1_df.to_csv(output_dir / f"{name}.csv", index=False)
 
-    # Baselines summary JSON
-    baselines_summary = _summarize_baselines(baseline_df)
-    baselines_summary_path = output_dir / "baselines_summary.json"
-    with open(baselines_summary_path, "w") as f:
-        json.dump(baselines_summary, f, indent=2)
-    print(f"  Saved baselines summary to {baselines_summary_path}")
-
-    # Stratified JSD JSON
-    jsd_path = output_dir / "stratified_jsd.json"
-    with open(jsd_path, "w") as f:
-        json.dump(stratified_jsd, f, indent=2)
-    print(f"  Saved stratified JSD to {jsd_path}")
-
-    # Breakdowns CSVs
-    for name, df in breakdowns.items():
-        csv_path = breakdowns_dir / f"{name}.csv"
-        df.to_csv(csv_path, index=False)
-        print(f"  Saved {name} breakdown to {csv_path}")
+    # Save formatted tables as text
+    tables_dir = output_dir / "tables"
+    tables_dir.mkdir(exist_ok=True)
+    for name, text in tables.items():
+        (tables_dir / f"{name}.txt").write_text(text)
 
     # Summary JSON
     summary = {
-        "per_pair": {
-            "n_pairs": len(pair_df),
-            **{m: _summarize_metric(pair_df[m]) for m in PAIR_METRICS},
-        },
-        "per_tree": {
-            "n_trees": len(tree_df),
-            "cd_mean_of_means": float(tree_df["cd_mean"].mean()),
-            "cd_std_of_means": float(tree_df["cd_mean"].std()),
-            "hjsd_mean_of_means": float(tree_df["hjsd_mean"].mean()),
-            "hjsd_std_of_means": float(tree_df["hjsd_mean"].std()),
-        },
-        "baselines": baselines_summary,
-        "stratified_jsd": stratified_jsd,
+        "eval_version": 3,
+        "n_pairs": len(df_pairs),
+        "n_real_trees": df_pairs["real_id"].nunique(),
+        "n_gen_trees": len(df_pairs),
     }
-
-    summary_path = output_dir / "evaluation_summary.json"
-    with open(summary_path, "w") as f:
+    if run_args:
+        summary["args"] = run_args
+    with open(output_dir / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
-    print(f"  Saved summary to {summary_path}")
+    print(f"  Saved summary.json")
 
 
-def _print_breakdown_table(df: pd.DataFrame, key_col: str, key_width: int = 25):
-    """Print a unified breakdown table with all metrics."""
-    cols = ["cd_mean", "hjsd_mean", "crown_mae_p50_mean", "crown_mae_p75_mean", "crown_mae_p98_mean"]
-    has_voxel = "voxel_jsd" in df.columns
-
-    header = f"  {'':>{key_width}s}  {'N':>5s}  {'CD':>8s}  {'HJSD':>8s}  {'CrP50':>8s}  {'CrP75':>8s}  {'CrP98':>8s}"
-    if has_voxel:
-        header += f"  {'VoxJSD':>8s}"
-    print(header)
-    print("  " + "-" * (len(header) - 2))
-
-    for _, row in df.iterrows():
-        n = int(row.get("n_trees", row.get("n_pairs", 0)))
-        line = f"  {str(row[key_col]):>{key_width}s}  {n:>5d}"
-        for c in cols:
-            val = row.get(c, float("nan"))
-            line += f"  {val:>8.4f}" if pd.notna(val) else f"  {'--':>8s}"
-        if has_voxel:
-            val = row.get("voxel_jsd", float("nan"))
-            line += f"  {val:>8.4f}" if pd.notna(val) else f"  {'--':>8s}"
-        print(line)
-
-
-def print_results(
-    pair_df: pd.DataFrame,
-    tree_df: pd.DataFrame,
-    baseline_df: pd.DataFrame,
-    stratified_jsd: dict,
-    breakdowns: dict,
-):
-    """Print formatted evaluation results."""
-    print("\n" + "=" * 70)
-    print("EVALUATION RESULTS")
-    print("=" * 70)
-
-    # Per-pair
-    print(f"\nPer-pair metrics (n={len(pair_df)} pairs):")
-    for m in PAIR_METRICS:
-        s = pair_df[m]
-        print(f"  {m:20s}  mean={s.mean():.6f}  std={s.std():.6f}  median={s.median():.6f}")
-
-    # Baselines
-    intra_df = baseline_df[baseline_df["label"] == "intra"]
-    inter_df = baseline_df[baseline_df["label"] == "inter"]
-
-    if len(intra_df) > 0:
-        print(f"\nIntra-class baselines (n={len(intra_df)}):")
-        for m in PAIR_METRICS:
-            s = intra_df[m]
-            print(f"  {m:20s}  mean={s.mean():.6f}  std={s.std():.6f}")
-
-    if len(inter_df) > 0:
-        print(f"\nInter-class baselines (n={len(inter_df)}):")
-        for m in PAIR_METRICS:
-            s = inter_df[m]
-            print(f"  {m:20s}  mean={s.mean():.6f}  std={s.std():.6f}")
-
-    # Paper Table 1: Global Summary
-    if len(intra_df) > 0:
-        print(f"\n{'='*70}")
-        print("TABLE 1: GLOBAL SUMMARY")
-        print(f"{'='*70}")
-        header = f"{'Metric':20s} | {'Gen vs Real':>22s} | {'Intra Baseline':>22s} | {'Ratio':>6s}"
-        print(header)
-        print("-" * len(header))
-        for m in PAIR_METRICS:
-            gen_val = pair_df[m].mean()
-            gen_std = pair_df[m].std()
-            base_val = intra_df[m].mean()
-            base_std = intra_df[m].std()
-            ratio = gen_val / base_val if base_val > 0 else float("nan")
-            print(
-                f"{m:20s} | {gen_val:9.6f} +/- {gen_std:8.6f} | "
-                f"{base_val:9.6f} +/- {base_std:8.6f} | {ratio:6.2f}"
-            )
-        if stratified_jsd.get("overall") is not None:
-            print(f"{'voxel_jsd':20s} | {stratified_jsd['overall']:9.6f}{'':>15s} |{'':>24s} |{'':>6s}")
-
-    # Stratified breakdowns
-    print(f"\n{'='*70}")
-    print("TABLE 2: STRATIFIED BREAKDOWNS")
-    print(f"{'='*70}")
-
-    if "by_species" in breakdowns:
-        print("\n  By Species:")
-        _print_breakdown_table(breakdowns["by_species"], "species", 25)
-
-    if "by_scan_type" in breakdowns:
-        print("\n  By Scan Type:")
-        _print_breakdown_table(breakdowns["by_scan_type"], "scan_type", 10)
-
-    if "by_height" in breakdowns:
-        print("\n  By Height:")
-        _print_breakdown_table(breakdowns["by_height"], "height_bin", 10)
-
-    if "by_cfg" in breakdowns:
-        print("\n  By CFG Scale:")
-        _print_breakdown_table(breakdowns["by_cfg"], "cfg_bin", 10)
-
-    print("\n" + "=" * 70)
-
-
-# =============================================================================
-# Main Entry Point
-# =============================================================================
-
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate generated tree point clouds against real trees"
+        description="TreeFlow evaluation v3: stem-tracker morphological metrics"
     )
-
-    parser.add_argument(
-        "--experiment_name",
-        type=str,
-        required=True,
-        help="Name of the experiment (e.g., 'transformer-8-512-4096')",
-    )
-    parser.add_argument(
-        "--data_path",
-        type=str,
-        default="data/preprocessed-4096",
-        help="Path to preprocessed dataset directory",
-    )
-    parser.add_argument(
-        "--experiments_dir",
-        type=str,
-        default="experiments",
-        help="Base directory containing experiments",
-    )
-    parser.add_argument(
-        "--max_points",
-        type=int,
-        default=4096,
-        help="Downsample real point clouds to this many points",
-    )
-    parser.add_argument(
-        "--num_workers",
-        type=int,
-        default=40,
-        help="Number of parallel workers",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducibility",
-    )
-    parser.add_argument(
-        "--interclass_pairs",
-        type=int,
-        default=200,
-        help="Number of inter-class baseline pairs",
-    )
-    parser.add_argument(
-        "--histogram_radial_bins",
-        type=int,
-        default=16,
-        help="Number of radial bins for 2D histogram JSD",
-    )
-    parser.add_argument(
-        "--histogram_height_bins",
-        type=int,
-        default=32,
-        help="Number of height bins for 2D histogram JSD",
-    )
-
+    parser.add_argument("--experiment_name", type=str, required=True)
+    parser.add_argument("--data_path", type=str, default="data/preprocessed-4096")
+    parser.add_argument("--experiments_dir", type=str, default="experiments")
+    parser.add_argument("--max_points", type=int, default=4096)
+    parser.add_argument("--num_workers", type=int, default=40)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    # Resolve paths
-    experiments_dir = Path(args.experiments_dir)
-    experiment_dir = experiments_dir / args.experiment_name
-    if not experiment_dir.exists():
-        raise FileNotFoundError(f"Experiment not found: {experiment_dir}")
-
+    experiment_dir = Path(args.experiments_dir) / args.experiment_name
     data_path = Path(args.data_path)
     zarr_dir = experiment_dir / "samples" / "zarr"
-    if not zarr_dir.exists():
-        raise FileNotFoundError(f"Generated samples not found: {zarr_dir}")
-
     output_dir = experiment_dir / "samples" / "evaluation"
 
+    for p, name in [(experiment_dir, "Experiment"), (zarr_dir, "Samples")]:
+        if not p.exists():
+            raise FileNotFoundError(f"{name} not found: {p}")
+
     print(f"Experiment: {args.experiment_name}")
-    print(f"Data path: {data_path}")
-    print(f"Generated samples: {zarr_dir}")
+    print(f"Data: {data_path}")
+    print(f"Samples: {zarr_dir}")
     print(f"Output: {output_dir}")
     print(f"Workers: {args.num_workers}")
-    print(f"Histogram bins: {args.histogram_radial_bins} radial x {args.histogram_height_bins} height")
     print()
 
-    # =========================================================================
-    # 1. Load Metadata
-    # =========================================================================
+    t_start = time.time()
 
-    print("=" * 60)
-    print("LOADING METADATA")
-    print("=" * 60)
+    # 1. Load metadata
+    real_meta, gen_meta = load_metadata(data_path, experiment_dir)
 
-    gen_metadata = load_generated_metadata(experiment_dir)
-    real_metadata = load_real_metadata(data_path)
-
-    # =========================================================================
-    # 2. Per-Tree Evaluation
-    # =========================================================================
-
-    print("\n" + "=" * 60)
-    print("PER-TREE EVALUATION (CD + Histogram JSD + Crown MAE)")
-    print("=" * 60)
-
-    tasks = build_tree_tasks(
-        gen_metadata,
-        real_metadata,
-        zarr_dir,
-        args.seed,
-        max_points=args.max_points,
-        histogram_radial_bins=args.histogram_radial_bins,
-        histogram_height_bins=args.histogram_height_bins,
+    # 2. Extract features and build pair dataframe
+    df_pairs, df_real_feats, df_gen_feats, real_clouds = build_pair_dataframe(
+        real_meta, gen_meta, zarr_dir,
+        max_points=args.max_points, num_workers=args.num_workers, seed=args.seed,
     )
-    pair_df, real_clouds, gen_clouds_map = evaluate_all_trees(tasks, args.num_workers)
-
-    if pair_df.empty:
-        print("ERROR: No valid pairs found. Check data paths.")
+    if df_pairs.empty:
+        print("ERROR: No valid pairs. Check data paths.")
         return
 
-    tree_df = aggregate_per_tree(pair_df)
-    print(f"  {len(pair_df)} pairs across {len(tree_df)} trees")
-
-    # =========================================================================
-    # 3. Stratified Baselines
-    # =========================================================================
-
-    print("\n" + "=" * 60)
-    print("BASELINES (Stratified Intra-class + Inter-class)")
-    print("=" * 60)
-
-    baseline_tasks = build_baseline_tasks(
-        real_metadata,
-        interclass_pairs=args.interclass_pairs,
-        seed=args.seed + 1000,
-        max_points=args.max_points,
-        histogram_radial_bins=args.histogram_radial_bins,
-        histogram_height_bins=args.histogram_height_bins,
+    # 3. Baselines
+    print()
+    df_intra, df_inter = build_baselines(
+        df_real_feats, real_clouds,
+        num_workers=args.num_workers, seed=args.seed + 1000,
     )
-    baseline_df = compute_baselines(baseline_tasks, args.num_workers)
 
-    # =========================================================================
-    # 4. Stratified 3D Voxel JSD
-    # =========================================================================
+    # 4. Population W₁
+    print("\nComputing population W₁...")
+    w1_global = compute_population_w1(df_real_feats, df_gen_feats)
+    w1_genus  = compute_population_w1(df_real_feats, df_gen_feats, group_col="genus")
+    w1_height = compute_population_w1(df_real_feats, df_gen_feats, group_col="height_bin")
 
-    print("\n" + "=" * 60)
-    print("STRATIFIED 3D VOXEL JSD")
-    print("=" * 60)
+    # 5. Build tables
+    print("\nBuilding tables...")
+    # Add group columns to df_pairs for stratified tables
+    id_to_genus = df_real_feats["genus"].to_dict()
+    id_to_hbin  = df_real_feats["height_bin"].to_dict()
+    if "genus" not in df_pairs.columns:
+        df_pairs["genus"] = df_pairs["real_id"].map(id_to_genus)
+    if "height_bin" not in df_pairs.columns:
+        df_pairs["height_bin"] = df_pairs["real_id"].map(id_to_hbin)
 
-    # gen_clouds_map already populated from per-tree evaluation (one representative per tree)
-    stratified_jsd = compute_stratified_jsd(tree_df, real_clouds, gen_clouds_map)
-    print(f"  Overall JSD: {stratified_jsd.get('overall', 'N/A')}")
-    print(f"  Species groups: {len(stratified_jsd.get('by_species', {}))}")
-    print(f"  Scan type groups: {len(stratified_jsd.get('by_scan_type', {}))}")
-    print(f"  Height bin groups: {len(stratified_jsd.get('by_height_bin', {}))}")
+    table_1 = build_table_1(df_pairs, df_intra, df_inter, w1_global)
+    table_2 = build_stratified_table(
+        df_pairs, df_real_feats, w1_genus,
+        "genus", "TABLE 2: BY GENUS",
+    )
+    table_3 = build_stratified_table(
+        df_pairs, df_real_feats, w1_height,
+        "height_bin", "TABLE 3: BY HEIGHT BIN",
+    )
 
-    # =========================================================================
-    # 5. Breakdowns
-    # =========================================================================
+    tables = {"table_1_global": table_1, "table_2_genus": table_2,
+              "table_3_height": table_3}
 
-    print("\n" + "=" * 60)
-    print("BREAKDOWNS")
-    print("=" * 60)
+    # 7. Print
+    for t in tables.values():
+        print()
+        print(t)
 
-    breakdowns = compute_breakdowns(pair_df, tree_df, stratified_jsd)
+    # 8. Save
+    print(f"\nSaving results to {output_dir}...")
+    save_results(output_dir, df_pairs, df_real_feats, df_gen_feats,
+                 tables, w1_global, w1_genus, w1_height,
+                 run_args=vars(args))
 
-    # =========================================================================
-    # 6. Save and Report
-    # =========================================================================
-
-    print("\n" + "=" * 60)
-    print("SAVING RESULTS")
-    print("=" * 60)
-
-    save_results(pair_df, tree_df, baseline_df, stratified_jsd, breakdowns, output_dir)
-    print_results(pair_df, tree_df, baseline_df, stratified_jsd, breakdowns)
-
-    print("Evaluation complete!")
+    elapsed = time.time() - t_start
+    print(f"\nDone in {elapsed:.1f}s ({elapsed / 60:.1f} min)")
 
 
 if __name__ == "__main__":

@@ -13,10 +13,15 @@ from pathlib import Path
 from scipy.ndimage import gaussian_filter
 from matplotlib.ticker import MaxNLocator
 
-
 from numpy.polynomial import Polynomial
 
 from dataset import create_datasets
+from stem_tracker import (
+    find_trunk_base,
+    track_spine_pass,
+    compute_rz_spine,
+    compute_rs_spine,
+)
 
 DOWNSAMPLE_POINTS = 16384
 
@@ -696,7 +701,7 @@ def create_figure_2(
     # Label for source distribution
     ax_c.text(
         1.5,
-        3.2,
+        3.6,
         r"$X_0$ (Source)" + "\n" + r"$\mathcal{N}(0, I)$",
         fontsize=12,
         color="#1565C0",
@@ -708,7 +713,7 @@ def create_figure_2(
     # Label for target distribution
     ax_c.text(
         7.5,
-        3.2,
+        3.6,
         r"$X_1$ (Target)" + "\n" + r"$p_{\mathrm{data}}$",
         fontsize=12,
         color="#C62828",
@@ -718,8 +723,8 @@ def create_figure_2(
     )
 
     # Axis labels
-    ax_c.set_xlabel("X-axis", fontsize=12)
-    ax_c.set_ylabel("Y-axis", fontsize=12)
+    # ax_c.set_xlabel("X-axis", fontsize=12)
+    # ax_c.set_ylabel("Y-axis", fontsize=12)
 
     # Set axis limits for horizontal layout
     ax_c.set_xlim(-0.5, 9.5)
@@ -759,74 +764,15 @@ def create_figure_2(
     fig_c.patch.set_facecolor("white")
     ax_c.set_facecolor("white")
 
+    ax_c.set_xticks([])
+    ax_c.set_yticks([])
+
     plt.tight_layout()
-    fig_c.savefig(
-        output_dir / "figure_2_a.png", format="png", bbox_inches="tight", dpi=300
-    )
+    fig_c.savefig(output_dir / "figure_2_a.pdf", bbox_inches="tight", dpi=300)
     plt.close(fig_c)
-    print(f"  Saved: {output_dir}/figure_2_a.png")
+    print(f"  Saved: {output_dir}/figure_2_a.pdf")
 
     print(f"\nAll figures saved to {output_dir}/")
-
-
-def _select_median_tree(
-    per_pair_csv: str, metric: str, min_height: float = 0.0
-) -> tuple[str, float]:
-    """Select the tree whose median metric value is closest to the global median.
-
-    Args:
-        min_height: Minimum tree height in meters to consider.
-
-    Returns (source_tree_id, median_value).
-    """
-    pair_df = pd.read_csv(per_pair_csv)
-    if min_height > 0:
-        pair_df = pair_df[pair_df["height_m"] >= min_height]
-    global_median = pair_df[metric].median()
-    tree_medians = pair_df.groupby("source_tree_id")[metric].median()
-    best_tree = (tree_medians - global_median).abs().idxmin()
-    return best_tree, float(tree_medians[best_tree])
-
-
-def _load_pair_clouds(
-    source_tree_id: str,
-    per_pair_csv: str,
-    data_path: str,
-    experiment_dir: str,
-    metric: str,
-    seed: int = 42,
-) -> tuple[np.ndarray, np.ndarray, dict]:
-    """Load real and generated point clouds for a specific tree.
-
-    Picks the generated sample whose metric value is closest to the tree's
-    median for that metric (most representative single pair).
-
-    Returns (real_cloud, gen_cloud, pair_info).
-    """
-    import zarr
-
-    pair_df = pd.read_csv(per_pair_csv)
-    tree_pairs = pair_df[pair_df["source_tree_id"] == source_tree_id]
-
-    # Pick the sample closest to this tree's median
-    tree_median = tree_pairs[metric].median()
-    best_idx = (tree_pairs[metric] - tree_median).abs().idxmin()
-    pair_info = tree_pairs.loc[best_idx].to_dict()
-
-    # Load real cloud
-    data_path = Path(data_path)
-    tree_id_str = f"{int(source_tree_id):05d}"
-    real_path = data_path / f"{tree_id_str}.zarr"
-    real_cloud = zarr.load(str(real_path)).astype(np.float32)
-
-    # Load generated cloud
-    experiment_dir = Path(experiment_dir)
-    gen_meta = pd.read_csv(experiment_dir / "samples" / "samples_metadata.csv")
-    sample_row = gen_meta[gen_meta["sample_id"] == pair_info["sample_id"]].iloc[0]
-    gen_path = experiment_dir / "samples" / "zarr" / sample_row["sample_file"]
-    gen_cloud = zarr.load(str(gen_path)).astype(np.float32)
-
-    return real_cloud, gen_cloud, pair_info
 
 
 def _compute_rz(cloud: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -840,1161 +786,6 @@ def _compute_rz(cloud: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     z = centered @ axis
     r = np.linalg.norm(centered - np.outer(z, axis), axis=1)
     return r, z
-
-
-def create_figure_svd_axes(
-    experiment_dir: str = "experiments/transformer-8-512-4096",
-    data_path: str = "./data/preprocessed-4096",
-    output_dir: str = "figures",
-    seed: int = 42,
-):
-    """
-    Create a figure showing the SVD-based coordinate system on a real tree.
-
-    Shows a 3D point cloud with the three SVD axes drawn from the centroid,
-    plus a translucent disc in the plane of axes 2-3 to illustrate the
-    radial (r) vs height (z) decomposition used by HJSD and CrMAE.
-    Uses the same tree selected for the HJSD figure for visual continuity.
-    """
-    import zarr
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(exist_ok=True)
-    eval_dir = Path(experiment_dir) / "samples" / "evaluation"
-    per_pair_csv = str(eval_dir / "per_pair.csv")
-
-    # Use same tree as HJSD figure
-    tree_id, _ = _select_median_tree(per_pair_csv, "histogram_jsd", min_height=10.0)
-
-    # Load real cloud
-    data_path = Path(data_path)
-    tree_id_str = f"{int(tree_id):05d}"
-    real_path = data_path / f"{tree_id_str}.zarr"
-    cloud = zarr.load(str(real_path)).astype(np.float32)
-
-    # Get species from per_pair
-    pair_df = pd.read_csv(per_pair_csv)
-    tree_rows = pair_df[pair_df["source_tree_id"] == tree_id]
-    species = tree_rows.iloc[0]["species"]
-    height_m = float(tree_rows.iloc[0]["height_m"])
-
-    print(
-        f"SVD axes figure: tree {tree_id}, {species}, H={height_m:.1f}m, "
-        f"{len(cloud)} points"
-    )
-
-    # SVD decomposition
-    centroid = cloud.mean(axis=0)
-    centered = cloud - centroid
-    _, S, Vt = np.linalg.svd(centered, full_matrices=False)
-    axes_svd = Vt[:3].copy()
-    # Ensure axis 1 (trunk) points upward
-    if axes_svd[0, 2] < 0:
-        axes_svd[0] = -axes_svd[0]
-
-    # Project for coloring by height along trunk
-    z_proj = centered @ axes_svd[0]
-
-    # Subsample for plotting
-    rng = np.random.default_rng(seed)
-    n_show = min(4000, len(cloud))
-    idx = rng.choice(len(cloud), n_show, replace=False)
-
-    # --- Plot ---
-    fig = plt.figure(figsize=(7, 8))
-    ax = fig.add_subplot(111, projection="3d")
-
-    # Point cloud colored by height along trunk axis
-    pts = cloud[idx]
-    colors_z = z_proj[idx]
-    sc = ax.scatter(
-        pts[:, 0],
-        pts[:, 1],
-        pts[:, 2],
-        c=colors_z,
-        cmap="viridis",
-        s=1.5,
-        alpha=0.4,
-        rasterized=True,
-    )
-
-    # Draw SVD axes as arrows from centroid
-    axis_colors = ["#d62728", "#2ca02c", "#1f77b4"]  # red, green, blue
-    axis_labels = [
-        "Axis 1 (trunk / $z$)",
-        "Axis 2",
-        "Axis 3",
-    ]
-    # Scale arrows to ~40% of cloud extent for visibility
-    cloud_extent = np.linalg.norm(centered, axis=1).max()
-    arrow_len = cloud_extent * 0.45
-
-    for i in range(3):
-        direction = axes_svd[i] * arrow_len
-        ax.quiver(
-            centroid[0],
-            centroid[1],
-            centroid[2],
-            direction[0],
-            direction[1],
-            direction[2],
-            color=axis_colors[i],
-            linewidth=3,
-            arrow_length_ratio=0.08,
-            zorder=10,
-        )
-        # Label at arrow tip
-        tip = centroid + direction * 1.12
-        ax.text(
-            tip[0],
-            tip[1],
-            tip[2],
-            axis_labels[i],
-            color=axis_colors[i],
-            fontsize=10,
-            fontweight="bold",
-            zorder=11,
-        )
-
-    # Draw translucent disc in the plane of axes 2-3 at the centroid
-    disc_r = arrow_len * 0.55
-    theta = np.linspace(0, 2 * np.pi, 60)
-    disc_pts = (
-        centroid[None, :]
-        + np.outer(np.cos(theta), axes_svd[1] * disc_r)
-        + np.outer(np.sin(theta), axes_svd[2] * disc_r)
-    )
-    # Fill as polygon
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-    verts = [list(zip(disc_pts[:, 0], disc_pts[:, 1], disc_pts[:, 2]))]
-    disc_poly = Poly3DCollection(
-        verts, alpha=0.15, facecolor="#888888", edgecolor="#666666", linewidth=1
-    )
-    ax.add_collection3d(disc_poly)
-
-    # Label the disc
-    disc_label_pos = centroid + axes_svd[1] * disc_r * 0.7 + axes_svd[2] * disc_r * 0.7
-    ax.text(
-        disc_label_pos[0],
-        disc_label_pos[1],
-        disc_label_pos[2],
-        "radial plane ($r$)",
-        color="#666666",
-        fontsize=9,
-        fontstyle="italic",
-        zorder=11,
-    )
-
-    # Centroid marker
-    ax.scatter(
-        [centroid[0]],
-        [centroid[1]],
-        [centroid[2]],
-        color="black",
-        s=60,
-        marker="o",
-        zorder=12,
-        edgecolors="white",
-        linewidths=1.5,
-    )
-
-    # Set equal aspect ratio
-    max_range = (
-        np.array(
-            [
-                cloud[:, 0].max() - cloud[:, 0].min(),
-                cloud[:, 1].max() - cloud[:, 1].min(),
-                cloud[:, 2].max() - cloud[:, 2].min(),
-            ]
-        ).max()
-        / 2.0
-    )
-
-    mid = centroid
-    ax.set_xlim(mid[0] - max_range, mid[0] + max_range)
-    ax.set_ylim(mid[1] - max_range, mid[1] + max_range)
-    ax.set_zlim(mid[2] - max_range, mid[2] + max_range)
-
-    ax.view_init(elev=20, azim=45)
-
-    # Clean styling
-    ax.xaxis.pane.fill = False
-    ax.yaxis.pane.fill = False
-    ax.zaxis.pane.fill = False
-    ax.xaxis.pane.set_edgecolor("lightgray")
-    ax.yaxis.pane.set_edgecolor("lightgray")
-    ax.zaxis.pane.set_edgecolor("lightgray")
-    ax.grid(True, alpha=0.3)
-    ax.set_xlabel("X", fontsize=10)
-    ax.set_ylabel("Y", fontsize=10)
-    ax.set_zlabel("Z", fontsize=10)
-
-    species_display = species.replace("_", " ")
-    ax.set_title(
-        f"SVD-aligned coordinate system\n{species_display}, H = {height_m:.1f} m",
-        fontsize=12,
-        pad=15,
-    )
-
-    fig.patch.set_facecolor("white")
-    plt.tight_layout()
-    out_path = output_dir / "figure_svd_axes.pdf"
-    fig.savefig(out_path, format="pdf", bbox_inches="tight", dpi=300)
-    plt.close(fig)
-    print(f"  Saved: {out_path}")
-
-    # Save metadata
-    meta = {
-        "source_tree_id": int(tree_id),
-        "species": species,
-        "height_m": height_m,
-        "num_points": len(cloud),
-        "singular_values": [float(s) for s in S],
-    }
-    meta_path = output_dir / "figure_svd_axes.json"
-    with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
-    print(f"  Saved metadata: {meta_path}")
-
-
-def create_figure_hjsd(
-    experiment_dir: str = "experiments/transformer-8-512-4096",
-    data_path: str = "./data/preprocessed-4096",
-    output_dir: str = "figures",
-    seed: int = 42,
-    n_radial: int = 16,
-    n_height: int = 32,
-):
-    """
-    Create a figure explaining the Histogram JSD metric.
-
-    Shows side-by-side 2D (r, z) density heatmaps for a real tree and its
-    generated counterpart, with shared bin edges and the JSD value annotated.
-    Selects the tree whose median HJSD is closest to the global median.
-    """
-    from scipy.spatial.distance import jensenshannon
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(exist_ok=True)
-    eval_dir = Path(experiment_dir) / "samples" / "evaluation"
-    per_pair_csv = str(eval_dir / "per_pair.csv")
-
-    # Select representative tree (skip small trees < 10m)
-    tree_id, median_hjsd = _select_median_tree(
-        per_pair_csv, "histogram_jsd", min_height=10.0
-    )
-    print(f"HJSD figure: selected tree {tree_id} (median HJSD={median_hjsd:.4f})")
-
-    # Load clouds
-    real_cloud, gen_cloud, pair_info = _load_pair_clouds(
-        tree_id, per_pair_csv, data_path, experiment_dir, "histogram_jsd", seed
-    )
-    print(
-        f"  Species: {pair_info['species']}, Height: {pair_info['height_m']:.1f}m, "
-        f"HJSD: {pair_info['histogram_jsd']:.4f}"
-    )
-
-    # Compute (r, z) for both
-    r_real, z_real = _compute_rz(real_cloud)
-    r_gen, z_gen = _compute_rz(gen_cloud)
-
-    # Shared bin edges
-    eps = 1e-6
-    all_r = np.concatenate([r_real, r_gen])
-    all_z = np.concatenate([z_real, z_gen])
-    radial_edges = np.linspace(0, all_r.max() + eps, n_radial + 1)
-    height_edges = np.linspace(all_z.min() - eps, all_z.max() + eps, n_height + 1)
-
-    # Build histograms
-    hist_real, _, _ = np.histogram2d(r_real, z_real, bins=[radial_edges, height_edges])
-    hist_gen, _, _ = np.histogram2d(r_gen, z_gen, bins=[radial_edges, height_edges])
-
-    # Normalize to densities (with Laplace smoothing for JSD)
-    hist_real_s = hist_real + 1.0
-    hist_gen_s = hist_gen + 1.0
-    p = (hist_real_s / hist_real_s.sum()).flatten()
-    q = (hist_gen_s / hist_gen_s.sum()).flatten()
-    jsd_value = float(
-        0.5 * np.sum(p * np.log(p / (0.5 * (p + q))))
-        + 0.5 * np.sum(q * np.log(q / (0.5 * (p + q))))
-    )
-
-    # Normalize for display (no smoothing), mask empty bins
-    density_real = np.ma.masked_equal(hist_real / hist_real.sum(), 0)
-    density_gen = np.ma.masked_equal(hist_gen / hist_gen.sum(), 0)
-    vmax = max(density_real.max(), density_gen.max())
-
-    # Bin centers for axis labels
-    r_centers = 0.5 * (radial_edges[:-1] + radial_edges[1:])
-    z_centers = 0.5 * (height_edges[:-1] + height_edges[1:])
-
-    # Colormap: white background for empty bins, sequential blue for density
-    cmap = plt.cm.Blues.copy()
-    cmap.set_bad(color="white")
-
-    # --- Plot ---
-    fig, axes = plt.subplots(1, 3, figsize=(14, 5), width_ratios=[1, 1, 0.05])
-
-    for ax, density, title in zip(
-        axes[:2],
-        [density_real, density_gen],
-        ["Real Tree", "Generated Tree"],
-    ):
-        im = ax.imshow(
-            density.T,
-            origin="lower",
-            aspect="auto",
-            extent=[
-                radial_edges[0],
-                radial_edges[-1],
-                height_edges[0],
-                height_edges[-1],
-            ],
-            cmap=cmap,
-            vmin=0,
-            vmax=vmax,
-        )
-        ax.set_xlabel("Radial distance $r$ from trunk axis", fontsize=11)
-        ax.set_ylabel("Height $z$ along trunk axis", fontsize=11)
-        ax.set_title(title, fontsize=13)
-
-    # Colorbar
-    cb = fig.colorbar(im, cax=axes[2])
-    cb.set_label("Point density", fontsize=11)
-
-    # Annotation
-    species_display = pair_info["species"].replace("_", " ")
-    fig.suptitle(
-        (
-            f"Histogram JSD = {jsd_value:.4f}  "
-            f"({n_radial}×{n_height} bins, SVD-aligned)\n"
-            f"\\textit{{{species_display}}}"
-            if plt.rcParams["text.usetex"]
-            else f"Histogram JSD = {jsd_value:.4f}  "
-            f"({n_radial}×{n_height} bins, SVD-aligned)\n"
-            f"{species_display}"
-        ),
-        fontsize=13,
-        y=1.02,
-    )
-
-    plt.tight_layout()
-    out_path = output_dir / "figure_hjsd.pdf"
-    fig.savefig(out_path, format="pdf", bbox_inches="tight", dpi=300)
-    plt.close(fig)
-    print(f"  Saved: {out_path}")
-
-    # Save metadata (cast numpy types for JSON)
-    meta = {
-        "source_tree_id": int(tree_id),
-        "sample_id": str(pair_info["sample_id"]),
-        "species": pair_info["species"],
-        "height_m": float(pair_info["height_m"]),
-        "histogram_jsd": float(jsd_value),
-        "global_median_hjsd": float(median_hjsd),
-    }
-    meta_path = output_dir / "figure_hjsd.json"
-    with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
-    print(f"  Saved metadata: {meta_path}")
-
-
-def create_figure_crown_mae(
-    experiment_dir: str = "experiments/transformer-8-512-4096",
-    data_path: str = "./data/preprocessed-4096",
-    output_dir: str = "figures",
-    seed: int = 42,
-):
-    """
-    Create a figure explaining the Crown Profile MAE metric.
-
-    Shows three top-down (bird's-eye) subfigures — one each for p50, p75, p98.
-    Each subplot shows the real and generated point clouds projected onto the
-    plane perpendicular to the trunk axis, with circles indicating the
-    respective radial percentile for real (solid) and generated (dashed).
-    Selects the tree whose median CrMAE_p75 is closest to the global median.
-    """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(exist_ok=True)
-    eval_dir = Path(experiment_dir) / "samples" / "evaluation"
-    per_pair_csv = str(eval_dir / "per_pair.csv")
-
-    # Select representative tree (skip small trees < 10m)
-    tree_id, median_mae = _select_median_tree(
-        per_pair_csv, "crown_mae_p75", min_height=10.0
-    )
-    print(f"CrMAE figure: selected tree {tree_id} (median CrMAE_p75={median_mae:.4f})")
-
-    # Load clouds
-    real_cloud, gen_cloud, pair_info = _load_pair_clouds(
-        tree_id, per_pair_csv, data_path, experiment_dir, "crown_mae_p75", seed
-    )
-    print(
-        f"  Species: {pair_info['species']}, Height: {pair_info['height_m']:.1f}m, "
-        f"CrMAE p50={pair_info['crown_mae_p50']:.4f}, "
-        f"p75={pair_info['crown_mae_p75']:.4f}, "
-        f"p98={pair_info['crown_mae_p98']:.4f}"
-    )
-
-    # SVD-aligned: project onto plane perpendicular to trunk axis
-    def _project_topdown(cloud):
-        centroid = cloud.mean(axis=0)
-        centered = cloud - centroid
-        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-        axis = Vt[0]
-        if axis[2] < 0:
-            axis = -axis
-        e1 = Vt[1]
-        e2 = Vt[2]
-        x = centered @ e1
-        y = centered @ e2
-        z = centered @ axis
-        r = np.sqrt(x**2 + y**2)
-        return x, y, z, r
-
-    x_real, y_real, z_real, r_real = _project_topdown(real_cloud)
-    x_gen, y_gen, z_gen, r_gen = _project_topdown(gen_cloud)
-
-    # Compute per-height-bin percentile radii (matching the actual metric)
-    n_height = 32
-    min_pts = 5
-    eps = 1e-6
-    all_z = np.concatenate([z_real, z_gen])
-    height_edges = np.linspace(all_z.min() - eps, all_z.max() + eps, n_height + 1)
-
-    def _mean_percentile_radius(r, z, pct):
-        vals = []
-        for i in range(n_height):
-            mask = (z >= height_edges[i]) & (z < height_edges[i + 1])
-            if mask.sum() >= min_pts:
-                vals.append(np.percentile(r[mask], pct))
-        return np.mean(vals) if vals else 0.0
-
-    percentiles = [50, 75, 98]
-    real_pcts = {p: _mean_percentile_radius(r_real, z_real, p) for p in percentiles}
-    gen_pcts = {p: _mean_percentile_radius(r_gen, z_gen, p) for p in percentiles}
-
-    # --- Plot: 3 subfigures ---
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    labels = {50: "p50 (median)", 75: "p75", 98: "p98"}
-    mae_keys = {50: "crown_mae_p50", 75: "crown_mae_p75", 98: "crown_mae_p98"}
-
-    # Shared axis limits
-    max_r = max(r_real.max(), r_gen.max()) * 1.15
-    lim = (-max_r, max_r)
-
-    for ax, pct in zip(axes, percentiles):
-        # Scatter point clouds (subsample for clarity)
-        rng_gen = np.random.default_rng(seed)
-        n_show = min(2000, len(x_real), len(x_gen))
-        idx_r = rng_gen.choice(len(x_real), n_show, replace=False)
-        idx_g = rng_gen.choice(len(x_gen), n_show, replace=False)
-
-        ax.scatter(
-            x_real[idx_r],
-            y_real[idx_r],
-            s=1,
-            alpha=0.25,
-            color="#1f77b4",
-            label="Real",
-            rasterized=True,
-        )
-        ax.scatter(
-            x_gen[idx_g],
-            y_gen[idx_g],
-            s=1,
-            alpha=0.25,
-            color="#ff7f0e",
-            label="Generated",
-            rasterized=True,
-        )
-
-        # Circles for mean per-height-bin percentile radii
-        theta = np.linspace(0, 2 * np.pi, 200)
-        r_r = real_pcts[pct]
-        r_g = gen_pcts[pct]
-        ax.plot(
-            r_r * np.cos(theta),
-            r_r * np.sin(theta),
-            color="#1f77b4",
-            linewidth=2,
-            linestyle="-",
-            label=f"Real {labels[pct]} = {r_r:.3f}",
-        )
-        ax.plot(
-            r_g * np.cos(theta),
-            r_g * np.sin(theta),
-            color="#ff7f0e",
-            linewidth=2,
-            linestyle="--",
-            label=f"Gen {labels[pct]} = {r_g:.3f}",
-        )
-
-        # Stem marker
-        ax.plot(0, 0, "k+", markersize=10, markeredgewidth=2)
-
-        ax.set_xlim(lim)
-        ax.set_ylim(lim)
-        ax.set_aspect("equal")
-        ax.grid(True, alpha=0.2)
-        mae_val = float(pair_info[mae_keys[pct]])
-        ax.set_title(f"{labels[pct]}\nMAE = {mae_val:.4f}", fontsize=12)
-        ax.legend(fontsize=8, loc="upper right", markerscale=4)
-
-    axes[0].set_ylabel("SVD axis 3", fontsize=11)
-    for ax in axes:
-        ax.set_xlabel("SVD axis 2", fontsize=11)
-
-    species_display = pair_info["species"].replace("_", " ")
-    fig.suptitle(
-        f"Crown Profile MAE  —  {species_display}, "
-        f"H = {pair_info['height_m']:.1f} m",
-        fontsize=13,
-        y=1.02,
-    )
-
-    plt.tight_layout()
-    out_path = output_dir / "figure_crown_mae.pdf"
-    fig.savefig(out_path, format="pdf", bbox_inches="tight", dpi=300)
-    plt.close(fig)
-    print(f"  Saved: {out_path}")
-
-    # Save metadata (cast numpy types for JSON)
-    meta = {
-        "source_tree_id": int(tree_id),
-        "sample_id": str(pair_info["sample_id"]),
-        "species": pair_info["species"],
-        "height_m": float(pair_info["height_m"]),
-        "crown_mae_p50": float(pair_info["crown_mae_p50"]),
-        "crown_mae_p75": float(pair_info["crown_mae_p75"]),
-        "crown_mae_p98": float(pair_info["crown_mae_p98"]),
-        "global_median_crown_mae_p75": float(median_mae),
-        "real_mean_p50": float(real_pcts[50]),
-        "real_mean_p75": float(real_pcts[75]),
-        "real_mean_p98": float(real_pcts[98]),
-        "gen_mean_p50": float(gen_pcts[50]),
-        "gen_mean_p75": float(gen_pcts[75]),
-        "gen_mean_p98": float(gen_pcts[98]),
-    }
-    meta_path = output_dir / "figure_crown_mae.json"
-    with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
-    print(f"  Saved metadata: {meta_path}")
-
-
-def _find_trunk_base(
-    x: np.ndarray,
-    y: np.ndarray,
-    z: np.ndarray,
-    bandwidth: float,
-    n_sub: int = 6,
-) -> tuple[float, float]:
-    """Find the trunk base using vertical persistence in the lower portion.
-
-    Instead of finding the densest cluster in a thin base slab (which can
-    be hijacked by a low branch), this uses the bottom ~30% of the tree
-    split into n_sub sub-slices. For each candidate XY position, it counts
-    how many sub-slices have nearby points. The trunk wins because it
-    persists across all sub-slices; a branch only appears in one or two.
-
-    Algorithm:
-    1. Split the lower 30% of the tree into n_sub horizontal sub-slices.
-    2. In each sub-slice, run mean-shift to find the densest cluster center.
-    3. Build candidate set from all sub-slice centers.
-    4. Score each candidate by how many sub-slices have points within
-       `bandwidth` of it — this is the vertical persistence score.
-    5. Among the highest-scoring candidates, pick the one closest to the
-       overall median (tiebreaker favoring the geometric center).
-    """
-    z_min, z_max = z.min(), z.max()
-    base_top = z_min + (z_max - z_min) * 0.3
-    base_mask = z <= base_top
-    if base_mask.sum() < 5:
-        return np.median(x), np.median(y)
-
-    xb, yb, zb = x[base_mask], y[base_mask], z[base_mask]
-    sub_edges = np.linspace(zb.min(), zb.max(), n_sub + 1)
-
-    # Collect mean-shift centers from each sub-slice
-    candidates = []
-    for s in range(n_sub):
-        smask = (zb >= sub_edges[s]) & (zb <= sub_edges[s + 1])
-        if smask.sum() < 3:
-            continue
-        xs, ys = xb[smask], yb[smask]
-        # Mean-shift convergence within sub-slice
-        cx, cy = np.median(xs), np.median(ys)
-        for _ in range(20):
-            dist_sq = (xs - cx) ** 2 + (ys - cy) ** 2
-            w = np.exp(-dist_sq / (2 * bandwidth**2))
-            w_sum = w.sum()
-            if w_sum < 1e-8:
-                break
-            nx = np.sum(xs * w) / w_sum
-            ny = np.sum(ys * w) / w_sum
-            if (nx - cx) ** 2 + (ny - cy) ** 2 < 1e-10:
-                break
-            cx, cy = nx, ny
-        candidates.append((cx, cy))
-
-    if not candidates:
-        return np.median(x), np.median(y)
-
-    # Score each candidate by vertical persistence:
-    # how many sub-slices have points within `bandwidth` of this (x,y)?
-    best_score = -1
-    med_x, med_y = np.median(xb), np.median(yb)
-    best_cx, best_cy = candidates[0]
-
-    for cx, cy in candidates:
-        score = 0
-        for s in range(n_sub):
-            smask = (zb >= sub_edges[s]) & (zb <= sub_edges[s + 1])
-            if smask.sum() < 1:
-                continue
-            dists = np.sqrt((xb[smask] - cx) ** 2 + (yb[smask] - cy) ** 2)
-            if np.any(dists <= bandwidth):
-                score += 1
-
-        # Tiebreak: prefer candidate closest to median (geometric center)
-        tie = -np.sqrt((cx - med_x) ** 2 + (cy - med_y) ** 2)
-
-        if score > best_score or (score == best_score and tie > -np.sqrt(
-            (best_cx - med_x) ** 2 + (best_cy - med_y) ** 2
-        )):
-            best_score = score
-            best_cx, best_cy = cx, cy
-
-    return best_cx, best_cy
-
-
-def _track_spine_pass(
-    x: np.ndarray,
-    y: np.ndarray,
-    z: np.ndarray,
-    bin_edges: np.ndarray,
-    init_x: float,
-    init_y: float,
-    sigma_frac: float,
-    density_k: int,
-    sigma_cap: float | None = None,
-    max_step: float | None = None,
-) -> tuple[list[float], list[float], list[float]]:
-    """Single bottom-up tracking pass with adaptive sigma and density weighting.
-
-    Parameters
-    ----------
-    sigma_frac : float
-        Gaussian sigma as a fraction of each slice's horizontal extent.
-    density_k : int
-        Number of nearest neighbors for local density estimation.
-    sigma_cap : float or None
-        Maximum allowed sigma (absolute). Prevents sigma from growing
-        in wide canopy bins. Typically set from the base slice extent.
-    max_step : float or None
-        Maximum allowed horizontal movement between consecutive bins.
-        Prevents jumps to canopy branches.
-    """
-    num_bins = len(bin_edges) - 1
-    current_x, current_y = init_x, init_y
-    spine_x, spine_y, spine_z = [], [], []
-
-    for i in range(num_bins):
-        mask = (z >= bin_edges[i]) & (z <= bin_edges[i + 1])
-        if mask.sum() < 5:
-            continue
-
-        x_bin, y_bin, z_bin = x[mask], y[mask], z[mask]
-
-        # Adaptive sigma: fraction of this slice's horizontal extent
-        extent = max(np.ptp(x_bin), np.ptp(y_bin), 1e-6)
-        sigma = sigma_frac * extent
-        if sigma_cap is not None:
-            sigma = min(sigma, sigma_cap)
-
-        # Proximity weights (Gaussian centered on previous slice's center)
-        dist_sq = (x_bin - current_x) ** 2 + (y_bin - current_y) ** 2
-        prox_w = np.exp(-dist_sq / (2 * sigma**2))
-
-        # Local density weights: points in tight clusters (trunk) get upweighted
-        n_pts = len(x_bin)
-        if n_pts > density_k:
-            from scipy.spatial import cKDTree
-
-            xy = np.column_stack([x_bin, y_bin])
-            tree = cKDTree(xy)
-            dists, _ = tree.query(xy, k=density_k + 1)  # +1 because self is included
-            mean_knn_dist = dists[:, 1:].mean(axis=1)  # exclude self (dist=0)
-            density_w = 1.0 / (mean_knn_dist + 1e-8)
-            density_w /= density_w.max()
-        else:
-            density_w = np.ones(n_pts)
-
-        weights = prox_w * density_w
-        w_sum = weights.sum()
-
-        if w_sum > 1e-6:
-            next_x = np.sum(x_bin * weights) / w_sum
-            next_y = np.sum(y_bin * weights) / w_sum
-        else:
-            next_x = np.median(x_bin)
-            next_y = np.median(y_bin)
-
-        # Enforce max step constraint
-        if max_step is not None:
-            dx = next_x - current_x
-            dy = next_y - current_y
-            step = np.sqrt(dx**2 + dy**2)
-            if step > max_step:
-                scale = max_step / step
-                next_x = current_x + dx * scale
-                next_y = current_y + dy * scale
-
-        spine_x.append(next_x)
-        spine_y.append(next_y)
-        spine_z.append(np.median(z_bin))
-
-        current_x, current_y = next_x, next_y
-
-    return spine_x, spine_y, spine_z
-
-
-def _compute_rz_spine(
-    cloud: np.ndarray,
-    num_bins: int = 20,
-    sigma_frac: float = 0.10,
-    degree: int = 3,
-    density_k: int = 16,
-    n_refine: int = 1,
-    max_step_frac: float = 0.05,
-    outlier_mad_k: float = 2.5,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Robust stem-tracking cylindrical coordinates.
-
-    Improvements over the basic tracker:
-    1. Density-based initialization: mean-shift convergence on the densest
-       cluster at the trunk base, instead of a raw median.
-    2. Adaptive sigma with cap: Gaussian bandwidth scales with each slice's
-       horizontal extent but is capped by the base slice extent to prevent
-       sigma from growing in wide canopy bins.
-    3. Density weighting: points in tight clusters (trunk wood) are upweighted
-       relative to diffuse regions (canopy foliage) via k-NN density.
-    4. Max step constraint: limits horizontal movement between consecutive
-       bins to prevent jumps to canopy branches.
-    5. Two-pass refinement: after polynomial smoothing, re-run tracking using
-       the polynomial centers as priors, then re-fit. Repeats n_refine times.
-    6. Outlier rejection: MAD-based removal of wayward spine points before
-       the final polynomial fit, preventing overfitting to errant tracked points.
-
-    Parameters
-    ----------
-    max_step_frac : float
-        Maximum per-bin horizontal movement as a fraction of tree height.
-    outlier_mad_k : float
-        Spine points deviating more than this many MADs from a line fit
-        are rejected before the final polynomial fit.
-
-    Returns (r, z, spine_xyz) where spine_xyz is (M, 3) tracked centers
-    before the final polynomial smoothing (for visualization).
-    """
-    x, y, z = cloud[:, 0], cloud[:, 1], cloud[:, 2]
-    z_min, z_max = z.min(), z.max()
-    tree_height = z_max - z_min
-    bin_edges = np.linspace(z_min, z_max, num_bins + 1)
-
-    # --- 1. Density-based initialization via vertical persistence ---
-    # Use the bottom 30% split into sub-slices to find the most
-    # vertically persistent XY position (trunk, not a low branch).
-    base_top = z_min + tree_height * 0.3
-    base_mask = z <= base_top
-    if base_mask.sum() < 5:
-        base_mask = (z >= bin_edges[0]) & (z <= bin_edges[1])
-
-    base_extent = max(np.ptp(x[base_mask]), np.ptp(y[base_mask]), 1e-6)
-    init_x, init_y = _find_trunk_base(
-        x[base_mask], y[base_mask], z[base_mask],
-        bandwidth=0.15 * base_extent,
-    )
-
-    # Sigma cap: prevent sigma from exceeding the base extent scale
-    sigma_cap = sigma_frac * base_extent * 2.0
-
-    # Max step: fraction of tree height per bin
-    max_step = max_step_frac * tree_height
-
-    # --- 2 & 3. First tracking pass (adaptive sigma + density weighting) ---
-    spine_x, spine_y, spine_z = _track_spine_pass(
-        x,
-        y,
-        z,
-        bin_edges,
-        init_x,
-        init_y,
-        sigma_frac,
-        density_k,
-        sigma_cap=sigma_cap,
-        max_step=max_step,
-    )
-
-    # --- 4. Iterative refinement ---
-    for _ in range(n_refine):
-        if len(spine_z) < 2:
-            break
-
-        # Fit polynomial to current tracked centers
-        actual_deg = min(degree, len(spine_z) - 1)
-        p_x = Polynomial.fit(spine_z, spine_x, actual_deg)
-        p_y = Polynomial.fit(spine_z, spine_y, actual_deg)
-
-        # Re-initialize each bin from the polynomial prediction
-        bin_mids = [(bin_edges[i] + bin_edges[i + 1]) / 2 for i in range(num_bins)]
-        poly_init_x = float(p_x(bin_mids[0]))
-        poly_init_y = float(p_y(bin_mids[0]))
-
-        spine_x, spine_y, spine_z = _track_spine_pass(
-            x,
-            y,
-            z,
-            bin_edges,
-            poly_init_x,
-            poly_init_y,
-            sigma_frac,
-            density_k,
-            sigma_cap=sigma_cap,
-            max_step=max_step,
-        )
-
-    # Raw tracked centers (for visualization)
-    spine_xyz = (
-        np.column_stack([spine_x, spine_y, spine_z]) if spine_z else np.empty((0, 3))
-    )
-
-    # --- 5. Outlier rejection before final polynomial fit ---
-    if len(spine_z) >= 4:
-        sz = np.array(spine_z)
-        sx = np.array(spine_x)
-        sy = np.array(spine_y)
-
-        # Fit a line (degree 1) and compute residuals
-        line_x = Polynomial.fit(sz, sx, 1)
-        line_y = Polynomial.fit(sz, sy, 1)
-        resid = np.sqrt((sx - line_x(sz)) ** 2 + (sy - line_y(sz)) ** 2)
-
-        # MAD-based outlier detection
-        med_resid = np.median(resid)
-        mad = np.median(np.abs(resid - med_resid))
-        if mad > 1e-10:
-            keep = resid <= med_resid + outlier_mad_k * mad
-        else:
-            # All residuals nearly identical — keep everything
-            keep = np.ones(len(sz), dtype=bool)
-
-        spine_x = sx[keep].tolist()
-        spine_y = sy[keep].tolist()
-        spine_z = sz[keep].tolist()
-
-        # Update visualization array too
-        spine_xyz = (
-            np.column_stack([spine_x, spine_y, spine_z])
-            if spine_z
-            else np.empty((0, 3))
-        )
-
-    # Final polynomial smoothing
-    if len(spine_z) >= 2:
-        actual_deg = min(degree, len(spine_z) - 1)
-        p_x = Polynomial.fit(spine_z, spine_x, actual_deg)
-        p_y = Polynomial.fit(spine_z, spine_y, actual_deg)
-        center_x = p_x(z)
-        center_y = p_y(z)
-    else:
-        center_x = np.full_like(z, init_x)
-        center_y = np.full_like(z, init_y)
-
-    r = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
-    z_out = z - z_min
-    return r, z_out, spine_xyz
-
-
-def create_figure_spine_comparison(
-    experiment_dir: str = "experiments/transformer-8-512-4096",
-    data_path: str = "./data/preprocessed-4096",
-    output_dir: str = "figures",
-    seed: int = 42,
-    n_radial: int = 32,
-    n_height: int = 64,
-    num_spine_bins: int = 20,
-):
-    """Compare SVD-axis vs stem-tracker cylindrical coordinate systems.
-
-    Produces a 2x2 figure:
-      Top row:   3D point clouds with SVD axis (left) and stem tracker (right)
-      Bottom row: (r, z) density heatmaps, each with independent bin edges
-                  and sqrt-normalized color to reveal both trunk and canopy
-    """
-    import zarr
-    from matplotlib.colors import PowerNorm
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(exist_ok=True)
-    eval_dir = Path(experiment_dir) / "samples" / "evaluation"
-    per_pair_csv = str(eval_dir / "per_pair.csv")
-
-    # Use same tree as HJSD figure for visual continuity
-    tree_id, _ = _select_median_tree(per_pair_csv, "histogram_jsd", min_height=10.0)
-
-    # Load real cloud
-    data_path = Path(data_path)
-    tree_id_str = f"{int(tree_id):05d}"
-    real_path = data_path / f"{tree_id_str}.zarr"
-    cloud = zarr.load(str(real_path)).astype(np.float32)
-
-    pair_df = pd.read_csv(per_pair_csv)
-    tree_rows = pair_df[pair_df["source_tree_id"] == tree_id]
-    species = tree_rows.iloc[0]["species"]
-    height_m = float(tree_rows.iloc[0]["height_m"])
-
-    print(
-        f"Spine comparison: tree {tree_id}, {species}, H={height_m:.1f}m, "
-        f"{len(cloud)} points"
-    )
-
-    # ---- Compute both coordinate systems ----
-    r_svd, z_svd = _compute_rz(cloud)
-    r_spine, z_spine, spine_raw = _compute_rz_spine(cloud, num_bins=num_spine_bins)
-
-    # ---- SVD decomposition for 3D overlay ----
-    centroid = cloud.mean(axis=0)
-    centered = cloud - centroid
-    _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-    svd_axis = Vt[0]
-    if svd_axis[2] < 0:
-        svd_axis = -svd_axis
-
-    # ---- Smooth polynomial spine curve for 3D overlay ----
-    x, y, z = cloud[:, 0], cloud[:, 1], cloud[:, 2]
-    z_min, z_max = z.min(), z.max()
-    degree = 3
-    actual_deg = min(degree, len(spine_raw) - 1) if len(spine_raw) >= 2 else 1
-    if len(spine_raw) >= 2:
-        p_x = Polynomial.fit(spine_raw[:, 2], spine_raw[:, 0], actual_deg)
-        p_y = Polynomial.fit(spine_raw[:, 2], spine_raw[:, 1], actual_deg)
-        spine_z_dense = np.linspace(z_min, z_max, 200)
-        spine_curve = np.column_stack(
-            [p_x(spine_z_dense), p_y(spine_z_dense), spine_z_dense]
-        )
-    else:
-        spine_curve = spine_raw
-
-    # ---- Subsample for 3D scatter ----
-    rng = np.random.default_rng(seed)
-    n_show = min(8000, len(cloud))
-    idx = rng.choice(len(cloud), n_show, replace=False)
-
-    # ---- Figure ----
-    fig = plt.figure(figsize=(13, 12))
-
-    # Common 3D helper
-    def _setup_3d(ax, title, label):
-        cloud_range = (
-            np.array(
-                [
-                    cloud[:, 0].max() - cloud[:, 0].min(),
-                    cloud[:, 1].max() - cloud[:, 1].min(),
-                    cloud[:, 2].max() - cloud[:, 2].min(),
-                ]
-            ).max()
-            / 2.0
-        )
-        mid = centroid
-        ax.set_xlim(mid[0] - cloud_range, mid[0] + cloud_range)
-        ax.set_ylim(mid[1] - cloud_range, mid[1] + cloud_range)
-        ax.set_zlim(mid[2] - cloud_range, mid[2] + cloud_range)
-        ax.view_init(elev=15, azim=135)
-        ax.xaxis.pane.fill = False
-        ax.yaxis.pane.fill = False
-        ax.zaxis.pane.fill = False
-        ax.xaxis.pane.set_edgecolor("lightgray")
-        ax.yaxis.pane.set_edgecolor("lightgray")
-        ax.zaxis.pane.set_edgecolor("lightgray")
-        ax.grid(True, alpha=0.2)
-        ax.set_xticklabels([])
-        ax.set_yticklabels([])
-        ax.set_zticklabels([])
-        ax.set_xlabel("")
-        ax.set_ylabel("")
-        ax.set_zlabel("")
-        ax.set_title(title, fontsize=13, fontweight="bold", pad=8)
-        # Panel label
-        ax.text2D(
-            0.02,
-            0.95,
-            label,
-            transform=ax.transAxes,
-            fontsize=16,
-            fontweight="bold",
-            va="top",
-        )
-
-    # -- (a) 3D with SVD axis --
-    ax1 = fig.add_subplot(221, projection="3d")
-    ax1.scatter(
-        cloud[idx, 0],
-        cloud[idx, 1],
-        cloud[idx, 2],
-        c=cloud[idx, 2],
-        cmap="viridis",
-        s=0.8,
-        alpha=0.4,
-        rasterized=True,
-    )
-    extent = np.linalg.norm(centered, axis=1).max() * 0.55
-    for sign in [-1, 1]:
-        tip = centroid + sign * svd_axis * extent
-        ax1.plot(
-            [centroid[0], tip[0]],
-            [centroid[1], tip[1]],
-            [centroid[2], tip[2]],
-            color="#d62728",
-            linewidth=3.5,
-            zorder=10,
-        )
-    ax1.scatter(
-        [centroid[0]],
-        [centroid[1]],
-        [centroid[2]],
-        color="black",
-        s=80,
-        marker="o",
-        zorder=12,
-        edgecolors="white",
-        linewidths=1.5,
-    )
-    _setup_3d(ax1, "SVD: single global axis", "(a)")
-
-    # -- (b) 3D with stem tracker --
-    ax2 = fig.add_subplot(222, projection="3d")
-    ax2.scatter(
-        cloud[idx, 0],
-        cloud[idx, 1],
-        cloud[idx, 2],
-        c=cloud[idx, 2],
-        cmap="viridis",
-        s=0.8,
-        alpha=0.4,
-        rasterized=True,
-    )
-    ax2.plot(
-        spine_curve[:, 0],
-        spine_curve[:, 1],
-        spine_curve[:, 2],
-        color="#d62728",
-        linewidth=3.5,
-        zorder=10,
-    )
-    if len(spine_raw) > 0:
-        ax2.scatter(
-            spine_raw[:, 0],
-            spine_raw[:, 1],
-            spine_raw[:, 2],
-            color="#d62728",
-            s=30,
-            marker="o",
-            zorder=12,
-            edgecolors="white",
-            linewidths=0.8,
-            alpha=0.5,
-        )
-    _setup_3d(
-        ax2,
-        f"Stem tracker: {num_spine_bins} bins, degree-{actual_deg} polynomial",
-        "(b)",
-    )
-
-    # ---- Heatmaps with INDEPENDENT bin edges per method ----
-    cmap_heat = plt.cm.YlGnBu.copy()
-    cmap_heat.set_bad(color="white")
-
-    def _make_heatmap(ax, r, z_vals, title, label):
-        eps = 1e-6
-        r_edges = np.linspace(0, np.percentile(r, 99.5) + eps, n_radial + 1)
-        z_edges = np.linspace(z_vals.min() - eps, z_vals.max() + eps, n_height + 1)
-        hist, _, _ = np.histogram2d(r, z_vals, bins=[r_edges, z_edges])
-        density = hist / hist.sum()
-        density_ma = np.ma.masked_equal(density, 0)
-        vmax = np.percentile(density[density > 0], 99) if (density > 0).any() else 1
-
-        im = ax.pcolormesh(
-            r_edges,
-            z_edges,
-            density_ma.T,
-            cmap=cmap_heat,
-            norm=PowerNorm(gamma=0.4, vmin=0, vmax=vmax),
-            rasterized=True,
-        )
-        ax.set_xlabel("Radial distance $r$", fontsize=11)
-        ax.set_ylabel("Height $z$", fontsize=11)
-        ax.set_title(title, fontsize=13, fontweight="bold", pad=8)
-        ax.text(
-            0.02,
-            0.97,
-            label,
-            transform=ax.transAxes,
-            fontsize=16,
-            fontweight="bold",
-            va="top",
-        )
-        return im
-
-    # -- (c) SVD heatmap --
-    ax3 = fig.add_subplot(223)
-    im_svd = _make_heatmap(ax3, r_svd, z_svd, "SVD: $(r, z)$ density", "(c)")
-
-    # -- (d) Stem tracker heatmap --
-    ax4 = fig.add_subplot(224)
-    im_spine = _make_heatmap(
-        ax4, r_spine, z_spine, "Stem tracker: $(r, z)$ density", "(d)"
-    )
-
-    # Individual colorbars tight to each heatmap
-    for ax_h, im_h in [(ax3, im_svd), (ax4, im_spine)]:
-        cb = fig.colorbar(im_h, ax=ax_h, pad=0.02, fraction=0.046)
-        cb.set_label("Point density", fontsize=9)
-        cb.ax.tick_params(labelsize=8)
-
-    species_display = species.replace("_", " ")
-    fig.suptitle(
-        f"SVD axis vs Stem Tracker  \u2014  {species_display}, "
-        f"H = {height_m:.1f} m",
-        fontsize=15,
-        fontweight="bold",
-        y=0.98,
-    )
-
-    fig.patch.set_facecolor("white")
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    out_path = output_dir / "figure_spine_comparison.pdf"
-    fig.savefig(out_path, format="pdf", bbox_inches="tight", dpi=300)
-    plt.close(fig)
-    print(f"  Saved: {out_path}")
-
-    # Save metadata
-    meta = {
-        "source_tree_id": int(tree_id),
-        "species": species,
-        "height_m": height_m,
-        "num_points": len(cloud),
-        "num_spine_bins": num_spine_bins,
-        "r_svd_mean": float(r_svd.mean()),
-        "r_spine_mean": float(r_spine.mean()),
-        "r_svd_std": float(r_svd.std()),
-        "r_spine_std": float(r_spine.std()),
-    }
-    meta_path = output_dir / "figure_spine_comparison.json"
-    with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
-    print(f"  Saved metadata: {meta_path}")
 
 
 def create_figure_spine_audit(
@@ -2023,11 +814,12 @@ def create_figure_spine_audit(
 
     output_dir = Path(output_dir)
     eval_dir = Path(experiment_dir) / "samples" / "evaluation"
-    per_pair_csv = eval_dir / "per_pair.csv"
+    pair_csv = eval_dir / "df_pairs.csv"
     data_path = Path(data_path)
 
-    pair_df = pd.read_csv(per_pair_csv)
-    pair_df["height_bin"] = pair_df["height_m"].apply(get_height_bin)
+    pair_df = pd.read_csv(pair_csv)
+    if "height_bin" not in pair_df.columns:
+        pair_df["height_bin"] = pair_df["height_m"].apply(get_height_bin)
 
     from tqdm import tqdm
 
@@ -2039,10 +831,10 @@ def create_figure_spine_audit(
     tasks = []
     for (species, height_bin), grp in groups:
         selected_trees = (
-            grp["source_tree_id"]
+            grp["real_id"]
             .drop_duplicates()
             .sample(
-                n=min(trees_per_group, grp["source_tree_id"].nunique()),
+                n=min(trees_per_group, grp["real_id"].nunique()),
                 random_state=seed,
             )
             .tolist()
@@ -2075,12 +867,16 @@ def create_figure_spine_audit(
             continue
 
         cloud = zarr.load(str(zarr_path)).astype(np.float32)
-        tree_row = grp[grp["source_tree_id"] == tree_id].iloc[0]
+        if len(cloud) > DOWNSAMPLE_POINTS:
+            ds_rng = np.random.default_rng(seed)
+            ds_idx = ds_rng.choice(len(cloud), size=DOWNSAMPLE_POINTS, replace=False)
+            cloud = cloud[ds_idx]
+        tree_row = grp[grp["real_id"] == tree_id].iloc[0]
         height_m = float(tree_row["height_m"])
 
         # Compute both coordinate systems
         r_svd, z_svd = _compute_rz(cloud)
-        r_spine, z_spine, spine_raw = _compute_rz_spine(cloud, num_bins=num_spine_bins)
+        r_spine, z_spine, spine_raw = compute_rz_spine(cloud, num_bins=num_spine_bins)
 
         # SVD axis
         centroid = cloud.mean(axis=0)
@@ -2306,6 +1102,2349 @@ def create_figure_spine_audit(
     print(f"\nSpine audit: {total_figs} figures saved to {audit_dir}/")
 
 
+def create_figure_crown_audit(
+    experiment_dir: str = "experiments/transformer-8-512-4096",
+    data_path: str = "./data/preprocessed-4096",
+    output_dir: str = "figures",
+    seed: int = 42,
+    num_spine_bins: int = 20,
+    trees_per_group: int = 2,
+):
+    """Generate crown-metric verification figures for every (species, height_bin).
+
+    For each group, picks up to `trees_per_group` representative trees and
+    produces a 2x2 figure:
+      (a) 3D point cloud with convex hull wireframe
+      (b) 3D point cloud with HCB plane + max crown radius ring + spine
+      (c) Arc-length density plot showing HCB detection algorithm
+      (d) Mean radial distance vs arc-length showing max crown radius
+
+    Saves into output_dir/crown_audit/<species>/<height_bin>/.
+    Mirrors the feature extraction logic in evaluate.py.
+    """
+    import zarr
+    from scipy.spatial import ConvexHull
+    from evaluate import get_height_bin, compute_mean_r_per_slice, compute_hcb
+
+    output_dir = Path(output_dir)
+    eval_dir = Path(experiment_dir) / "samples" / "evaluation"
+    pair_csv = eval_dir / "df_pairs.csv"
+    data_path = Path(data_path)
+
+    pair_df = pd.read_csv(pair_csv)
+    if "height_bin" not in pair_df.columns:
+        pair_df["height_bin"] = pair_df["height_m"].apply(get_height_bin)
+
+    from tqdm import tqdm
+
+    groups = pair_df.groupby(["species", "height_bin"], observed=True)
+    print(f"Found {len(groups)} (species, height_bin) groups")
+
+    tasks = []
+    for (species, height_bin), grp in groups:
+        selected_trees = (
+            grp["real_id"]
+            .drop_duplicates()
+            .sample(
+                n=min(trees_per_group, grp["real_id"].nunique()),
+                random_state=seed,
+            )
+            .tolist()
+        )
+        for tree_id in selected_trees:
+            tasks.append(
+                {
+                    "species": species,
+                    "height_bin": height_bin,
+                    "tree_id": tree_id,
+                    "grp": grp,
+                }
+            )
+
+    audit_dir = output_dir / "crown_audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Generating {len(tasks)} crown audit figures...")
+
+    total_figs = 0
+    for task_info in tqdm(tasks, desc="Crown audit"):
+        species = task_info["species"]
+        height_bin = task_info["height_bin"]
+        tree_id = task_info["tree_id"]
+        grp = task_info["grp"]
+
+        tree_id_str = f"{int(tree_id):05d}"
+        zarr_path = data_path / f"{tree_id_str}.zarr"
+        if not zarr_path.exists():
+            continue
+
+        cloud = zarr.load(str(zarr_path)).astype(np.float32)
+        if len(cloud) > DOWNSAMPLE_POINTS:
+            ds_rng = np.random.default_rng(seed)
+            ds_idx = ds_rng.choice(len(cloud), size=DOWNSAMPLE_POINTS, replace=False)
+            cloud = cloud[ds_idx]
+        tree_row = grp[grp["real_id"] == tree_id].iloc[0]
+        height_m = float(tree_row["height_m"])
+        scale = height_m / 2.0
+
+        # ── Stem tracker → cylindrical (r, s) ──
+        r, s, spine_raw, poly_x, poly_y = compute_rs_spine(
+            cloud, num_bins=num_spine_bins
+        )
+
+        z = cloud[:, 2]
+        z_min, z_max = z.min(), z.max()
+        eps = 1e-6
+        s_max = s.max() + eps if s.max() > 0 else eps
+
+        # ── Convex hull ──
+        try:
+            hull = ConvexHull(cloud)
+            hull_volume = float(hull.volume * scale**3)
+        except Exception:
+            hull = None
+            hull_volume = float("nan")
+
+        # ── Max crown radius ──
+        slice_centers, mean_r_per_slice = compute_mean_r_per_slice(s, r, s_max)
+        max_crown_r_norm = mean_r_per_slice.max()
+        max_crown_r_m = float(max_crown_r_norm * scale)
+        max_r_slice_idx = int(np.argmax(mean_r_per_slice))
+
+        # ── Height to crown base (Kneedle on cumulative mean-r) ──
+        hcb_val, kneedle_data = compute_hcb(slice_centers, mean_r_per_slice, s_max)
+
+        hcb_m = float(hcb_val * height_m)
+
+        # ── Spine polynomial for 3D overlay ──
+        degree = 3
+        actual_deg = min(degree, len(spine_raw) - 1) if len(spine_raw) >= 2 else 1
+        if len(spine_raw) >= 2:
+            spine_z_dense = np.linspace(z_min, z_max, 200)
+            spine_curve = np.column_stack(
+                [poly_x(spine_z_dense), poly_y(spine_z_dense), spine_z_dense]
+            )
+        else:
+            spine_curve = spine_raw
+
+        # Subsample for 3D scatter
+        rng = np.random.default_rng(seed)
+        n_show = min(8000, len(cloud))
+        idx = rng.choice(len(cloud), n_show, replace=False)
+
+        centroid = cloud.mean(axis=0)
+
+        # ── Figure: 2×2 ──
+        fig = plt.figure(figsize=(13, 12))
+
+        def _setup_3d(ax, title, label):
+            cloud_range = (
+                np.array(
+                    [
+                        cloud[:, 0].max() - cloud[:, 0].min(),
+                        cloud[:, 1].max() - cloud[:, 1].min(),
+                        cloud[:, 2].max() - cloud[:, 2].min(),
+                    ]
+                ).max()
+                / 2.0
+            )
+            mid = centroid
+            ax.set_xlim(mid[0] - cloud_range, mid[0] + cloud_range)
+            ax.set_ylim(mid[1] - cloud_range, mid[1] + cloud_range)
+            ax.set_zlim(mid[2] - cloud_range, mid[2] + cloud_range)
+            ax.view_init(elev=15, azim=135)
+            ax.xaxis.pane.fill = False
+            ax.yaxis.pane.fill = False
+            ax.zaxis.pane.fill = False
+            ax.xaxis.pane.set_edgecolor("lightgray")
+            ax.yaxis.pane.set_edgecolor("lightgray")
+            ax.zaxis.pane.set_edgecolor("lightgray")
+            ax.grid(True, alpha=0.2)
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
+            ax.set_zticklabels([])
+            ax.set_xlabel("")
+            ax.set_ylabel("")
+            ax.set_zlabel("")
+            ax.set_title(title, fontsize=13, fontweight="bold", pad=8)
+            ax.text2D(
+                0.02,
+                0.95,
+                label,
+                transform=ax.transAxes,
+                fontsize=16,
+                fontweight="bold",
+                va="top",
+            )
+
+        # -- (a) 3D with convex hull --
+        ax1 = fig.add_subplot(221, projection="3d")
+        ax1.scatter(
+            cloud[idx, 0],
+            cloud[idx, 1],
+            cloud[idx, 2],
+            c=cloud[idx, 2],
+            cmap="viridis",
+            s=0.8,
+            alpha=0.4,
+            rasterized=True,
+        )
+        if hull is not None:
+            from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+            hull_faces = [cloud[s] for s in hull.simplices]
+            hull_col = Poly3DCollection(
+                hull_faces,
+                alpha=0.04,
+                facecolor="red",
+                edgecolor="red",
+                linewidth=0.3,
+            )
+            ax1.add_collection3d(hull_col)
+        _setup_3d(ax1, f"Convex hull  (V = {hull_volume:.2f} m³)", "(a)")
+
+        # -- (b) 3D with HCB plane + max crown radius ring --
+        ax2 = fig.add_subplot(222, projection="3d")
+        ax2.scatter(
+            cloud[idx, 0],
+            cloud[idx, 1],
+            cloud[idx, 2],
+            c=cloud[idx, 2],
+            cmap="viridis",
+            s=0.8,
+            alpha=0.4,
+            rasterized=True,
+        )
+        # Spine curve
+        if len(spine_curve) > 0:
+            ax2.plot(
+                spine_curve[:, 0],
+                spine_curve[:, 1],
+                spine_curve[:, 2],
+                color="#d62728",
+                linewidth=3.0,
+                zorder=10,
+            )
+
+        # HCB horizontal plane — find spine center at HCB z-height
+        if not np.isnan(hcb_val):
+            hcb_z = z_min + hcb_val * (z_max - z_min)
+            hcb_cx = float(poly_x(hcb_z))
+            hcb_cy = float(poly_y(hcb_z))
+            theta = np.linspace(0, 2 * np.pi, 60)
+            plane_r = 0.3 * (z_max - z_min)
+            plane_x = hcb_cx + plane_r * np.cos(theta)
+            plane_y = hcb_cy + plane_r * np.sin(theta)
+            plane_z = np.full_like(theta, hcb_z)
+            ax2.plot(
+                plane_x, plane_y, plane_z, color="#2ca02c", linewidth=2.5, zorder=8
+            )
+            ax2.plot_trisurf(
+                plane_x,
+                plane_y,
+                plane_z,
+                color="#2ca02c",
+                alpha=0.15,
+                zorder=7,
+            )
+
+        # Max crown radius ring — at the arc-length slice with max mean-r
+        if max_crown_r_norm > 0:
+            # Find the z-height corresponding to the max-r slice center arc-length
+            s_center = slice_centers[max_r_slice_idx]
+            # Map arc-length back to z via interpolation on spine
+            spine_z_fine = np.linspace(z_min, z_max, 500)
+            from numpy.polynomial import Polynomial as Poly
+
+            dpx = poly_x.deriv()
+            dpy = poly_y.deriv()
+            ds_dz = np.sqrt(dpx(spine_z_fine) ** 2 + dpy(spine_z_fine) ** 2 + 1.0)
+            dz_vals = np.diff(spine_z_fine)
+            ds_vals = 0.5 * (ds_dz[:-1] + ds_dz[1:]) * dz_vals
+            s_fine = np.zeros(len(spine_z_fine))
+            s_fine[1:] = np.cumsum(ds_vals)
+            ring_z = float(np.interp(s_center, s_fine, spine_z_fine))
+            ring_cx = float(poly_x(ring_z))
+            ring_cy = float(poly_y(ring_z))
+            theta = np.linspace(0, 2 * np.pi, 60)
+            ring_x = ring_cx + max_crown_r_norm * np.cos(theta)
+            ring_y = ring_cy + max_crown_r_norm * np.sin(theta)
+            ring_zz = np.full_like(theta, ring_z)
+            ax2.plot(
+                ring_x,
+                ring_y,
+                ring_zz,
+                color="#ff7f0e",
+                linewidth=2.5,
+                zorder=9,
+            )
+
+        _setup_3d(
+            ax2,
+            f"HCB = {hcb_m:.1f} m  |  Max CrR = {max_crown_r_m:.2f} m",
+            "(b)",
+        )
+
+        # -- (c) HCB detection (Kneedle on cumulative r) --
+        ax3 = fig.add_subplot(223)
+        if kneedle_data:
+            x_n = kneedle_data["x_norm"]
+            y_n = kneedle_data["y_norm"]
+            d_curve = kneedle_data["d"]
+            ki = kneedle_data["knee_idx"]
+
+            ax3.plot(
+                x_n, y_n, color="steelblue", linewidth=2, label="Cumulative mean-$r$"
+            )
+            ax3.plot(
+                [0, 1],
+                [0, 1],
+                color="gray",
+                linestyle="--",
+                linewidth=1,
+                label="Diagonal",
+            )
+            ax3.fill_between(x_n, x_n, y_n, alpha=0.10, color="steelblue")
+            ax3.axvline(
+                x_n[ki],
+                color="#2ca02c",
+                linewidth=2,
+                label=f"Knee → HCB = {hcb_m:.1f} m",
+            )
+            ax3.plot(x_n[ki], y_n[ki], "o", color="#2ca02c", markersize=8, zorder=10)
+
+            # Inset: distance curve
+            ax3_inset = ax3.twinx()
+            ax3_inset.plot(
+                x_n,
+                d_curve,
+                color="#d62728",
+                linewidth=1.2,
+                alpha=0.6,
+                label="Distance $d$",
+            )
+            ax3_inset.set_ylabel("Distance $d$", fontsize=9, color="#d62728")
+            ax3_inset.tick_params(axis="y", labelcolor="#d62728", labelsize=8)
+
+            ax3.set_xlabel("Normalized arc-length", fontsize=11)
+            ax3.set_ylabel("Normalized cumulative $r$", fontsize=11)
+            ax3.set_title(
+                "HCB detection (Kneedle on cumulative $r$)",
+                fontsize=13,
+                fontweight="bold",
+                pad=8,
+            )
+            ax3.legend(fontsize=8, loc="upper left")
+        ax3.text(
+            0.02,
+            0.97,
+            "(c)",
+            transform=ax3.transAxes,
+            fontsize=16,
+            fontweight="bold",
+            va="top",
+        )
+
+        # -- (d) Mean-r vs arc-length → max crown radius --
+        ax4 = fig.add_subplot(224)
+        slice_centers_m = slice_centers * scale
+        mean_r_m = mean_r_per_slice * scale
+        ax4.plot(
+            slice_centers_m,
+            mean_r_m,
+            color="steelblue",
+            linewidth=2,
+            marker="o",
+            markersize=4,
+            label="Mean $r$ per slice",
+        )
+        ax4.axhline(
+            max_crown_r_m,
+            color="#ff7f0e",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"Max = {max_crown_r_m:.2f} m",
+        )
+        ax4.plot(
+            slice_centers_m[max_r_slice_idx],
+            mean_r_m[max_r_slice_idx],
+            "o",
+            color="#ff7f0e",
+            markersize=10,
+            zorder=10,
+        )
+        if not np.isnan(hcb_val):
+            hcb_s_m = hcb_val * (s_max * scale)
+            ax4.axvline(
+                hcb_s_m,
+                color="#2ca02c",
+                linestyle=":",
+                linewidth=1.5,
+                alpha=0.7,
+                label=f"HCB = {hcb_m:.1f} m",
+            )
+        ax4.set_xlabel("Arc-length $s$ (m)", fontsize=11)
+        ax4.set_ylabel("Mean radial distance $r$ (m)", fontsize=11)
+        ax4.set_title(
+            "Max crown radius detection", fontsize=13, fontweight="bold", pad=8
+        )
+        ax4.legend(fontsize=8, loc="upper right")
+        ax4.text(
+            0.02,
+            0.97,
+            "(d)",
+            transform=ax4.transAxes,
+            fontsize=16,
+            fontweight="bold",
+            va="top",
+        )
+
+        species_display = species.replace("_", " ")
+        fig.suptitle(
+            f"{species_display}  |  {height_bin} m  |  "
+            f"H = {height_m:.1f} m  |  tree {tree_id}  |  "
+            f"{len(cloud):,} pts\n"
+            f"HuV = {hull_volume:.2f} m³  |  CrR = {max_crown_r_m:.2f} m  |  HCB = {hcb_m:.1f} m",
+            fontsize=14,
+            fontweight="bold",
+            y=0.99,
+        )
+
+        fig.patch.set_facecolor("white")
+        plt.tight_layout(rect=[0, 0, 1, 0.94])
+        species_safe = species.replace(" ", "_")
+        fname = f"{species_safe}_{height_bin}m_tree_{tree_id_str}.pdf"
+        fig.savefig(
+            audit_dir / fname,
+            format="pdf",
+            bbox_inches="tight",
+            dpi=200,
+        )
+        plt.close(fig)
+        total_figs += 1
+
+    print(f"\nCrown audit: {total_figs} figures saved to {audit_dir}/")
+
+
+def find_latest_checkpoint(experiment_dir):
+    """Find the latest epoch checkpoint in an experiment directory."""
+    ckpt_dir = Path(experiment_dir) / "checkpoints"
+    epoch_files = list(ckpt_dir.glob("epoch_*.pt"))
+    if not epoch_files:
+        return "best_model.pt"
+    epochs = sorted([int(f.stem.split("_")[1]) for f in epoch_files])
+    return f"epoch_{epochs[-1]}.pt"
+
+
+CONIFER_GENERA = {"Abies", "Larix", "Picea", "Pinus", "Pseudotsuga"}
+
+
+def create_figure_qualitative(
+    experiment_dir: str = "experiments/finetune-8-512-16384",
+    data_path: str = None,
+    n_rows: int = 6,
+    n_generated: int = 4,
+    tree_ids: list[int] = None,
+    canonicalize_clouds: bool = False,
+    seed: int = 42,
+    output_dir: str = "figures",
+):
+    """
+    Create qualitative results figure: real test trees alongside generated counterparts.
+
+    Produces 6 sheets (2 each of best/representative/worst by Chamfer distance).
+    Each sheet has n_rows trees (2 conifers + 2 broadleaves) rendered as a tight
+    PNG-composite grid using imshow to eliminate 3D-axis whitespace.
+
+    Falls back to random sample selection if df_pairs.csv is not found.
+    """
+    import io
+    import zarr
+    from PIL import Image
+    from evaluate import canonicalize
+
+    rng = np.random.RandomState(seed)
+
+    experiment_dir = Path(experiment_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+
+    # Load metadata
+    if data_path is None:
+        from generate_samples import load_experiment_config
+
+        config = load_experiment_config(experiment_dir)
+        data_path = config.get("data_path", "./data/preprocessed-16384")
+    data_path = Path(data_path)
+
+    real_csv = data_path / "metadata.csv"
+    real_meta = pd.read_csv(real_csv)
+    real_meta["file_id"] = real_meta["filename"].apply(lambda x: Path(x).stem)
+    real_meta["file_path"] = real_meta["file_id"].apply(
+        lambda x: str(data_path / f"{x}.zarr")
+    )
+    real_meta = real_meta[real_meta["file_path"].apply(lambda x: Path(x).exists())]
+    real_meta = real_meta[real_meta["split"] == "test"].copy()
+    if "genus" not in real_meta.columns:
+        real_meta["genus"] = "unknown"
+    print(f"Real test trees: {len(real_meta)}")
+
+    gen_csv = experiment_dir / "samples" / "samples_metadata.csv"
+    gen_meta = pd.read_csv(gen_csv)
+    gen_meta["source_tree_id"] = gen_meta["source_tree_id"].apply(
+        lambda x: str(x).zfill(5)
+    )
+    zarr_dir = experiment_dir / "samples" / "zarr"
+    print(f"Generated samples: {len(gen_meta)}")
+
+    # Build lookup: tree_id -> list of generated sample rows
+    tree_to_samples = {}
+    for _, row in gen_meta.iterrows():
+        tid = row["source_tree_id"]
+        tree_to_samples.setdefault(tid, []).append(row)
+
+    # Only consider trees that have enough generated samples
+    eligible_tree_ids = [
+        tid for tid, samples in tree_to_samples.items() if len(samples) >= n_generated
+    ]
+    eligible_real = real_meta[real_meta["file_id"].isin(eligible_tree_ids)].copy()
+    print(f"Eligible trees (>= {n_generated} samples): {len(eligible_real)}")
+
+    # --- Load df_pairs.csv for quality-ranked selection ---
+    pairs_path = experiment_dir / "samples" / "evaluation" / "df_pairs.csv"
+    df_pairs = None
+    if pairs_path.exists():
+        df_pairs = pd.read_csv(pairs_path)
+        # Ensure IDs are zero-padded strings
+        df_pairs["real_id"] = df_pairs["real_id"].apply(lambda x: str(x).zfill(5))
+        df_pairs["gen_id"] = df_pairs["gen_id"].apply(lambda x: str(x).zfill(5))
+        # Only keep eligible trees
+        df_pairs = df_pairs[df_pairs["real_id"].isin(eligible_tree_ids)].copy()
+        print(
+            f"Loaded df_pairs.csv: {len(df_pairs)} pairs for {df_pairs['real_id'].nunique()} trees"
+        )
+    else:
+        print(
+            f"WARNING: {pairs_path} not found — falling back to random sample selection"
+        )
+
+    # --- Select trees: one per height bin, unique species, different trees per mode ---
+    def _pick_height_stratified(pool_df, n, used, rng):
+        """Pick n trees from pool_df, one per height bin, unique genus."""
+        avail = pool_df[~pool_df["file_id"].isin(used)].copy()
+        if len(avail) == 0:
+            return []
+        # Create n equal-frequency height bins from available trees
+        avail["_hbin"] = pd.qcut(
+            avail["tree_H"], q=min(n, len(avail)), duplicates="drop"
+        )
+        picked = []
+        seen_genus = set()
+        for _, bin_df in avail.groupby("_hbin", observed=True):
+            candidates = bin_df[~bin_df["genus"].isin(seen_genus)]
+            if len(candidates) == 0:
+                candidates = bin_df  # fall back if all genera taken
+            row = candidates.sample(1, random_state=rng).iloc[0]
+            picked.append(row["file_id"])
+            seen_genus.add(row["genus"])
+            if len(picked) >= n:
+                break
+        return picked
+
+    if tree_ids is not None:
+        manual_ids = [str(tid).zfill(5) for tid in tree_ids]
+        manual_ids = [mid for mid in manual_ids if mid in eligible_tree_ids]
+        mode_tree_sets = {
+            m: [manual_ids, manual_ids] for m in ["best", "representative", "worst"]
+        }
+        print(f"Manual tree_ids: {manual_ids}")
+    else:
+        # Rank trees by median Chamfer distance, split into thirds
+        if df_pairs is not None:
+            tree_cd = df_pairs.groupby("real_id")["chamfer_dist"].median()
+            eligible_real = eligible_real.copy()
+            eligible_real["_median_cd"] = eligible_real["file_id"].map(tree_cd)
+            eligible_real = eligible_real.dropna(subset=["_median_cd"])
+            eligible_real = eligible_real.sort_values("_median_cd").reset_index(
+                drop=True
+            )
+            n = len(eligible_real)
+            third = n // 3
+            pools = {
+                "best": eligible_real.iloc[:third],
+                "representative": eligible_real.iloc[third : 2 * third],
+                "worst": eligible_real.iloc[2 * third :],
+            }
+        else:
+            pools = {m: eligible_real for m in ["best", "representative", "worst"]}
+
+        all_used = set()
+        mode_tree_sets = {}
+        for mode in ["best", "representative", "worst"]:
+            sets = []
+            for set_i in range(2):
+                trees = _pick_height_stratified(pools[mode], n_rows, all_used, rng)
+                sets.append(trees)
+                all_used.update(trees)
+                species_picked = eligible_real[eligible_real["file_id"].isin(trees)][
+                    "species"
+                ].tolist()
+                print(
+                    f"  {mode} set {set_i+1}: {[s.replace('_', ' ') for s in species_picked]}"
+                )
+            mode_tree_sets[mode] = sets
+        print(f"Selected {len(all_used)} unique trees across all modes")
+
+    # --- Sample selection functions ---
+    def _pick_samples_by_cd(tree_id, mode, n):
+        """Pick n generated samples for tree_id ranked by Chamfer distance."""
+        if df_pairs is None:
+            # Random fallback
+            available = tree_to_samples[tree_id]
+            rng.shuffle(available)
+            return [(r["sample_file"], None) for r in available[:n]]
+
+        tree_pairs = df_pairs[df_pairs["real_id"] == tree_id].copy()
+        tree_pairs = tree_pairs.sort_values("chamfer_dist")
+
+        if mode == "best":
+            selected = tree_pairs.head(n)
+        elif mode == "worst":
+            selected = tree_pairs.tail(n)
+        elif mode == "representative":
+            # Pick samples closest to the median CD
+            median_cd = tree_pairs["chamfer_dist"].median()
+            tree_pairs["_dist_to_median"] = (
+                tree_pairs["chamfer_dist"] - median_cd
+            ).abs()
+            selected = tree_pairs.nsmallest(n, "_dist_to_median")
+        elif mode == "random":
+            selected = tree_pairs.sample(n=min(n, len(tree_pairs)), random_state=rng)
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+
+        results = []
+        for _, row in selected.iterrows():
+            gen_id = row["gen_id"]
+            cd = float(row["chamfer_dist"])
+            # Find sample file from gen_meta
+            sample_file = f"{gen_id}.zarr"
+            results.append((sample_file, cd))
+        return results
+
+    # --- Rendering helpers ---
+    point_size = 0.4
+    elev, azim = 20, 45
+    margin = 0.05
+    render_dpi = 300
+
+    def compute_row_limits(row_clouds):
+        all_pts = np.concatenate(row_clouds, axis=0)
+        ranges, mids = [], []
+        for dim in range(3):
+            lo, hi = all_pts[:, dim].min(), all_pts[:, dim].max()
+            span = hi - lo
+            pad = span * margin
+            ranges.append(span + 2 * pad)
+            mids.append((lo + hi) / 2)
+        ranges = [max(r, 0.1) for r in ranges]
+        return mids, ranges
+
+    def render_tree_to_image(pts, mids, ranges):
+        """Render a single 3D point cloud to a tight RGBA image array."""
+        fig = plt.figure(figsize=(2.0, 2.5))
+        ax = fig.add_subplot(111, projection="3d")
+        ax.scatter(
+            pts[:, 0],
+            pts[:, 1],
+            pts[:, 2],
+            c=pts[:, 2],
+            cmap="viridis",
+            s=point_size,
+            alpha=0.8,
+            rasterized=True,
+        )
+        ax.set_xlim(mids[0] - ranges[0] / 2, mids[0] + ranges[0] / 2)
+        ax.set_ylim(mids[1] - ranges[1] / 2, mids[1] + ranges[1] / 2)
+        ax.set_zlim(mids[2] - ranges[2] / 2, mids[2] + ranges[2] / 2)
+        ax.set_box_aspect(ranges)
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_axis_off()
+
+        buf = io.BytesIO()
+        fig.savefig(
+            buf,
+            format="png",
+            bbox_inches="tight",
+            pad_inches=0,
+            dpi=render_dpi,
+            transparent=True,
+        )
+        plt.close(fig)
+        buf.seek(0)
+        img = np.array(Image.open(buf))
+        # Crop transparent/white margins
+        if img.shape[2] == 4:
+            alpha = img[:, :, 3]
+            rows_with_content = np.where(alpha > 0)[0]
+            cols_with_content = np.where(alpha > 0)[1]
+            if len(rows_with_content) > 0:
+                pad = 2  # pixels
+                r0 = max(0, rows_with_content.min() - pad)
+                r1 = min(img.shape[0], rows_with_content.max() + pad + 1)
+                c0 = max(0, cols_with_content.min() - pad)
+                c1 = min(img.shape[1], cols_with_content.max() + pad + 1)
+                img = img[r0:r1, c0:c1]
+        return img
+
+    def _load_and_prepare_clouds(tree_id, sample_infos, canonicalize_clouds_flag):
+        """Load real + generated clouds, optionally canonicalize, convert to meters."""
+        real_row = real_meta[real_meta["file_id"] == tree_id].iloc[0]
+        height_m = float(real_row["tree_H"])
+
+        real_path = data_path / f"{tree_id}.zarr"
+        real_cloud = zarr.load(str(real_path)).astype(np.float32)
+
+        gen_clouds = []
+        for sample_file, _ in sample_infos:
+            gen_path = zarr_dir / sample_file
+            gen_cloud = zarr.load(str(gen_path)).astype(np.float32)
+            gen_clouds.append(gen_cloud)
+
+        # Downsample real cloud to match generated sample size for fair comparison
+        if gen_clouds:
+            target_n = gen_clouds[0].shape[0]
+            if real_cloud.shape[0] > target_n:
+                idx = rng.choice(real_cloud.shape[0], target_n, replace=False)
+                real_cloud = real_cloud[idx]
+
+        row_clouds = [real_cloud] + gen_clouds
+        if canonicalize_clouds_flag:
+            row_clouds = [canonicalize(c) for c in row_clouds]
+
+        # Convert to meters
+        row_clouds_m = []
+        for cloud in row_clouds:
+            pts_m = (cloud / 2.0) * height_m
+            pts_m[:, 2] -= pts_m[:, 2].min()
+            row_clouds_m.append(pts_m)
+
+        return row_clouds_m, height_m, real_row
+
+    def compose_sheet(sheet_tree_ids, mode, sheet_name, all_metadata_dict):
+        """Render one sheet: load clouds, render each tree to PNG, composite via imshow."""
+        n_cols = 1 + n_generated
+
+        # Sort by height (tallest first)
+        id_to_height = {}
+        for tid in sheet_tree_ids:
+            row = real_meta[real_meta["file_id"] == tid].iloc[0]
+            id_to_height[tid] = row["tree_H"]
+        sheet_tree_ids = sorted(sheet_tree_ids, key=lambda t: -id_to_height[t])
+
+        # Render all tree images
+        row_images = []  # list of lists: row_images[row][col] = np.array
+        sheet_meta = {}
+
+        for row_i, tree_id in enumerate(sheet_tree_ids):
+            sample_infos = _pick_samples_by_cd(tree_id, mode, n_generated)
+            clouds_m, height_m, real_row = _load_and_prepare_clouds(
+                tree_id, sample_infos, canonicalize_clouds
+            )
+            mids, ranges = compute_row_limits(clouds_m)
+
+            species = real_row.get("species", "unknown")
+            species_display = species.replace("_", " ")
+            cd_values = [si[1] for si in sample_infos]
+
+            print(
+                f"  Row {row_i+1}: {tree_id} - {species_display}, "
+                f"H={height_m:.1f}m, mode={mode}"
+            )
+
+            col_images = []
+            for col_j in range(n_cols):
+                img = render_tree_to_image(clouds_m[col_j], mids, ranges)
+                col_images.append(img)
+            row_images.append(col_images)
+
+            sheet_meta[f"row_{row_i}"] = {
+                "tree_id": tree_id,
+                "species": species,
+                "genus": real_row.get("genus", "unknown"),
+                "height_m": round(height_m, 2),
+                "mode": mode,
+                "sample_files": [si[0] for si in sample_infos],
+                "chamfer_dists": cd_values,
+            }
+
+        # Normalize image sizes: pad all to same height/width per row, same width per col
+        # Find max dimensions per column and per row
+        actual_rows = len(row_images)
+        row_heights = []
+        col_widths = [0] * n_cols
+        for row_i in range(actual_rows):
+            max_h = max(img.shape[0] for img in row_images[row_i])
+            row_heights.append(max_h)
+            for col_j in range(n_cols):
+                col_widths[col_j] = max(
+                    col_widths[col_j], row_images[row_i][col_j].shape[1]
+                )
+
+        def _pad_image(img, target_h, target_w):
+            """Center-pad an RGBA image to target dimensions with white background."""
+            h, w = img.shape[:2]
+            channels = img.shape[2] if img.ndim == 3 else 1
+            padded = np.full((target_h, target_w, channels), 255, dtype=np.uint8)
+            y_off = (target_h - h) // 2
+            x_off = (target_w - w) // 2
+            padded[y_off : y_off + h, x_off : x_off + w] = img
+            return padded
+
+        # Build composite figure with imshow
+        # MDPI full page: 17cm × 23.5cm (6.69in × 9.25in)
+        fig_width = 6.69
+        fig_height = 9.25
+        label_col_frac = 0.16  # fraction of width for species label column
+        header_frac = 0.03  # fraction of height for column headers
+
+        grid_width = 1.0 - label_col_frac
+        col_frac = grid_width / n_cols
+
+        fig, axes = plt.subplots(
+            actual_rows,
+            n_cols,
+            figsize=(fig_width, fig_height),
+            gridspec_kw={
+                "left": label_col_frac,
+                "right": 1.0,
+                "top": 1.0 - header_frac,
+                "bottom": 0.0,
+                "wspace": 0.02,
+                "hspace": 0.02,
+            },
+        )
+        if actual_rows == 1:
+            axes = axes[np.newaxis, :]
+        if n_cols == 1:
+            axes = axes[:, np.newaxis]
+
+        for row_i in range(actual_rows):
+            for col_j in range(n_cols):
+                ax = axes[row_i, col_j]
+                img = _pad_image(
+                    row_images[row_i][col_j],
+                    row_heights[row_i],
+                    col_widths[col_j],
+                )
+                ax.imshow(img)
+                ax.set_axis_off()
+
+        # Column headers
+        col_labels = ["Real"] + [f"Sample {j+1}" for j in range(n_generated)]
+        for col_j in range(n_cols):
+            x = label_col_frac + col_j * col_frac + col_frac / 2
+            y = 1.0 - header_frac * 0.4
+            fig.text(x, y, col_labels[col_j], ha="center", va="center", fontsize=8)
+
+        # Row labels (species + height) in the label column
+        row_y_positions = []
+        grid_h = 1.0 - header_frac
+        for row_i in range(actual_rows):
+            # Compute vertical center of this row
+            row_top = header_frac + (row_i / actual_rows) * (1.0 - header_frac)
+            row_bot = header_frac + ((row_i + 1) / actual_rows) * (1.0 - header_frac)
+            # In figure coords, top of grid is (1-header_frac), bottom is 0
+            # But gridspec goes top to bottom
+            fig_y = 1.0 - (row_top + row_bot) / 2
+            row_y_positions.append(fig_y)
+
+        for row_i in range(actual_rows):
+            tree_id = sheet_tree_ids[row_i]
+            real_row = real_meta[real_meta["file_id"] == tree_id].iloc[0]
+            species = real_row.get("species", "unknown").replace("_", " ")
+            height_m = id_to_height[tree_id]
+            data_type = real_row.get("data_type", "unknown").upper()
+            # Position label right-aligned, close to the image grid
+            label_x = label_col_frac - 0.01
+            label_y = row_y_positions[row_i]
+            fig.text(
+                label_x,
+                label_y,
+                f"{species}\nH = {height_m:.1f} m\n{data_type}",
+                ha="right",
+                va="center",
+                fontsize=8,
+                fontstyle="italic",
+            )
+
+        sheet_path = output_dir / f"figure_qualitative_{sheet_name}.pdf"
+        fig.savefig(
+            sheet_path, format="pdf", dpi=600, bbox_inches="tight", pad_inches=0.02
+        )
+        plt.close(fig)
+        print(f"  Saved: {sheet_path}")
+
+        all_metadata_dict[sheet_name] = sheet_meta
+
+    # --- Generate all 6 sheets (different trees per mode) ---
+    all_metadata = {}
+    sheet_configs = [
+        ("best_1", mode_tree_sets["best"][0], "best"),
+        ("best_2", mode_tree_sets["best"][1], "best"),
+        ("representative_1", mode_tree_sets["representative"][0], "representative"),
+        ("representative_2", mode_tree_sets["representative"][1], "representative"),
+        ("worst_1", mode_tree_sets["worst"][0], "worst"),
+        ("worst_2", mode_tree_sets["worst"][1], "worst"),
+    ]
+
+    for sheet_name, tree_set, mode in sheet_configs:
+        print(f"\n--- Sheet: {sheet_name} ({len(tree_set)} rows, mode={mode}) ---")
+        compose_sheet(tree_set, mode, sheet_name, all_metadata)
+
+    # --- Generate random sheets: random trees with genus/height diversity ---
+    n_random_sheets = 6
+    all_random_used = set(all_used) if tree_ids is None else set()
+    for ri in range(n_random_sheets):
+        random_tree_ids = _pick_height_stratified(
+            eligible_real, n_rows, all_random_used, rng
+        )
+        if len(random_tree_ids) < n_rows:
+            all_random_used = set()  # reset if exhausted
+            random_tree_ids = _pick_height_stratified(
+                eligible_real, n_rows, all_random_used, rng
+            )
+        all_random_used.update(random_tree_ids)
+        sheet_name = f"random_{ri+1}"
+        print(
+            f"\n--- Sheet: {sheet_name} ({len(random_tree_ids)} rows, mode=random) ---"
+        )
+        compose_sheet(random_tree_ids, "random", sheet_name, all_metadata)
+
+    # Save metadata
+    all_metadata["_config"] = {
+        "experiment_dir": str(experiment_dir),
+        "data_path": str(data_path),
+        "canonicalize": canonicalize_clouds,
+        "seed": seed,
+        "n_rows": n_rows,
+        "n_generated": n_generated,
+        "tree_ids": tree_ids,
+        "conifer_genera": sorted(CONIFER_GENERA),
+    }
+    meta_path = output_dir / "figure_qualitative.json"
+    with open(meta_path, "w") as f:
+        json.dump(all_metadata, f, indent=2)
+    print(f"  Saved metadata: {meta_path}")
+
+    print(f"\nQualitative figure saved to {output_dir}/")
+
+
+def plot_stem_tracker_figure(
+    zarr_path: str,
+    height_m: float,
+    output_path: str,
+    num_spine_bins: int = 20,
+    seed: int = 42,
+    hist_r_bins: int = 32,
+    hist_s_bins: int = 64,
+):
+    """Generate a 1×2 appendix figure: 3D spine overlay + (r, s) density histogram.
+
+    Args:
+        zarr_path: Path to a single tree's zarr file (normalized coordinates).
+        height_m: Tree height in meters (used to scale cloud for 3D display).
+        output_path: Where to save the PDF.
+        num_spine_bins: Number of vertical bins for the stem tracker.
+        seed: Random seed for point subsampling.
+        hist_r_bins: Radial bins for the 2D histogram (default 32, matching spine audit).
+        hist_s_bins: Arc-length bins for the 2D histogram (default 64, matching spine audit).
+    """
+    import zarr
+    from matplotlib.colors import PowerNorm
+
+    # ---- Load and scale cloud ----
+    cloud_norm = zarr.load(str(zarr_path)).astype(np.float32)
+    cloud = cloud_norm * height_m  # scale to meters for spine fitting
+
+    # ---- Compute (r, s) cylindrical coordinates on normalized cloud ----
+    r, s, spine_raw, poly_x, poly_y = compute_rs_spine(
+        cloud_norm, num_bins=num_spine_bins
+    )
+
+    # ---- Smooth polynomial spine in meters for 3D overlay ----
+    x, y, z = cloud[:, 0], cloud[:, 1], cloud[:, 2]
+    z_min, z_max = z.min(), z.max()
+    # Evaluate the fitted polynomials in normalized space, then scale
+    z_norm = cloud_norm[:, 2]
+    zn_min, zn_max = z_norm.min(), z_norm.max()
+    spine_zn_dense = np.linspace(zn_min, zn_max, 200)
+    spine_curve = np.column_stack(
+        [
+            poly_x(spine_zn_dense) * height_m,
+            poly_y(spine_zn_dense) * height_m,
+            spine_zn_dense * height_m,
+        ]
+    )
+
+    # ---- Subsample for 3D scatter ----
+    rng = np.random.default_rng(seed)
+    n_show = min(8000, len(cloud))
+    idx = rng.choice(len(cloud), n_show, replace=False)
+
+    # ---- Figure setup ----
+    prev_rc = {
+        k: plt.rcParams[k]
+        for k in [
+            "font.family",
+            "font.size",
+            "axes.labelsize",
+            "xtick.labelsize",
+            "ytick.labelsize",
+        ]
+    }
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.size": 9,
+            "axes.labelsize": 10,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+        }
+    )
+
+    # Render the 3D panel to an image buffer first, crop it tight, then
+    # compose both panels side-by-side at matched heights.  This avoids
+    # the matplotlib 3D projection sizing issues entirely.
+    import io
+    from PIL import Image
+
+    render_dpi = 300
+
+    # ---- Render 3D panel to image ----
+    # Use per-axis limits with padding instead of a cube, so tall narrow
+    # trees fill the vertical extent rather than floating in a big cube.
+    centroid = cloud.mean(axis=0)
+    pad = 0.15  # fraction of each axis range to pad
+    ranges = np.ptp(cloud, axis=0)
+    # Ensure XY ranges are equal (so the tree isn't distorted in plan view)
+    xy_range = max(ranges[0], ranges[1])
+    half_xy = xy_range * (1 + pad) / 2.0
+    # Ground the tree: minimal padding below, normal above
+    z_lo = cloud[:, 2].min() - ranges[2] * 0.02
+    z_hi = cloud[:, 2].max() + ranges[2] * pad
+    full_z = z_hi - z_lo
+    z_mid = (z_lo + z_hi) / 2.0
+
+    # Figure aspect ratio matches the 3D box proportions
+    fig3d = plt.figure(
+        figsize=(5, 5 * (full_z / 2.0) / max(half_xy, 1e-6)), dpi=render_dpi
+    )
+    ax1 = fig3d.add_subplot(111, projection="3d")
+    ax1.scatter(
+        cloud[idx, 0],
+        cloud[idx, 1],
+        cloud[idx, 2],
+        c=cloud[idx, 2],
+        cmap="viridis",
+        s=0.8,
+        alpha=0.4,
+        rasterized=True,
+    )
+    ax1.plot(
+        spine_curve[:, 0],
+        spine_curve[:, 1],
+        spine_curve[:, 2],
+        color="#d62728",
+        linewidth=3.5,
+        zorder=10,
+    )
+
+    ax1.set_xlim(centroid[0] - half_xy, centroid[0] + half_xy)
+    ax1.set_ylim(centroid[1] - half_xy, centroid[1] + half_xy)
+    ax1.set_zlim(z_lo, z_hi)
+    ax1.set_box_aspect([half_xy, half_xy, full_z / 2.0])
+    ax1.view_init(elev=15, azim=135)
+    ax1.xaxis.pane.fill = False
+    ax1.yaxis.pane.fill = False
+    ax1.zaxis.pane.fill = False
+    ax1.xaxis.pane.set_edgecolor("lightgray")
+    ax1.yaxis.pane.set_edgecolor("lightgray")
+    ax1.zaxis.pane.set_edgecolor("lightgray")
+    ax1.grid(True, alpha=0.2)
+    ax1.set_xticklabels([])
+    ax1.set_yticklabels([])
+    ax1.set_zticklabels([])
+    ax1.set_xlabel("")
+    ax1.set_ylabel("")
+    ax1.set_zlabel("")
+
+    buf = io.BytesIO()
+    fig3d.savefig(
+        buf,
+        format="png",
+        dpi=render_dpi,
+        bbox_inches="tight",
+        pad_inches=0.05,
+        facecolor="white",
+    )
+    plt.close(fig3d)
+    buf.seek(0)
+    img_3d = np.array(Image.open(buf))
+
+    # ---- Compose final figure: 3D image on left, heatmap on right ----
+    fig = plt.figure(figsize=(10, 5))
+    # Place the 3D image — axes fills left half, image scaled to match
+    ax_img = fig.add_axes([0.02, 0.02, 0.44, 0.96])
+    ax_img.imshow(img_3d)
+    ax_img.set_axis_off()
+
+    ax2 = fig.add_axes([0.52, 0.12, 0.34, 0.80])
+
+    # ---- Panel (b): 2D density histogram in (r, s) ----
+    eps = 1e-6
+    r_max = np.percentile(r, 99.5) + eps
+    s_max = s.max() + eps if s.max() > 0 else eps
+    hist, r_edges, s_edges = np.histogram2d(
+        r,
+        s,
+        bins=[
+            np.linspace(0, r_max, hist_r_bins + 1),
+            np.linspace(0, s_max, hist_s_bins + 1),
+        ],
+    )
+    density = hist / (hist.sum() + eps)
+    density_ma = np.ma.masked_equal(density, 0)
+    vmax = np.percentile(density[density > 0], 99) if (density > 0).any() else 1
+
+    cmap_heat = plt.cm.YlGnBu.copy()
+    cmap_heat.set_bad(color="white")
+    pcm = ax2.pcolormesh(
+        r_edges,
+        s_edges,
+        density_ma.T,
+        cmap=cmap_heat,
+        norm=PowerNorm(gamma=0.4, vmin=0, vmax=vmax),
+        rasterized=True,
+    )
+    ax2.set_xlabel(r"Radial distance $r$", fontsize=11)
+    ax2.set_ylabel(r"Arc length $s$", fontsize=11)
+    cb = fig.colorbar(pcm, ax=ax2, pad=0.02, fraction=0.046)
+    cb.set_label("Point density", fontsize=9)
+    cb.ax.tick_params(labelsize=8)
+
+    # ---- Save ----
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    plt.rcParams.update(prev_rc)
+    print(f"Saved stem tracker figure: {output_path}")
+
+
+def create_figure_stem_tracker(
+    data_path: str = "./data/preprocessed-16384",
+    output_dir: str = "figures",
+    tree_ids: list[int] | None = None,
+    seed: int = 42,
+):
+    """CLI-facing wrapper: resolve tree IDs from dataset metadata, then plot.
+
+    Args:
+        data_path: Path to preprocessed dataset directory (with metadata.csv).
+        output_dir: Directory to save PDFs into.
+        tree_ids: List of tree IDs to plot. If None, prints available IDs.
+        seed: Random seed for point subsampling.
+    """
+    data_path = Path(data_path)
+    meta_csv = data_path / "metadata.csv"
+    df = pd.read_csv(meta_csv)
+    df["file_id"] = df["filename"].apply(lambda x: Path(x).stem)
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if tree_ids is None:
+        print("No tree IDs specified. Available trees:")
+        for _, row in df.iterrows():
+            print(
+                f"  {int(row['treeID']):5d}  {row['species']:30s}  H={row['tree_H']:.1f}m  ({row['split']})"
+            )
+        return
+
+    metadata = {}
+    for tree_id in tree_ids:
+        tree_rows = df[df["treeID"] == tree_id]
+        if tree_rows.empty:
+            print(f"Tree {tree_id} not found in {meta_csv}")
+            continue
+
+        row = tree_rows.iloc[0]
+        height_m = float(row["tree_H"])
+        species = row["species"]
+        file_id = row["file_id"]
+        data_type = row["data_type"]
+        dataset = row["dataset"]
+        split = row["split"]
+        zarr_path = data_path / f"{file_id}.zarr"
+
+        if not zarr_path.exists():
+            print(f"Zarr not found: {zarr_path}")
+            continue
+
+        species_safe = species.replace(" ", "_")
+        output_path = (
+            out_dir / f"figure_appendix_stem_tracker_{species_safe}_{tree_id}.pdf"
+        )
+        print(f"Stem tracker figure: tree {tree_id}, {species}, H={height_m:.1f}m")
+        plot_stem_tracker_figure(
+            str(zarr_path),
+            height_m,
+            str(output_path),
+            seed=seed,
+        )
+
+        metadata[str(tree_id)] = {
+            "tree_id": int(tree_id),
+            "file_id": file_id,
+            "species": species,
+            "height_m": round(height_m, 2),
+            "data_type": data_type,
+            "dataset": dataset,
+            "split": split,
+            "output_path": str(output_path),
+        }
+
+    if metadata:
+        meta_path = out_dir / "figure_stem_tracker.json"
+        with open(meta_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        print(f"  Saved metadata: {meta_path}")
+
+
+def plot_hcb_figure(
+    zarr_path: str,
+    height_m: float,
+    output_path: str,
+    num_spine_bins: int = 20,
+    seed: int = 42,
+):
+    """Generate a 1×2 appendix figure for HCB detection via modified Kneedle.
+
+    Left:  3D point cloud with spine, HCB disk, and max crown radius ring.
+    Right: Kneedle detection graph (cumulative mean-r, diagonal, distance
+           function, detected knee point).
+
+    Args:
+        zarr_path: Path to a single tree's zarr file (normalized coordinates).
+        height_m: Tree height in meters.
+        output_path: Where to save the PDF.
+        num_spine_bins: Number of vertical bins for the stem tracker.
+        seed: Random seed for point subsampling.
+
+    Returns:
+        True if the figure was saved, False if HCB detection was degenerate.
+    """
+    import io
+    import zarr
+    from PIL import Image
+    from evaluate import compute_mean_r_per_slice, compute_hcb
+
+    # ---- Load normalized cloud ----
+    cloud_norm = zarr.load(str(zarr_path)).astype(np.float32)
+    scale = height_m / 2.0
+
+    # ---- Compute (r, s) cylindrical coordinates on normalized cloud ----
+    r, s, spine_raw, poly_x, poly_y = compute_rs_spine(
+        cloud_norm, num_bins=num_spine_bins
+    )
+
+    z = cloud_norm[:, 2]
+    z_min, z_max = z.min(), z.max()
+    eps = 1e-6
+    s_max = s.max() + eps if s.max() > 0 else eps
+
+    # ---- Mean-r per slice and HCB detection ----
+    slice_centers, mean_r_per_slice = compute_mean_r_per_slice(s, r, s_max)
+    hcb_val, kneedle_data = compute_hcb(slice_centers, mean_r_per_slice, s_max)
+
+    if np.isnan(hcb_val) or not kneedle_data:
+        print(f"  WARNING: degenerate HCB for {zarr_path}, skipping")
+        return False
+
+    hcb_m = float(hcb_val * height_m)
+    max_crown_r_norm = mean_r_per_slice.max()
+    max_crown_r_m = float(max_crown_r_norm * scale)
+    max_r_slice_idx = int(np.argmax(mean_r_per_slice))
+
+    # ---- Scale cloud to display space ----
+    cloud_m = cloud_norm * height_m
+
+    # ---- Subsample for 3D scatter ----
+    rng = np.random.default_rng(seed)
+    n_show = min(8000, len(cloud_m))
+    idx = rng.choice(len(cloud_m), n_show, replace=False)
+
+    # ---- Figure setup ----
+    prev_rc = {
+        k: plt.rcParams[k]
+        for k in [
+            "font.family",
+            "font.size",
+            "axes.labelsize",
+            "xtick.labelsize",
+            "ytick.labelsize",
+        ]
+    }
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.size": 9,
+            "axes.labelsize": 10,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+        }
+    )
+
+    render_dpi = 300
+
+    # ---- Render 3D panel to image (same approach as plot_stem_tracker_figure) ----
+    centroid = cloud_m.mean(axis=0)
+    pad = 0.15
+    ranges = np.ptp(cloud_m, axis=0)
+    xy_range = max(ranges[0], ranges[1])
+    half_xy = xy_range * (1 + pad) / 2.0
+    # Ground the tree: minimal padding below, normal above
+    z_lo = cloud_m[:, 2].min() - ranges[2] * 0.02
+    z_hi = cloud_m[:, 2].max() + ranges[2] * pad
+    full_z = z_hi - z_lo
+
+    fig3d = plt.figure(
+        figsize=(5, 5 * (full_z / 2.0) / max(half_xy, 1e-6)), dpi=render_dpi
+    )
+    ax3d = fig3d.add_subplot(111, projection="3d")
+
+    ax3d.scatter(
+        cloud_m[idx, 0],
+        cloud_m[idx, 1],
+        cloud_m[idx, 2],
+        c=cloud_m[idx, 2],
+        cmap="viridis",
+        s=0.8,
+        alpha=0.4,
+        rasterized=True,
+    )
+
+    # HCB horizontal disk
+    hcb_z_norm = z_min + hcb_val * (z_max - z_min)
+    hcb_z_m = hcb_z_norm * height_m
+    hcb_cx = float(poly_x(hcb_z_norm)) * height_m
+    hcb_cy = float(poly_y(hcb_z_norm)) * height_m
+    theta = np.linspace(0, 2 * np.pi, 60)
+    plane_r = 0.3 * (z_max - z_min) * height_m
+    plane_x = hcb_cx + plane_r * np.cos(theta)
+    plane_y = hcb_cy + plane_r * np.sin(theta)
+    plane_z = np.full_like(theta, hcb_z_m)
+    ax3d.plot(plane_x, plane_y, plane_z, color="#2ca02c", linewidth=2.5, zorder=8)
+    ax3d.plot_trisurf(
+        plane_x,
+        plane_y,
+        plane_z,
+        color="#2ca02c",
+        alpha=0.15,
+        zorder=7,
+    )
+
+    # Max crown radius ring
+    if max_crown_r_norm > 0:
+        s_center = slice_centers[max_r_slice_idx]
+        spine_z_fine = np.linspace(z_min, z_max, 500)
+        dpx = poly_x.deriv()
+        dpy = poly_y.deriv()
+        ds_dz = np.sqrt(dpx(spine_z_fine) ** 2 + dpy(spine_z_fine) ** 2 + 1.0)
+        dz_vals = np.diff(spine_z_fine)
+        ds_vals = 0.5 * (ds_dz[:-1] + ds_dz[1:]) * dz_vals
+        s_fine = np.zeros(len(spine_z_fine))
+        s_fine[1:] = np.cumsum(ds_vals)
+        ring_z_norm = float(np.interp(s_center, s_fine, spine_z_fine))
+        ring_z_m = ring_z_norm * height_m
+        ring_cx = float(poly_x(ring_z_norm)) * height_m
+        ring_cy = float(poly_y(ring_z_norm)) * height_m
+        ring_x = ring_cx + max_crown_r_norm * height_m * np.cos(theta)
+        ring_y = ring_cy + max_crown_r_norm * height_m * np.sin(theta)
+        ring_zz = np.full_like(theta, ring_z_m)
+        ax3d.plot(
+            ring_x,
+            ring_y,
+            ring_zz,
+            color="#ff7f0e",
+            linewidth=2.5,
+            zorder=9,
+        )
+
+    ax3d.set_xlim(centroid[0] - half_xy, centroid[0] + half_xy)
+    ax3d.set_ylim(centroid[1] - half_xy, centroid[1] + half_xy)
+    ax3d.set_zlim(z_lo, z_hi)
+    ax3d.set_box_aspect([half_xy, half_xy, full_z / 2.0])
+    ax3d.view_init(elev=15, azim=135)
+    ax3d.xaxis.pane.fill = False
+    ax3d.yaxis.pane.fill = False
+    ax3d.zaxis.pane.fill = False
+    ax3d.xaxis.pane.set_edgecolor("lightgray")
+    ax3d.yaxis.pane.set_edgecolor("lightgray")
+    ax3d.zaxis.pane.set_edgecolor("lightgray")
+    ax3d.grid(True, alpha=0.2)
+    ax3d.set_xticklabels([])
+    ax3d.set_yticklabels([])
+    ax3d.set_zticklabels([])
+    ax3d.set_xlabel("")
+    ax3d.set_ylabel("")
+    ax3d.set_zlabel("")
+
+    buf = io.BytesIO()
+    fig3d.savefig(
+        buf,
+        format="png",
+        dpi=render_dpi,
+        bbox_inches="tight",
+        pad_inches=0.05,
+        facecolor="white",
+    )
+    plt.close(fig3d)
+    buf.seek(0)
+    img_3d = np.array(Image.open(buf))
+
+    # ---- Compose final figure: 3D image left, kneedle plot right ----
+    fig = plt.figure(figsize=(10, 5))
+
+    ax_img = fig.add_axes([0.02, 0.02, 0.44, 0.96])
+    ax_img.imshow(img_3d)
+    ax_img.set_axis_off()
+
+    ax_k = fig.add_axes([0.54, 0.12, 0.34, 0.80])
+
+    # ---- Kneedle detection plot ----
+    x_n = kneedle_data["x_norm"]
+    y_n = kneedle_data["y_norm"]
+    d_curve = kneedle_data["d"]
+    ki = kneedle_data["knee_idx"]
+
+    ax_k.plot(x_n, y_n, color="steelblue", linewidth=1.8, label=r"Cumulative $\bar{r}$")
+    ax_k.plot(
+        [0, 1],
+        [0, 1],
+        color="0.6",
+        linestyle="--",
+        linewidth=0.8,
+        label="Unit diagonal",
+    )
+    ax_k.fill_between(x_n, x_n, y_n, alpha=0.10, color="steelblue")
+    ax_k.axvline(
+        x_n[ki],
+        color="#2ca02c",
+        linewidth=1.5,
+        linestyle="-",
+        label=f"HCB = {hcb_m:.1f} m",
+    )
+    ax_k.plot(x_n[ki], y_n[ki], "o", color="#2ca02c", markersize=7, zorder=10)
+
+    # Distance curve on secondary axis — black labels, muted line
+    ax_d = ax_k.twinx()
+    ax_d.plot(
+        x_n,
+        d_curve,
+        color="0.55",
+        linewidth=1.0,
+        linestyle="-",
+        alpha=0.65,
+        label=r"$d_k$",
+    )
+    ax_d.set_ylabel(r"Weighted distance $d_k$", fontsize=10)
+    ax_d.tick_params(axis="y", labelsize=8)
+
+    ax_k.set_xlabel("Normalized arc length", fontsize=10)
+    ax_k.set_ylabel(r"Normalized cumulative $\bar{r}$", fontsize=10)
+
+    # Combined legend
+    lines_k, labels_k = ax_k.get_legend_handles_labels()
+    lines_d, labels_d = ax_d.get_legend_handles_labels()
+    ax_k.legend(
+        lines_k + lines_d,
+        labels_k + labels_d,
+        fontsize=8,
+        loc="lower right",
+        framealpha=0.9,
+        edgecolor="0.8",
+        fancybox=False,
+    )
+
+    # ---- Save ----
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    plt.rcParams.update(prev_rc)
+    print(f"Saved HCB figure: {output_path}")
+    return True
+
+
+def create_figure_hcb(
+    data_path: str = "./data/preprocessed-16384",
+    output_dir: str = "figures",
+    tree_ids: list[int] | None = None,
+    seed: int = 42,
+):
+    """CLI-facing wrapper: resolve tree IDs from dataset metadata, then plot HCB.
+
+    Args:
+        data_path: Path to preprocessed dataset directory (with metadata.csv).
+        output_dir: Directory to save PDFs into.
+        tree_ids: List of tree IDs to plot. If None, prints available IDs.
+        seed: Random seed for point subsampling.
+    """
+    data_path = Path(data_path)
+    meta_csv = data_path / "metadata.csv"
+    df = pd.read_csv(meta_csv)
+    df["file_id"] = df["filename"].apply(lambda x: Path(x).stem)
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if tree_ids is None:
+        print("No tree IDs specified. Available trees:")
+        for _, row in df.iterrows():
+            print(
+                f"  {int(row['treeID']):5d}  {row['species']:30s}  "
+                f"H={row['tree_H']:.1f}m  ({row['split']})"
+            )
+        return
+
+    metadata = {}
+    for tree_id in tree_ids:
+        tree_rows = df[df["treeID"] == tree_id]
+        if tree_rows.empty:
+            print(f"Tree {tree_id} not found in {meta_csv}")
+            continue
+
+        row = tree_rows.iloc[0]
+        height_m = float(row["tree_H"])
+        species = row["species"]
+        file_id = row["file_id"]
+        data_type = row["data_type"]
+        dataset = row["dataset"]
+        split = row["split"]
+        zarr_path = data_path / f"{file_id}.zarr"
+
+        if not zarr_path.exists():
+            print(f"Zarr not found: {zarr_path}")
+            continue
+
+        species_safe = species.replace(" ", "_")
+        output_path = out_dir / f"figure_appendix_hcb_{species_safe}_{tree_id}.pdf"
+        print(f"HCB figure: tree {tree_id}, {species}, H={height_m:.1f}m")
+        success = plot_hcb_figure(
+            str(zarr_path),
+            height_m,
+            str(output_path),
+            seed=seed,
+        )
+
+        if success:
+            metadata[str(tree_id)] = {
+                "tree_id": int(tree_id),
+                "file_id": file_id,
+                "species": species,
+                "height_m": round(height_m, 2),
+                "data_type": data_type,
+                "dataset": dataset,
+                "split": split,
+                "output_path": str(output_path),
+            }
+
+    if metadata:
+        meta_path = out_dir / "figure_hcb.json"
+        with open(meta_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        print(f"  Saved metadata: {meta_path}")
+
+
+def create_figure_cfg_sensitivity(
+    experiment_dir: str = "experiments/finetune-8-512-16384",
+    output_dir: str = "figures",
+    n_bins: int = 12,
+):
+    """
+    CFG sensitivity figure for the appendix.
+
+    A 2x3 grid showing each conditioning fidelity metric as a function of the
+    classifier-free guidance scale omega. To stay statistically consistent
+    with Table 1, the central line per panel is the *mean of per-tree
+    medians* within each omega bin (the same statistic Table 1 reports for
+    the "Generated" column), and the shaded band is the IQR of per-tree
+    medians within each bin. A horizontal dashed line marks the intra-class
+    baseline parsed from samples/evaluation/tables/table_1_global.txt.
+
+    Args:
+        experiment_dir: Experiment directory with samples/evaluation/.
+        output_dir: Where to write the PDF and JSON metadata.
+        n_bins: Number of equal-width bins across the CFG range.
+    """
+    import re
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    experiment_dir = Path(experiment_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Load data ────────────────────────────────────────────────────────
+    eval_dir = experiment_dir / "samples" / "evaluation"
+    pair_csv = eval_dir / "df_pairs.csv"
+    if not pair_csv.exists():
+        print(f"Error: {pair_csv} not found")
+        return
+    df = pd.read_csv(pair_csv)
+    print(
+        f"CFG sensitivity: loaded {len(df)} pairs, "
+        f"{df['real_id'].nunique()} unique trees"
+    )
+
+    metrics = [
+        "chamfer_dist",
+        "delta_h_max_cr",
+        "delta_max_crown_r",
+        "delta_hcb",
+        "vert_kde_jsd",
+        "hist_2d_jsd",
+    ]
+    # (axis label, table-1 row label fragment used to look up the baseline)
+    metric_meta = {
+        "chamfer_dist": (
+            "Chamfer distance (m)",
+            "Chamfer distance (m)",
+        ),
+        "delta_h_max_cr": (
+            r"$\Delta$ Height at max crown radius (m)",
+            "Δ Height at max crown R (m)",
+        ),
+        "delta_max_crown_r": (
+            r"$\Delta$ Max crown radius (m)",
+            "Δ Max crown radius (m)",
+        ),
+        "delta_hcb": (
+            r"$\Delta$ Height to crown base (m)",
+            "Δ Height to crown base (m)",
+        ),
+        "vert_kde_jsd": (
+            "Vertical KDE divergence",
+            "Vertical KDE JSD",
+        ),
+        "hist_2d_jsd": (
+            "2D histogram divergence",
+            "2D histogram JSD",
+        ),
+    }
+
+    # ── Read intra-class baselines from Table 1 if available ────────────
+    baselines: dict[str, float | None] = {m: None for m in metrics}
+    table_path = eval_dir / "tables" / "table_1_global.txt"
+    if table_path.exists():
+        # Each metric row in the table ends with three floats: gen, intra, inter
+        num_re = re.compile(r"(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s*$")
+        for line in table_path.read_text().splitlines():
+            num_match = num_re.search(line)
+            if not num_match:
+                continue
+            for key, (_, label) in metric_meta.items():
+                if label in line and baselines[key] is None:
+                    baselines[key] = float(num_match.group(2))
+                    break
+        n_found = sum(b is not None for b in baselines.values())
+        print(f"  Loaded {n_found}/6 intra-class baselines from {table_path.name}")
+    else:
+        print(f"  Note: {table_path} not found — baselines omitted")
+
+    # ── Bin CFG scale ────────────────────────────────────────────────────
+    cfg_min, cfg_max = df["cfg_scale"].min(), df["cfg_scale"].max()
+    bin_edges = np.linspace(cfg_min, cfg_max, n_bins + 1)
+    df["cfg_bin"] = pd.cut(df["cfg_scale"], bins=bin_edges, include_lowest=True)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    # Per-tree median within each (tree, cfg_bin); aggregate across trees per bin
+    per_tree_per_bin = df.groupby(["real_id", "cfg_bin"], observed=True)[
+        metrics
+    ].median()
+
+    bin_central = per_tree_per_bin.groupby("cfg_bin", observed=True).mean()
+    bin_q25 = per_tree_per_bin.groupby("cfg_bin", observed=True).quantile(0.25)
+    bin_q75 = per_tree_per_bin.groupby("cfg_bin", observed=True).quantile(0.75)
+
+    # ── Plot ─────────────────────────────────────────────────────────────
+    line_color = "#1f77b4"
+    band_color = "#1f77b4"
+    baseline_color = "#444444"
+
+    fig, axes = plt.subplots(
+        2, 3, figsize=(10.5, 7.0), sharex=True, constrained_layout=True
+    )
+
+    for ax, metric in zip(axes.ravel(), metrics):
+        central = bin_central[metric].values
+        q25 = bin_q25[metric].values
+        q75 = bin_q75[metric].values
+
+        ax.fill_between(
+            bin_centers,
+            q25,
+            q75,
+            color=band_color,
+            alpha=0.22,
+            linewidth=0,
+        )
+        ax.plot(
+            bin_centers,
+            central,
+            marker="o",
+            color=line_color,
+            linewidth=1.7,
+            markersize=5.0,
+            zorder=5,
+        )
+
+        baseline = baselines[metric]
+        if baseline is not None:
+            ax.axhline(
+                baseline,
+                color=baseline_color,
+                linestyle="--",
+                linewidth=1.2,
+                zorder=4,
+            )
+
+        # Y-limits snug around the central line, IQR, and baseline
+        upper_candidates = [float(np.nanmax(q75)), float(np.nanmax(central))]
+        if baseline is not None:
+            upper_candidates.append(baseline)
+        y_top = max(upper_candidates) * 1.18
+        ax.set_ylim(bottom=0, top=y_top)
+        ax.set_xlim(cfg_min, cfg_max)
+
+        ax.set_ylabel(metric_meta[metric][0], fontsize=10)
+        ax.tick_params(axis="both", labelsize=9)
+        ax.grid(True, axis="y", linestyle=":", alpha=0.4)
+        ax.set_axisbelow(True)
+
+    for ax in axes[-1]:
+        ax.set_xlabel(r"Classifier-free guidance scale $\omega$", fontsize=11)
+
+    # Single shared legend at the top of the figure
+    legend_elements = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color=line_color,
+            markersize=5.0,
+            linewidth=1.7,
+            label="Mean of per-tree medians (per $\\omega$ bin)",
+        ),
+        Patch(
+            facecolor=band_color,
+            alpha=0.22,
+            label="IQR of per-tree medians",
+        ),
+    ]
+    if any(b is not None for b in baselines.values()):
+        legend_elements.append(
+            Line2D(
+                [0],
+                [0],
+                color=baseline_color,
+                linestyle="--",
+                linewidth=1.2,
+                label="Intra-class baseline (Table 1)",
+            )
+        )
+
+    fig.legend(
+        handles=legend_elements,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.03),
+        ncol=len(legend_elements),
+        frameon=False,
+        fontsize=10,
+    )
+
+    out_path = output_dir / "figure_cfg_sensitivity.pdf"
+    fig.savefig(out_path, format="pdf", bbox_inches="tight", dpi=300)
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+    # ── Metadata ─────────────────────────────────────────────────────────
+    meta = {
+        "n_pairs": len(df),
+        "n_real_trees": int(df["real_id"].nunique()),
+        "cfg_range": [round(float(cfg_min), 3), round(float(cfg_max), 3)],
+        "n_bins": n_bins,
+        "metrics": metrics,
+        "intra_class_baselines": {
+            m: (float(b) if b is not None else None) for m, b in baselines.items()
+        },
+        "central_at_omega_min": {m: float(bin_central[m].iloc[0]) for m in metrics},
+        "central_at_omega_max": {m: float(bin_central[m].iloc[-1]) for m in metrics},
+    }
+    meta_path = output_dir / "figure_cfg_sensitivity.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  Saved metadata: {meta_path}")
+
+
+def create_figure_time_evolution(
+    experiment_dir: str = "experiments/finetune-8-512-16384",
+    data_path: str = "./data/preprocessed-16384",
+    tree_id: str = "13875",
+    cfg_scale: float = 3.0,
+    time_points: list[float] = None,
+    n_rows: int = 2,
+    n_cols: int = 4,
+    solver_method: str = "dopri5",
+    seed: int = 42,
+    output_dir: str = "figures",
+):
+    """
+    Create time evolution figure: point cloud evolving from noise (t=0) to tree (t=1).
+
+    Renders intermediate ODE solver snapshots as a 2x4 grid showing the
+    generation process for a single tree.
+
+    Args:
+        experiment_dir: Path to trained model experiment directory.
+        data_path: Path to preprocessed dataset directory.
+        tree_id: File ID of the tree to generate (zero-padded to 5 digits).
+        cfg_scale: Classifier-free guidance scale.
+        time_points: List of time values to capture (must have n_rows * n_cols entries).
+        n_rows: Number of grid rows.
+        n_cols: Number of grid columns.
+        solver_method: ODE solver method.
+        seed: Random seed for reproducibility.
+        output_dir: Directory to save output PDF and JSON.
+    """
+    import io
+    import torch
+    from pathlib import Path
+    from PIL import Image
+    from types import SimpleNamespace
+
+    from models import get_model
+    from generate_samples import load_experiment_config, load_checkpoint
+    from sample import sample_conditional
+
+    if time_points is None:
+        time_points = [0.0, 0.5, 0.7, 0.8, 0.9, 0.95, 0.975, 1.0]
+
+    n_panels = n_rows * n_cols
+    if len(time_points) != n_panels:
+        raise ValueError(
+            f"time_points has {len(time_points)} entries but grid is "
+            f"{n_rows}x{n_cols} = {n_panels} panels"
+        )
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    experiment_dir = Path(experiment_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    data_path = Path(data_path)
+
+    # ── Load model ───────────────────────────────────────────────────────
+    config = load_experiment_config(experiment_dir)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    from dataset import create_datasets
+
+    _, _, _, species_list, type_list = create_datasets(
+        data_path=str(data_path),
+        rotation_augment=False,
+        shuffle_augment=False,
+        max_points=config.get("max_points", 16384),
+        cache_train=False,
+        cache_val=False,
+        cache_test=False,
+    )
+
+    config["species_list"] = species_list
+    config["type_list"] = type_list
+    args = SimpleNamespace(**config)
+    model = get_model(args, device=device)
+
+    # Find latest checkpoint
+    ckpt_dir = experiment_dir / "checkpoints"
+    ckpts = sorted(ckpt_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime)
+    if not ckpts:
+        raise FileNotFoundError(f"No checkpoints found in {ckpt_dir}")
+    model = load_checkpoint(ckpts[-1], model, device)
+
+    # ── Look up tree metadata ────────────────────────────────────────────
+    tree_id_str = str(tree_id).zfill(5)
+    meta_csv = pd.read_csv(data_path / "metadata.csv")
+    meta_csv["file_id"] = meta_csv["filename"].apply(lambda x: Path(x).stem)
+    tree_row = meta_csv[meta_csv["file_id"] == tree_id_str]
+    if len(tree_row) == 0:
+        raise ValueError(f"Tree {tree_id_str} not found in metadata.csv")
+    tree_row = tree_row.iloc[0]
+
+    height_m = float(tree_row["tree_H"])
+    species_name_raw = tree_row["species"]
+    data_type_raw = tree_row["data_type"]
+    species_idx = species_list.index(species_name_raw)
+    type_idx = type_list.index(data_type_raw)
+    species_name = species_name_raw.replace("_", " ")
+    data_type = data_type_raw.upper()
+
+    print(
+        f"Time evolution: tree {tree_id_str}, {species_name}, "
+        f"H={height_m:.1f}m, {data_type}, cfg={cfg_scale}"
+    )
+
+    # ── Generate trajectory ──────────────────────────────────────────────
+    num_points = config.get("max_points", 16384)
+    trajectory = sample_conditional(
+        model=model,
+        num_points=num_points,
+        device=device,
+        target_height=height_m,
+        species_idx=species_idx,
+        type_idx=type_idx,
+        cfg_values=cfg_scale,
+        solver_method=solver_method,
+        return_intermediates=True,
+        intermediate_times=time_points,
+    )
+    # trajectory shape: (T, num_points, 3) in normalized coords
+
+    # Denormalize to meters
+    trajectory_m = (trajectory / 2.0) * height_m
+    # Ground each snapshot so z_min = 0
+    for i in range(len(trajectory_m)):
+        trajectory_m[i, :, 2] -= trajectory_m[i, :, 2].min()
+
+    print(f"  Trajectory shape: {trajectory_m.shape}")
+
+    # ── Rendering (matches create_figure_qualitative style) ────────────
+    point_size = 0.4
+    elev, azim = 20, 45
+    margin = 0.05
+    render_dpi = 300
+
+    def _panel_limits(pts):
+        """Compute per-panel axis limits with padding."""
+        mids, ranges = [], []
+        for dim in range(3):
+            lo, hi = pts[:, dim].min(), pts[:, dim].max()
+            span = hi - lo
+            pad = span * margin
+            ranges.append(max(span + 2 * pad, 0.1))
+            mids.append((lo + hi) / 2)
+        return mids, ranges
+
+    def render_snapshot(pts):
+        """Render a single 3D point cloud to a tight RGBA image."""
+        mids, ranges = _panel_limits(pts)
+        fig = plt.figure(figsize=(2.0, 2.5))
+        ax = fig.add_subplot(111, projection="3d")
+        ax.scatter(
+            pts[:, 0],
+            pts[:, 1],
+            pts[:, 2],
+            c=pts[:, 2],
+            cmap="viridis",
+            s=point_size,
+            alpha=0.8,
+            rasterized=True,
+        )
+        ax.set_xlim(mids[0] - ranges[0] / 2, mids[0] + ranges[0] / 2)
+        ax.set_ylim(mids[1] - ranges[1] / 2, mids[1] + ranges[1] / 2)
+        ax.set_zlim(mids[2] - ranges[2] / 2, mids[2] + ranges[2] / 2)
+        ax.set_box_aspect(ranges)
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_axis_off()
+
+        buf = io.BytesIO()
+        fig.savefig(
+            buf,
+            format="png",
+            bbox_inches="tight",
+            pad_inches=0,
+            dpi=render_dpi,
+            transparent=True,
+        )
+        plt.close(fig)
+        buf.seek(0)
+        img = np.array(Image.open(buf))
+        if img.shape[2] == 4:
+            alpha_ch = img[:, :, 3]
+            rows_with_content = np.where(alpha_ch > 0)[0]
+            cols_with_content = np.where(alpha_ch > 0)[1]
+            if len(rows_with_content) > 0:
+                pad_px = 2
+                r0 = max(0, rows_with_content.min() - pad_px)
+                r1 = min(img.shape[0], rows_with_content.max() + pad_px + 1)
+                c0 = max(0, cols_with_content.min() - pad_px)
+                c1 = min(img.shape[1], cols_with_content.max() + pad_px + 1)
+                img = img[r0:r1, c0:c1]
+        return img
+
+    # Render all panels
+    panel_images = []
+    for t_idx in range(n_panels):
+        print(f"  Rendering t={time_points[t_idx]:.1f}...")
+        img = render_snapshot(trajectory_m[t_idx])
+        panel_images.append(img)
+
+    # ── Compose grid ─────────────────────────────────────────────────────
+    max_h = max(img.shape[0] for img in panel_images)
+    max_w = max(img.shape[1] for img in panel_images)
+
+    def _pad_image(img, target_h, target_w):
+        h, w = img.shape[:2]
+        channels = img.shape[2] if img.ndim == 3 else 1
+        padded = np.full((target_h, target_w, channels), 255, dtype=np.uint8)
+        y_off = (target_h - h) // 2
+        x_off = (target_w - w) // 2
+        padded[y_off : y_off + h, x_off : x_off + w] = img
+        return padded
+
+    fig_width = 6.69  # MDPI full page width
+    aspect = (n_rows * max_h) / (n_cols * max_w)
+    fig_height = fig_width * aspect * 1.1
+
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(fig_width, fig_height),
+        gridspec_kw={
+            "left": 0.0,
+            "right": 1.0,
+            "top": 1.0,
+            "bottom": 0.05,
+            "wspace": 0.02,
+            "hspace": 0.08,
+        },
+    )
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]
+
+    for idx in range(n_panels):
+        row_i = idx // n_cols
+        col_j = idx % n_cols
+        ax = axes[row_i, col_j]
+        img = _pad_image(panel_images[idx], max_h, max_w)
+        ax.imshow(img)
+        ax.set_axis_off()
+        t_val = time_points[idx]
+        t_str = f"{t_val:.2f}" if t_val != int(t_val) else f"{t_val:.1f}"
+        ax.set_title(f"$t = {t_str}$", fontsize=8, pad=0, y=-0.08)
+
+    out_path = output_dir / "figure_time_evolution.pdf"
+    fig.savefig(out_path, format="pdf", dpi=600, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+    # ── Metadata ─────────────────────────────────────────────────────────
+    meta = {
+        "tree_id": tree_id_str,
+        "species": tree_row.get("species", "unknown"),
+        "height_m": round(height_m, 2),
+        "data_type": data_type,
+        "cfg_scale": cfg_scale,
+        "solver_method": solver_method,
+        "time_points": time_points,
+        "num_points": num_points,
+        "seed": seed,
+        "experiment_dir": str(experiment_dir),
+    }
+    meta_path = output_dir / "figure_time_evolution.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  Saved metadata: {meta_path}")
+
+
+def create_figure_height_interpolation(
+    experiment_dir: str = "experiments/finetune-8-512-16384",
+    data_path: str = "./data/preprocessed-16384",
+    species: str = "Pinus_sylvestris",
+    data_type: str = "TLS",
+    heights: list[float] = None,
+    cfg_scale: float = 3.0,
+    solver_method: str = "dopri5",
+    seed: int = 6234,
+    output_dir: str = "figures",
+):
+    """
+    Height interpolation figure: same species generated at multiple heights.
+
+    Shows that the model has learned to interpolate across the height
+    conditioning variable, producing plausible morphology at each scale.
+    All panels share axis limits so relative tree sizes are visually comparable.
+
+    Args:
+        experiment_dir: Path to trained model experiment directory.
+        data_path: Path to preprocessed dataset directory.
+        species: Species name (underscore-separated, e.g. 'Pinus_sylvestris').
+        data_type: Scanner type string (e.g. 'TLS', 'ULS').
+        heights: List of target heights in meters. Defaults to [5, 12, 20, 30].
+        cfg_scale: Classifier-free guidance scale.
+        solver_method: ODE solver method.
+        seed: Random seed for reproducibility.
+        output_dir: Directory to save output PDF and JSON.
+    """
+    import io
+    import torch
+    from pathlib import Path
+    from PIL import Image
+    from types import SimpleNamespace
+
+    from models import get_model
+    from generate_samples import load_experiment_config, load_checkpoint
+    from sample import sample_conditional
+
+    if heights is None:
+        heights = [5.0, 12.0, 20.0, 30.0]
+
+    n_cols = len(heights)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    experiment_dir = Path(experiment_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    data_path = Path(data_path)
+
+    # ── Load model ───────────────────────────────────────────────────────
+    config = load_experiment_config(experiment_dir)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    from dataset import create_datasets
+
+    _, _, _, species_list, type_list = create_datasets(
+        data_path=str(data_path),
+        rotation_augment=False,
+        shuffle_augment=False,
+        max_points=config.get("max_points", 16384),
+        cache_train=False,
+        cache_val=False,
+        cache_test=False,
+    )
+
+    config["species_list"] = species_list
+    config["type_list"] = type_list
+    args = SimpleNamespace(**config)
+    model = get_model(args, device=device)
+
+    # Find latest checkpoint
+    ckpt_dir = experiment_dir / "checkpoints"
+    ckpts = sorted(ckpt_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime)
+    if not ckpts:
+        raise FileNotFoundError(f"No checkpoints found in {ckpt_dir}")
+    model = load_checkpoint(ckpts[-1], model, device)
+
+    # ── Look up conditioning indices ─────────────────────────────────────
+    species_idx = species_list.index(species)
+    type_idx = type_list.index(data_type)
+    species_display = species.replace("_", " ")
+
+    print(
+        f"Height interpolation: {species_display} ({data_type}), "
+        f"heights={heights}, cfg={cfg_scale}"
+    )
+
+    # ── Generate one sample per height ───────────────────────────────────
+    num_points = config.get("max_points", 16384)
+    clouds_m = []
+    for h in heights:
+        print(f"  Generating h={h:.0f}m...")
+        pts = sample_conditional(
+            model=model,
+            num_points=num_points,
+            device=device,
+            target_height=h,
+            species_idx=species_idx,
+            type_idx=type_idx,
+            cfg_values=cfg_scale,
+            solver_method=solver_method,
+        )
+        # Denormalize to meters and ground z at 0.
+        pts_m = (pts / 2.0) * h
+        pts_m[:, 2] -= pts_m[:, 2].min()
+        # Anchor each trunk base at (x, y) = (0, 0) using the xy centroid
+        # of the bottom 5% of points (robust to outliers near the crown).
+        base_cutoff = max(0.05 * float(pts_m[:, 2].max()), 0.25)
+        base_mask = pts_m[:, 2] < base_cutoff
+        if base_mask.sum() == 0:
+            base_mask = pts_m[:, 2] <= pts_m[:, 2].min() + 1e-6
+        base_xy = pts_m[base_mask, :2].mean(axis=0)
+        pts_m[:, 0] -= base_xy[0]
+        pts_m[:, 1] -= base_xy[1]
+        clouds_m.append(pts_m)
+
+    # ── Rendering ────────────────────────────────────────────────────────
+    point_size = 0.4
+    elev, azim = 20, 45
+    render_dpi = 300
+    margin = 0.05
+
+    # Shared axis limits so trees render at their true relative height and
+    # with bottoms aligned at z=0 across all panels. A small negative z_lo
+    # gives visible ground space beneath every trunk in the projection.
+    global_z_hi = max(pts[:, 2].max() for pts in clouds_m)
+    z_pad = global_z_hi * margin
+    z_lo = -global_z_hi * 0.03
+    z_hi = global_z_hi + z_pad
+
+    # Every cloud is now anchored with its trunk base at (x, y) = (0, 0),
+    # so xy_range is chosen to contain the largest absolute extent from the
+    # origin across all trees. Every panel uses the same symmetric xy window
+    # centered at 0, which makes (0, 0, 0) project to the same 2D pixel.
+    max_abs_xy = 0.0
+    for pts in clouds_m:
+        for dim in (0, 1):
+            max_abs_xy = max(max_abs_xy, float(np.abs(pts[:, dim]).max()))
+    xy_range = 2.0 * max_abs_xy * (1 + 2 * margin)
+
+    panel_figsize = (2.0, 3.0)
+
+    def render_tree(pts):
+        """Render a single 3D point cloud with shared world-space limits."""
+        fig = plt.figure(figsize=panel_figsize)
+        ax = fig.add_axes([0.0, 0.0, 1.0, 1.0], projection="3d")
+        ax.scatter(
+            pts[:, 0],
+            pts[:, 1],
+            pts[:, 2],
+            c=pts[:, 2],
+            cmap="viridis",
+            s=point_size,
+            alpha=0.8,
+            rasterized=True,
+        )
+        ax.set_xlim(-xy_range / 2, xy_range / 2)
+        ax.set_ylim(-xy_range / 2, xy_range / 2)
+        ax.set_zlim(z_lo, z_hi)
+        ax.set_box_aspect((xy_range, xy_range, z_hi - z_lo))
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_axis_off()
+
+        buf = io.BytesIO()
+        fig.savefig(
+            buf,
+            format="png",
+            pad_inches=0,
+            dpi=render_dpi,
+            transparent=True,
+        )
+        plt.close(fig)
+        buf.seek(0)
+        return np.array(Image.open(buf))
+
+    # Render all panels
+    panel_images = []
+    for i, (h, pts) in enumerate(zip(heights, clouds_m)):
+        print(f"  Rendering h={h:.0f}m...")
+        img = render_tree(pts)
+        panel_images.append(img)
+
+    # All panels are rendered with identical figsize, dpi, axis bounds, and
+    # box_aspect, so they have matching pixel dimensions and both z=0 and the
+    # top of the tallest tree project to the same image rows. Crop both axes
+    # using the tallest tree's alpha content — every panel gets the same
+    # rectangle, so bottom alignment and relative heights are preserved.
+    panel_h, panel_w = panel_images[0].shape[:2]
+    # Crop using the UNION of alpha content across all panels — any tree may
+    # have the widest horizontal or lowest vertical extent in the projection,
+    # so the shared crop rectangle must accommodate every panel.
+    union_alpha = np.zeros((panel_h, panel_w), dtype=bool)
+    for img in panel_images:
+        union_alpha |= img[:, :, 3] > 0
+    rows_with_content = np.where(union_alpha.any(axis=1))[0]
+    cols_with_content = np.where(union_alpha.any(axis=0))[0]
+    pad_px = 6
+    # Small asymmetric pad beneath content so trunks aren't flush with the
+    # image bottom. Bottom alignment across panels is guaranteed by the
+    # shared 3D coords (trunk bases at (0,0,0), identical projection cube).
+    ground_pad_px = int(round(0.02 * panel_h))
+    if len(rows_with_content):
+        r0 = max(0, rows_with_content.min() - pad_px)
+        r1 = min(panel_h, rows_with_content.max() + ground_pad_px + 1)
+    else:
+        r0, r1 = 0, panel_h
+    if len(cols_with_content):
+        c0 = max(0, cols_with_content.min() - pad_px)
+        c1 = min(panel_w, cols_with_content.max() + pad_px + 1)
+    else:
+        c0, c1 = 0, panel_w
+    panel_images = [img[r0:r1, c0:c1] for img in panel_images]
+
+    # Flatten transparent background to white for PDF embedding.
+    def _flatten(img):
+        if img.shape[2] != 4:
+            return img
+        rgb = img[..., :3].astype(np.float32)
+        a = img[..., 3:4].astype(np.float32) / 255.0
+        out = rgb * a + 255.0 * (1.0 - a)
+        return out.astype(np.uint8)
+
+    panel_images = [_flatten(img) for img in panel_images]
+    crop_h, crop_w = panel_images[0].shape[:2]
+
+    fig_width = 6.69  # MDPI full page width
+    per_panel_w = fig_width / n_cols
+    # Reserve a small strip at the bottom for the h=... labels.
+    label_strip = 0.05  # fraction of figure height
+    panel_aspect = crop_h / crop_w
+    fig_height = per_panel_w * panel_aspect / (1.0 - label_strip)
+
+    fig, axes = plt.subplots(
+        1,
+        n_cols,
+        figsize=(fig_width, fig_height),
+        gridspec_kw={
+            "left": 0.0,
+            "right": 1.0,
+            "top": 1.0,
+            "bottom": label_strip,
+            "wspace": 0.0,
+        },
+    )
+
+    for idx in range(n_cols):
+        ax = axes[idx]
+        ax.imshow(panel_images[idx])
+        ax.set_axis_off()
+        ax.set_title(f"$h = {heights[idx]:.0f}$ m", fontsize=8, pad=0, y=-0.025)
+
+    out_path = output_dir / "figure_height_interpolation.pdf"
+    fig.savefig(out_path, format="pdf", dpi=600, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+    # ── Metadata ─────────────────────────────────────────────────────────
+    meta = {
+        "species": species,
+        "data_type": data_type,
+        "heights": heights,
+        "cfg_scale": cfg_scale,
+        "solver_method": solver_method,
+        "num_points": num_points,
+        "seed": seed,
+        "experiment_dir": str(experiment_dir),
+    }
+    meta_path = output_dir / "figure_height_interpolation.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  Saved metadata: {meta_path}")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -2314,14 +3453,23 @@ if __name__ == "__main__":
         "--figures",
         nargs="+",
         default=["spine_audit"],
-        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit)",
+        help="Which figures to generate (1, 2, svd_axes, hjsd, crown_mae, spine_comparison, spine_audit, crown_audit, qualitative, stem_tracker, hcb, cfg_sensitivity, time_evolution, height_interpolation)",
     )
     parser.add_argument(
         "--experiment_dir", default="experiments/transformer-8-512-4096"
     )
-    parser.add_argument("--data_path", default="./data/preprocessed-4096")
+    parser.add_argument("--data_path", default="./data/preprocessed-16384")
     parser.add_argument("--output_dir", default="figures")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--n_rows", type=int, default=6)
+    parser.add_argument("--n_generated", type=int, default=4)
+    parser.add_argument(
+        "--tree_ids",
+        type=str,
+        default=None,
+        help="Comma-separated tree IDs for sheet 1 (e.g. '12345,67890')",
+    )
+    parser.add_argument("--canonicalize", action="store_true")
     args = parser.parse_args()
 
     for fig_name in args.figures:
@@ -2329,40 +3477,70 @@ if __name__ == "__main__":
             create_figure_1(output_dir=args.output_dir, seed=args.seed)
         elif fig_name == "2":
             create_figure_2(output_dir=args.output_dir, seed=args.seed)
-        elif fig_name == "svd_axes":
-            create_figure_svd_axes(
-                experiment_dir=args.experiment_dir,
-                data_path=args.data_path,
-                output_dir=args.output_dir,
-                seed=args.seed,
-            )
-        elif fig_name == "hjsd":
-            create_figure_hjsd(
-                experiment_dir=args.experiment_dir,
-                data_path=args.data_path,
-                output_dir=args.output_dir,
-                seed=args.seed,
-            )
-        elif fig_name == "crown_mae":
-            create_figure_crown_mae(
-                experiment_dir=args.experiment_dir,
-                data_path=args.data_path,
-                output_dir=args.output_dir,
-                seed=args.seed,
-            )
-        elif fig_name == "spine_comparison":
-            create_figure_spine_comparison(
-                experiment_dir=args.experiment_dir,
-                data_path=args.data_path,
-                output_dir=args.output_dir,
-                seed=args.seed,
-            )
         elif fig_name == "spine_audit":
             create_figure_spine_audit(
                 experiment_dir=args.experiment_dir,
                 data_path=args.data_path,
                 output_dir=args.output_dir,
                 seed=args.seed,
+            )
+        elif fig_name == "crown_audit":
+            create_figure_crown_audit(
+                experiment_dir=args.experiment_dir,
+                data_path=args.data_path,
+                output_dir=args.output_dir,
+                seed=args.seed,
+            )
+        elif fig_name == "qualitative":
+            tree_ids = None
+            if args.tree_ids:
+                tree_ids = [int(x) for x in args.tree_ids.split(",")]
+            create_figure_qualitative(
+                experiment_dir=args.experiment_dir,
+                data_path=args.data_path,
+                n_rows=args.n_rows,
+                n_generated=args.n_generated,
+                tree_ids=tree_ids,
+                canonicalize_clouds=args.canonicalize,
+                seed=args.seed,
+                output_dir=args.output_dir,
+            )
+        elif fig_name == "stem_tracker":
+            create_figure_stem_tracker(
+                data_path=args.data_path,
+                output_dir=args.output_dir,
+                tree_ids=[12776, 17199],
+                seed=args.seed,
+            )
+        elif fig_name == "hcb":
+            create_figure_hcb(
+                data_path=args.data_path,
+                output_dir=args.output_dir,
+                tree_ids=[12776, 17199],
+                seed=args.seed,
+            )
+        elif fig_name == "cfg_sensitivity":
+            create_figure_cfg_sensitivity(
+                experiment_dir=args.experiment_dir,
+                output_dir=args.output_dir,
+            )
+        elif fig_name == "time_evolution":
+            tree_id = "6069"
+            if args.tree_ids:
+                tree_id = args.tree_ids.split(",")[0]
+            create_figure_time_evolution(
+                experiment_dir=args.experiment_dir,
+                data_path=args.data_path,
+                tree_id=tree_id,
+                seed=args.seed,
+                output_dir=args.output_dir,
+            )
+        elif fig_name == "height_interpolation":
+            create_figure_height_interpolation(
+                experiment_dir=args.experiment_dir,
+                data_path=args.data_path,
+                seed=args.seed,
+                output_dir=args.output_dir,
             )
         else:
             print(f"Unknown figure: {fig_name}")

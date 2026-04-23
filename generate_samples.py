@@ -418,6 +418,7 @@ def generate_samples(args):
                 cfg_values=cfg_values_needed,
                 num_steps=args.num_ode_steps,
                 solver_method=args.solver_method,
+                batch_size=args.batch_size,
             )
             generation_time = time.time() - start_time
             time_per_sample = generation_time / len(needed_indices)
@@ -456,16 +457,17 @@ def generate_samples(args):
                 # Save point cloud as zarr with metadata
                 save_sample_zarr(sample_points, zarr_dir / sample_id, metadata)
 
-                # Save comparison image (real vs generated in normalized coordinates)
-                save_comparison_image(
-                    real_points=real_points,
-                    gen_points=sample_points,
-                    filepath=images_dir / f"{sample_id}.png",
-                    species_name=species_name,
-                    type_name=type_name,
-                    height_m=height_raw,
-                    cfg_scale=cfg_val,
-                )
+                # Save comparison image for first sample of each tree only
+                if sample_idx == needed_indices[0]:
+                    save_comparison_image(
+                        real_points=real_points,
+                        gen_points=sample_points,
+                        filepath=images_dir / f"{sample_id}.png",
+                        species_name=species_name,
+                        type_name=type_name,
+                        height_m=height_raw,
+                        cfg_scale=cfg_val,
+                    )
 
             # Update skipped counter for any pre-existing samples from this tree
             skipped_counter += len(completed_indices)
@@ -563,6 +565,12 @@ def main():
         default="dopri5",
         choices=["euler", "midpoint", "dopri5"],
         help="ODE solver method",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=4,
+        help="Max samples per ODE solve to limit GPU memory usage (0 = all at once)",
     )
     parser.add_argument(
         "--seed",
