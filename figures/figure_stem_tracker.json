@@ -1,0 +1,22 @@
+{
+  "12776": {
+    "tree_id": 12776,
+    "file_id": "12776",
+    "species": "Pinus_sylvestris",
+    "height_m": 25.61,
+    "data_type": "MLS",
+    "dataset": "Puliti_a",
+    "split": "test",
+    "output_path": "figures/figure_appendix_stem_tracker_Pinus_sylvestris_12776.pdf"
+  },
+  "17199": {
+    "tree_id": 17199,
+    "file_id": "17199",
+    "species": "Fraxinus_angustifolia",
+    "height_m": 30.07,
+    "data_type": "TLS",
+    "dataset": "BlueCat_a",
+    "split": "test",
+    "output_path": "figures/figure_appendix_stem_tracker_Fraxinus_angustifolia_17199.pdf"
+  }
+}
