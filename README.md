@@ -2,6 +2,10 @@
 
 Flow matching for tree point cloud generation.
 
+<p align="center">
+  <img src="figures/animation_time_evolution.gif" alt="Time evolution of a generated tree point cloud, from Gaussian noise at t=0 to a 32 m Douglas-fir at t=1." width="420">
+</p>
+
 ## Data Setup
 
 ### 1. Download the FOR-species20K Dataset
