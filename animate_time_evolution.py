@@ -31,7 +31,9 @@ from generate_samples import load_experiment_config, load_checkpoint
 from sample import sample_conditional
 
 
-def build_time_schedule(fps: int, duration_s: float, hold_frames: int, ease_power: float):
+def build_time_schedule(
+    fps: int, duration_s: float, hold_frames: int, ease_power: float
+):
     """Build a monotonic array of model times t ∈ [0, 1] for each motion frame.
 
     Ease-out so more frames cluster near t=1, where the tree structure emerges.
@@ -56,19 +58,30 @@ def main():
     )
     parser.add_argument("--experiment_dir", default="experiments/finetune-8-512-16384")
     parser.add_argument("--data_path", default="./data/preprocessed-16384")
-    parser.add_argument("--tree_id", default="6069",
-                        help="Tree file id (will be zero-padded to 5 digits).")
+    parser.add_argument(
+        "--tree_id",
+        default="6069",
+        help="Tree file id (will be zero-padded to 5 digits).",
+    )
     parser.add_argument("--cfg_scale", type=float, default=3.0)
     parser.add_argument("--solver_method", default="dopri5")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", default="figures")
     parser.add_argument("--fps", type=int, default=25)
     parser.add_argument("--duration_s", type=float, default=8.0)
-    parser.add_argument("--hold_frames", type=int, default=40,
-                        help="Frames held on the final tree at the end of the animation.")
-    parser.add_argument("--ease_power", type=float, default=3.0,
-                        help="k in t = 1 - (1-u)^k. k=1 linear; k>1 lingers near t=1.")
-    parser.add_argument("--dpi", type=int, default=130)
+    parser.add_argument(
+        "--hold_frames",
+        type=int,
+        default=40,
+        help="Frames held on the final tree at the end of the animation.",
+    )
+    parser.add_argument(
+        "--ease_power",
+        type=float,
+        default=3.0,
+        help="k in t = 1 - (1-u)^k. k=1 linear; k>1 lingers near t=1.",
+    )
+    parser.add_argument("--dpi", type=int, default=600)
     parser.add_argument("--fig_inches", type=float, default=4.0)
     parser.add_argument("--point_size", type=float, default=0.4)
     parser.add_argument("--no_mp4", action="store_true", help="Skip MP4 output.")
@@ -123,8 +136,10 @@ def main():
     species_idx = species_list.index(species_raw)
     type_idx = type_list.index(data_type_raw)
 
-    print(f"Tree {tree_id_str} | {species_raw} | H={height_m:.1f}m | "
-          f"{data_type_raw.upper()} | cfg={args.cfg_scale}")
+    print(
+        f"Tree {tree_id_str} | {species_raw} | H={height_m:.1f}m | "
+        f"{data_type_raw.upper()} | cfg={args.cfg_scale}"
+    )
 
     # ── Build animation time schedule ──────────────────────────────────
     model_times, hold_frames = build_time_schedule(
@@ -134,9 +149,11 @@ def main():
         ease_power=args.ease_power,
     )
     total_frames = len(model_times) + hold_frames
-    print(f"Schedule: {len(model_times)} motion + {hold_frames} hold "
-          f"= {total_frames} frames @ {args.fps} fps "
-          f"(~{total_frames / args.fps:.2f}s)")
+    print(
+        f"Schedule: {len(model_times)} motion + {hold_frames} hold "
+        f"= {total_frames} frames @ {args.fps} fps "
+        f"(~{total_frames / args.fps:.2f}s)"
+    )
 
     # ── Generate trajectory (single ODE solve) ─────────────────────────
     num_points = config.get("max_points", 16384)
@@ -178,8 +195,13 @@ def main():
         fig = plt.figure(figsize=(args.fig_inches, args.fig_inches * 1.25))
         ax = fig.add_subplot(111, projection="3d")
         ax.scatter(
-            pts[:, 0], pts[:, 1], pts[:, 2],
-            c=pts[:, 2], cmap="viridis", s=args.point_size, alpha=0.8,
+            pts[:, 0],
+            pts[:, 1],
+            pts[:, 2],
+            c=pts[:, 2],
+            cmap="viridis",
+            s=args.point_size,
+            alpha=0.8,
             rasterized=True,
         )
         ax.set_xlim(mids[0] - ranges[0] / 2, mids[0] + ranges[0] / 2)
@@ -188,12 +210,17 @@ def main():
         ax.set_box_aspect(ranges)
         ax.view_init(elev=elev, azim=azim)
         ax.set_axis_off()
-        t_str = f"{t_value:.3f}" if t_value not in (0.0, 1.0) else f"{t_value:.1f}"
-        ax.set_title(f"$t = {t_str}$", fontsize=10, y=-0.03)
+        ax.set_title(f"$t = {t_value:.3f}$", fontsize=10, y=-0.03)
 
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.05,
-                    dpi=args.dpi, facecolor="white")
+        fig.savefig(
+            buf,
+            format="png",
+            bbox_inches="tight",
+            pad_inches=0.05,
+            dpi=args.dpi,
+            facecolor="white",
+        )
         plt.close(fig)
         buf.seek(0)
         img = np.array(Image.open(buf).convert("RGB"))
@@ -218,7 +245,7 @@ def main():
         padded = np.full((H, W, 3), 255, dtype=np.uint8)
         y0 = (H - h) // 2
         x0 = (W - w) // 2
-        padded[y0:y0 + h, x0:x0 + w] = img
+        padded[y0 : y0 + h, x0 : x0 + w] = img
         return padded
 
     frames = [_pad_white(f, max_h, max_w) for f in frames]
@@ -248,6 +275,7 @@ def main():
     if not args.no_mp4:
         try:
             from matplotlib.animation import FuncAnimation, FFMpegWriter
+
             fig = plt.figure(figsize=(max_w / args.dpi, max_h / args.dpi), dpi=args.dpi)
             ax = fig.add_axes([0, 0, 1, 1])
             ax.set_axis_off()
@@ -258,8 +286,11 @@ def main():
                 return (im,)
 
             anim = FuncAnimation(
-                fig, update, frames=len(frames),
-                interval=frame_duration_ms, blit=True,
+                fig,
+                update,
+                frames=len(frames),
+                interval=frame_duration_ms,
+                blit=True,
             )
             writer = FFMpegWriter(fps=args.fps, bitrate=6000, codec="libx264")
             anim.save(str(mp4_path), writer=writer, dpi=args.dpi)
