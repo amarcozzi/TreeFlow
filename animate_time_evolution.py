@@ -81,7 +81,7 @@ def main():
         default=3.0,
         help="k in t = 1 - (1-u)^k. k=1 linear; k>1 lingers near t=1.",
     )
-    parser.add_argument("--dpi", type=int, default=600)
+    parser.add_argument("--dpi", type=int, default=250)
     parser.add_argument("--fig_inches", type=float, default=4.0)
     parser.add_argument("--point_size", type=float, default=0.4)
     parser.add_argument("--no_mp4", action="store_true", help="Skip MP4 output.")
