@@ -317,11 +317,11 @@ def build_pair_dataframe(
     max_points: int,
     num_workers: int,
     seed: int,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, np.ndarray]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, np.ndarray], dict[str, np.ndarray]]:
     """Extract features for all trees and build the pair dataframe.
 
-    Returns (df_pairs, df_real_feats, df_gen_feats, real_clouds).
-    real_clouds maps tree_id → canonicalized metric-scale point cloud.
+    Returns (df_pairs, df_real_feats, df_gen_feats, real_clouds, gen_clouds).
+    real_clouds/gen_clouds map tree_id → canonicalized metric-scale point cloud.
     """
     # Extract real features
     real_tasks = [
@@ -423,7 +423,7 @@ def build_pair_dataframe(
             lambda x, c=col: id_to_row.loc[x, c] if x in id_to_row.index else "unknown"
         )
 
-    return df_pairs, df_real_feats, df_gen_feats, real_clouds
+    return df_pairs, df_real_feats, df_gen_feats, real_clouds, gen_clouds
 
 
 # ── Baselines ────────────────────────────────────────────────────────────────
@@ -548,6 +548,199 @@ def compute_population_w1(
             _w1_for_group(grp_r, grp_g, group_label=key)
 
     return pd.DataFrame(rows)
+
+
+# ── Population COV / MMD / 1-NNA (supplementary; cf. Diff-Tree) ───────────────
+#
+# Reported only in the supplementary material, for comparison with prior
+# point-cloud generation work (e.g. Diff-Tree reports COV and MMD). Computed on
+# canonicalized, metric-scale clouds subsampled to a fixed point count (default
+# 2048, the PointFlow/Diff-Tree convention) and stratified by (genus, height
+# bin) so distances compare trees of similar type and size.
+
+def coverage(dist_matrix: np.ndarray) -> float:
+    """COV (↑): fraction of real reference trees that are the nearest neighbor
+    of at least one generated tree. dist_matrix is (n_real, n_gen)."""
+    if dist_matrix.size == 0:
+        return float("nan")
+    nn_real_for_gen = dist_matrix.argmin(axis=0)
+    return len(set(nn_real_for_gen.tolist())) / dist_matrix.shape[0]
+
+
+def mmd(dist_matrix: np.ndarray) -> float:
+    """MMD (↓): mean over real reference trees of the Chamfer distance to the
+    nearest generated tree (meters). dist_matrix is (n_real, n_gen)."""
+    if dist_matrix.size == 0:
+        return float("nan")
+    return float(dist_matrix.min(axis=1).mean())
+
+
+def one_nn_accuracy(rr: np.ndarray, gg: np.ndarray, rg: np.ndarray) -> float:
+    """1-NNA (→0.5): leave-one-out 1-NN classification accuracy over the pooled
+    real+generated set. 0.5 ⇒ indistinguishable; far from 0.5 ⇒ separable.
+
+    rr: (n_r, n_r) real-real, gg: (n_g, n_g) gen-gen, rg: (n_r, n_g) real-gen.
+    """
+    n_r, n_g = rg.shape
+    if n_r == 0 or n_g == 0:
+        return float("nan")
+    correct = 0
+    for i in range(n_r):
+        row = rr[i].copy()
+        row[i] = np.inf  # exclude self
+        if row.min() <= rg[i].min():
+            correct += 1
+    for j in range(n_g):
+        col = gg[j].copy()
+        col[j] = np.inf
+        if col.min() <= rg[:, j].min():
+            correct += 1
+    return correct / (n_r + n_g)
+
+
+def _cd_matrix(clouds_a, ids_a, clouds_b, ids_b, num_workers, desc):
+    """Dense pairwise Chamfer matrix (len(ids_a) × len(ids_b))."""
+    pairs = [(a, b) for a in ids_a for b in ids_b]
+    vals = _compute_cd_parallel(clouds_a, clouds_b, pairs, num_workers, desc)
+    return np.asarray(vals, dtype=np.float64).reshape(len(ids_a), len(ids_b))
+
+
+def _subsample_clouds(clouds: dict, n_points: int, seed: int) -> dict:
+    """Copy of `clouds` with each cloud randomly subsampled to n_points."""
+    rng = np.random.default_rng(seed)
+    out = {}
+    for tid in sorted(clouds.keys()):
+        c = clouds[tid]
+        if len(c) > n_points:
+            idx = rng.choice(len(c), size=n_points, replace=False)
+            out[tid] = c[idx]
+        else:
+            out[tid] = c
+    return out
+
+
+def compute_population_cov_mmd(
+    df_real_feats: pd.DataFrame,
+    df_gen_feats: pd.DataFrame,
+    real_clouds: dict[str, np.ndarray],
+    gen_clouds: dict[str, np.ndarray],
+    num_workers: int = 1,
+    n_points: int = 2048,
+    max_per_stratum: int = 150,
+    max_per_nna: int = 75,
+    min_per_stratum: int = 10,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """COV / MMD / 1-NNA per (genus, height_bin) stratum.
+
+    Returns a per-stratum DataFrame; the caller aggregates to global/by-bin.
+    """
+    print(f"  Subsampling clouds to {n_points} points for COV/MMD/1-NNA...")
+    real_sub = _subsample_clouds(real_clouds, n_points, seed)
+    gen_sub = _subsample_clouds(gen_clouds, n_points, seed + 1)
+
+    rng = np.random.default_rng(seed)
+    real_ok = [t for t in df_real_feats.index if t in real_sub]
+    gen_ok = [g for g in df_gen_feats.index if g in gen_sub]
+    real_groups = df_real_feats.loc[real_ok].groupby(["genus", "height_bin"])
+    gen_grouped = df_gen_feats.loc[gen_ok].groupby(["genus", "height_bin"])
+
+    rows = []
+    for key, grp_r in real_groups:
+        try:
+            grp_g = gen_grouped.get_group(key)
+        except KeyError:
+            continue
+        genus, hb = key
+        real_ids = list(grp_r.index)
+        gen_ids = list(grp_g.index)
+        if len(real_ids) < min_per_stratum or len(gen_ids) < min_per_stratum:
+            continue
+        if len(real_ids) > max_per_stratum:
+            real_ids = sorted(rng.choice(real_ids, max_per_stratum, replace=False).tolist())
+        if len(gen_ids) > max_per_stratum:
+            gen_ids = sorted(rng.choice(gen_ids, max_per_stratum, replace=False).tolist())
+
+        cross = _cd_matrix(real_sub, real_ids, gen_sub, gen_ids,
+                           num_workers, f"COV/MMD {genus}/{hb}")
+        cov = coverage(cross)
+        mmd_v = mmd(cross)
+
+        # 1-NNA on a (possibly) smaller balanced subset — needs rr + gg + rg.
+        nr = min(len(real_ids), max_per_nna)
+        ng = min(len(gen_ids), max_per_nna)
+        nna_r = real_ids if nr == len(real_ids) else sorted(rng.choice(real_ids, nr, replace=False).tolist())
+        nna_g = gen_ids if ng == len(gen_ids) else sorted(rng.choice(gen_ids, ng, replace=False).tolist())
+        rr = _cd_matrix(real_sub, nna_r, real_sub, nna_r, num_workers, f"1-NNA rr {genus}/{hb}")
+        gg = _cd_matrix(gen_sub, nna_g, gen_sub, nna_g, num_workers, f"1-NNA gg {genus}/{hb}")
+        rg = _cd_matrix(real_sub, nna_r, gen_sub, nna_g, num_workers, f"1-NNA rg {genus}/{hb}")
+        nna = one_nn_accuracy(rr, gg, rg)
+
+        print(f"    [{genus}, {hb}] COV={cov:.3f} MMD={mmd_v:.4f} 1-NNA={nna:.3f} "
+              f"(n_real={len(real_ids)}, n_gen={len(gen_ids)})")
+        rows.append({
+            "genus": genus, "height_bin": hb,
+            "coverage": cov, "mmd": mmd_v, "one_nna": nna,
+            "n_real": len(real_ids), "n_gen": len(gen_ids),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def aggregate_population_metrics(strata: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
+    """Aggregate per-stratum COV/MMD/1-NNA into an n_real-weighted global summary
+    and a by-height-bin summary."""
+    if strata.empty:
+        return {}, pd.DataFrame()
+
+    def _wavg(df):
+        w = df["n_real"].to_numpy(dtype=float)
+        return {
+            "coverage": float(np.average(df["coverage"], weights=w)),
+            "mmd": float(np.average(df["mmd"], weights=w)),
+            "one_nna": float(np.average(df["one_nna"], weights=w)),
+            "n_real": int(w.sum()),
+            "n_strata": int(len(df)),
+        }
+
+    global_agg = _wavg(strata)
+    by_hb_rows = []
+    for hb, grp in strata.groupby("height_bin"):
+        r = _wavg(grp)
+        r["height_bin"] = hb
+        by_hb_rows.append(r)
+    by_hb = pd.DataFrame(by_hb_rows)
+    return global_agg, by_hb
+
+
+def build_population_table(strata: pd.DataFrame, global_agg: dict,
+                           by_hb: pd.DataFrame) -> str:
+    lines = []
+    lines.append("SUPPLEMENTARY: POPULATION METRICS (COV / MMD / 1-NNA)")
+    lines.append("=" * 72)
+    lines.append("COV ↑ coverage of real set | MMD ↓ (m) fidelity | 1-NNA → 0.50 indistinguishable")
+    lines.append("Chamfer on canonicalized metric clouds, stratified by (genus, height bin).")
+    lines.append("")
+    if not global_agg:
+        lines.append("  (no strata met the minimum-count threshold)")
+        return "\n".join(lines)
+    lines.append(f"  {'':<14s} {'COV↑':>8s} {'MMD↓':>10s} {'1-NNA':>8s} "
+                 f"{'n_real':>8s} {'n_strata':>9s}")
+    lines.append("─" * 72)
+    lines.append(f"  {'Global':<14s} {global_agg['coverage']:>8.3f} {global_agg['mmd']:>10.4f} "
+                 f"{global_agg['one_nna']:>8.3f} {global_agg['n_real']:>8d} {global_agg['n_strata']:>9d}")
+    if not by_hb.empty:
+        lines.append("")
+        lines.append("  By height bin:")
+        order = {lab: i for i, lab in enumerate(HEIGHT_BIN_LABELS)}
+        by_hb_sorted = by_hb.sort_values(
+            "height_bin", key=lambda s: s.map(lambda x: order.get(x, 999))
+        )
+        for _, r in by_hb_sorted.iterrows():
+            lines.append(f"  {str(r['height_bin']):<14s} {r['coverage']:>8.3f} {r['mmd']:>10.4f} "
+                         f"{r['one_nna']:>8.3f} {int(r['n_real']):>8d} {int(r['n_strata']):>9d}")
+    lines.append("─" * 72)
+    return "\n".join(lines)
 
 
 # ── Table building ───────────────────────────────────────────────────────────
@@ -771,6 +964,16 @@ def main():
     parser.add_argument("--max_points", type=int, default=4096)
     parser.add_argument("--num_workers", type=int, default=40)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--cov_mmd", action="store_true",
+                        help="Also compute supplementary COV/MMD/1-NNA population metrics.")
+    parser.add_argument("--cov_mmd_points", type=int, default=2048,
+                        help="Points per cloud for COV/MMD/1-NNA (PointFlow/Diff-Tree use 2048).")
+    parser.add_argument("--max_per_stratum", type=int, default=150,
+                        help="Max trees per side per stratum for the COV/MMD cross matrix.")
+    parser.add_argument("--max_per_nna", type=int, default=75,
+                        help="Max trees per side per stratum for 1-NNA (rr+gg+rg matrices).")
+    parser.add_argument("--min_per_stratum", type=int, default=10,
+                        help="Min trees per side to include a (genus, height bin) stratum.")
     args = parser.parse_args()
 
     experiment_dir = Path(args.experiments_dir) / args.experiment_name
@@ -795,7 +998,7 @@ def main():
     real_meta, gen_meta = load_metadata(data_path, experiment_dir)
 
     # 2. Extract features and build pair dataframe
-    df_pairs, df_real_feats, df_gen_feats, real_clouds = build_pair_dataframe(
+    df_pairs, df_real_feats, df_gen_feats, real_clouds, gen_clouds = build_pair_dataframe(
         real_meta, gen_meta, zarr_dir,
         max_points=args.max_points, num_workers=args.num_workers, seed=args.seed,
     )
@@ -815,6 +1018,19 @@ def main():
     w1_global = compute_population_w1(df_real_feats, df_gen_feats)
     w1_genus  = compute_population_w1(df_real_feats, df_gen_feats, group_col="genus")
     w1_height = compute_population_w1(df_real_feats, df_gen_feats, group_col="height_bin")
+
+    # 4b. Supplementary population metrics (COV / MMD / 1-NNA), opt-in.
+    pop_strata = pd.DataFrame()
+    pop_global, pop_by_hb = {}, pd.DataFrame()
+    if args.cov_mmd:
+        print("\nComputing supplementary population metrics (COV / MMD / 1-NNA)...")
+        pop_strata = compute_population_cov_mmd(
+            df_real_feats, df_gen_feats, real_clouds, gen_clouds,
+            num_workers=args.num_workers, n_points=args.cov_mmd_points,
+            max_per_stratum=args.max_per_stratum, max_per_nna=args.max_per_nna,
+            min_per_stratum=args.min_per_stratum, seed=args.seed + 2000,
+        )
+        pop_global, pop_by_hb = aggregate_population_metrics(pop_strata)
 
     # 5. Build tables
     print("\nBuilding tables...")
@@ -838,6 +1054,9 @@ def main():
 
     tables = {"table_1_global": table_1, "table_2_genus": table_2,
               "table_3_height": table_3}
+    if args.cov_mmd:
+        tables["table_4_population"] = build_population_table(
+            pop_strata, pop_global, pop_by_hb)
 
     # 7. Print
     for t in tables.values():
@@ -849,6 +1068,15 @@ def main():
     save_results(output_dir, df_pairs, df_real_feats, df_gen_feats,
                  tables, w1_global, w1_genus, w1_height,
                  run_args=vars(args))
+
+    # Save supplementary population metrics (CSV + JSON) alongside the tables.
+    if args.cov_mmd and not pop_strata.empty:
+        pop_strata.to_csv(output_dir / "pop_metrics_strata.csv", index=False)
+        if not pop_by_hb.empty:
+            pop_by_hb.to_csv(output_dir / "pop_metrics_by_height.csv", index=False)
+        with open(output_dir / "pop_metrics_global.json", "w") as f:
+            json.dump(pop_global, f, indent=2)
+        print(f"  Saved population metrics (COV/MMD/1-NNA) CSV + JSON")
 
     elapsed = time.time() - t_start
     print(f"\nDone in {elapsed:.1f}s ({elapsed / 60:.1f} min)")
