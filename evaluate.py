@@ -761,6 +761,85 @@ def build_population_table(strata: pd.DataFrame, global_agg: dict,
     return "\n".join(lines)
 
 
+# ── Stem-fit failure detection (degenerate generations) ──────────────────────
+#
+# A diverged cubic spine fit produces a physically impossible crown radius. Such
+# samples are detected (crown radius larger than any real tree in the dataset)
+# and excluded from the stem-tracker-derived metrics below; the failure rate is
+# itself reported as a result. Chamfer distance, vertical-KDE JSD, and the
+# COV/MMD/1-NNA cloud metrics are NOT stem-tracker-derived and retain every
+# sample, so genuinely degenerate generations still count against the model
+# there — only the corrupted measurements are removed.
+
+TRACKER_METRICS = ["delta_h_max_cr", "delta_max_crown_r", "delta_hcb", "hist_2d_jsd"]
+
+
+def flag_stem_fit_failures(df_real_feats: pd.DataFrame,
+                           df_gen_feats: pd.DataFrame) -> tuple[float, pd.Series]:
+    """Flag generated samples whose stem-tracking crown radius exceeds the
+    largest crown radius observed in the real dataset (a physical-impossibility
+    bound that is not tuned to the generated results).
+
+    Returns (T_real, failed) where failed is a bool Series indexed like df_gen_feats.
+    """
+    T_real = float(df_real_feats["max_crown_r"].max())
+    failed = (df_gen_feats["max_crown_r"] > T_real).fillna(False)
+    return T_real, failed
+
+
+def build_stem_fit_report(df_real_feats: pd.DataFrame, df_gen_feats: pd.DataFrame,
+                          T_real: float, excluded: bool) -> tuple[str, pd.DataFrame, pd.DataFrame]:
+    """Failure-rate result (by genus and height bin) plus the raw-vs-valid
+    crown-radius W₁ that motivates the exclusion."""
+    g = df_gen_feats
+    n, nf = len(g), int(g["stem_fit_failed"].sum())
+    tall = ["Picea", "Pseudotsuga", "Abies", "Larix"]
+
+    by_g = (g.groupby("genus")["stem_fit_failed"].agg(["sum", "count"])
+            .assign(rate=lambda d: 100 * d["sum"] / d["count"])
+            .sort_values("rate", ascending=False))
+    by_h = (g.groupby("height_bin")["stem_fit_failed"].agg(["sum", "count"])
+            .assign(rate=lambda d: 100 * d["sum"] / d["count"]))
+
+    rcr = df_real_feats["max_crown_r"].dropna().values
+    g_raw = g["max_crown_r"].dropna().values
+    g_val = g.loc[~g["stem_fit_failed"], "max_crown_r"].dropna().values
+    w_raw = float(wasserstein_distance(rcr, g_raw)) if len(g_raw) >= 5 else float("nan")
+    w_val = float(wasserstein_distance(rcr, g_val)) if len(g_val) >= 5 else float("nan")
+
+    lines = ["STEM-FIT FAILURE / DEGENERATE-GENERATION RATE", "=" * 78]
+    lines.append(f"Failure = stem-tracking crown radius > largest real crown radius "
+                 f"(T_real = {T_real:.2f} m): a diverged spine fit on a degenerate cloud.")
+    lines.append(f"{'EXCLUDED from' if excluded else 'RETAINED in'} the stem-tracker metrics "
+                 f"(Δ HmCR/CrR/HCB, 2D-hist JSD, morphological W₁).")
+    lines.append("Chamfer, vertical-KDE JSD, and COV/MMD/1-NNA retain all samples.")
+    lines.append("")
+    lines.append(f"Overall: {nf}/{n} ({100 * nf / n:.2f}%)")
+    tc = g[g.genus.isin(tall)]
+    if len(tc):
+        lines.append(f"Tall conifers ({'+'.join(tall)}): "
+                     f"{int(tc['stem_fit_failed'].sum())}/{len(tc)} "
+                     f"({100 * tc['stem_fit_failed'].mean():.1f}%)")
+    lines.append("")
+    lines.append("  By genus (failed/total):")
+    for gen_, r in by_g.iterrows():
+        if r["sum"] > 0:
+            lines.append(f"    {str(gen_):<14s}{r['rate']:>6.1f}%  "
+                         f"({int(r['sum'])}/{int(r['count'])})")
+    lines.append("")
+    lines.append("  By height bin (failed/total):")
+    for hb in HEIGHT_BIN_LABELS:
+        if hb in by_h.index:
+            r = by_h.loc[hb]
+            lines.append(f"    {hb:<14s}{r['rate']:>6.1f}%  "
+                         f"({int(r['sum'])}/{int(r['count'])})")
+    lines.append("")
+    lines.append(f"  Crown-radius W₁ (global): raw = {w_raw:.3f} m  →  "
+                 f"failures excluded = {w_val:.3f} m")
+    lines.append("=" * 78)
+    return "\n".join(lines), by_g.reset_index(), by_h.reset_index()
+
+
 # ── Table building ───────────────────────────────────────────────────────────
 
 def _median_per_tree(df_pairs: pd.DataFrame) -> pd.DataFrame:
@@ -992,6 +1071,10 @@ def main():
                         help="Max trees per side per stratum for 1-NNA (rr+gg+rg matrices).")
     parser.add_argument("--min_per_stratum", type=int, default=10,
                         help="Min trees per side to include a (genus, height bin) stratum.")
+    parser.add_argument("--keep_failed_fits", action="store_true",
+                        help="Keep physically-impossible stem-tracking measurements "
+                             "(degenerate generations) in the morphological metrics "
+                             "instead of excluding them (default: exclude).")
     args = parser.parse_args()
 
     experiment_dir = Path(args.experiments_dir) / args.experiment_name
@@ -1024,6 +1107,23 @@ def main():
         print("ERROR: No valid pairs. Check data paths.")
         return
 
+    # 2b. Detect degenerate generations (diverged stem-fit → impossible crown
+    # radius). Unless --keep_failed_fits, exclude them from the stem-tracker
+    # metrics; Chamfer / vertical-KDE / COV / MMD keep all samples.
+    T_real, failed = flag_stem_fit_failures(df_real_feats, df_gen_feats)
+    df_gen_feats["stem_fit_failed"] = failed
+    df_pairs["stem_fit_failed"] = df_pairs["gen_id"].map(failed).fillna(False)
+    n_fail = int(df_gen_feats["stem_fit_failed"].sum())
+    print(f"\nStem-fit failures (crown radius > T_real = {T_real:.2f} m): "
+          f"{n_fail}/{len(df_gen_feats)} ({100 * n_fail / len(df_gen_feats):.2f}%)")
+    if args.keep_failed_fits:
+        df_gen_w1 = df_gen_feats
+        print("  --keep_failed_fits set: retaining them in the morphological metrics.")
+    else:
+        df_pairs.loc[df_pairs["stem_fit_failed"], TRACKER_METRICS] = np.nan
+        df_gen_w1 = df_gen_feats[~df_gen_feats["stem_fit_failed"]]
+        print("  Excluded from Δ HmCR/CrR/HCB, 2D-hist JSD, and morphological W₁.")
+
     # 3. Baselines
     print()
     df_intra, df_inter = build_baselines(
@@ -1031,11 +1131,11 @@ def main():
         num_workers=args.num_workers, seed=args.seed + 1000,
     )
 
-    # 4. Population W₁
+    # 4. Population W₁ (on valid generations)
     print("\nComputing population W₁...")
-    w1_global = compute_population_w1(df_real_feats, df_gen_feats)
-    w1_genus  = compute_population_w1(df_real_feats, df_gen_feats, group_col="genus")
-    w1_height = compute_population_w1(df_real_feats, df_gen_feats, group_col="height_bin")
+    w1_global = compute_population_w1(df_real_feats, df_gen_w1)
+    w1_genus  = compute_population_w1(df_real_feats, df_gen_w1, group_col="genus")
+    w1_height = compute_population_w1(df_real_feats, df_gen_w1, group_col="height_bin")
 
     # 4b. Supplementary population metrics (COV / MMD / 1-NNA), opt-in.
     pop_strata = pd.DataFrame()
@@ -1075,6 +1175,9 @@ def main():
     if args.cov_mmd:
         tables["table_4_population"] = build_population_table(
             pop_strata, pop_global, pop_by_hb)
+    stem_report, fail_by_genus, fail_by_height = build_stem_fit_report(
+        df_real_feats, df_gen_feats, T_real, excluded=not args.keep_failed_fits)
+    tables["table_5_stem_fit_failures"] = stem_report
 
     # 7. Print
     for t in tables.values():
@@ -1086,6 +1189,11 @@ def main():
     save_results(output_dir, df_pairs, df_real_feats, df_gen_feats,
                  tables, w1_global, w1_genus, w1_height,
                  run_args=vars(args))
+
+    # Save the stem-fit failure-rate result.
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fail_by_genus.to_csv(output_dir / "stem_fit_failures_by_genus.csv", index=False)
+    fail_by_height.to_csv(output_dir / "stem_fit_failures_by_height.csv", index=False)
 
     # Save supplementary population metrics (CSV + JSON) alongside the tables.
     if args.cov_mmd and not pop_strata.empty:
