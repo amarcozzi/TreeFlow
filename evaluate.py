@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 import zarr
 from pathlib import Path
-from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
 from scipy.stats import gaussian_kde, wasserstein_distance
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
@@ -98,15 +98,24 @@ def canonicalize(points: np.ndarray) -> np.ndarray:
 
 
 def chamfer_distance(p1: np.ndarray, p2: np.ndarray) -> float:
-    """Symmetric Chamfer distance (euclidean, in meters)."""
-    D = cdist(p1, p2, metric="euclidean")
-    return float((D.min(axis=1).mean() + D.min(axis=0).mean()) / 2)
+    """Symmetric Chamfer distance (euclidean, in meters).
+
+    Computed with KD-trees rather than a dense ``cdist`` matrix. The result is
+    identical (Chamfer is a mean over true nearest-neighbour distances, which a
+    KD-tree returns exactly) but it avoids the O(n²) matrix — at 16384 points
+    that matrix is ~2 GB per pair — and runs in O(n log n).
+    """
+    d_ab, _ = cKDTree(p2).query(p1)   # each p1 point → nearest p2 point
+    d_ba, _ = cKDTree(p1).query(p2)   # each p2 point → nearest p1 point
+    return float((d_ab.mean() + d_ba.mean()) / 2)
 
 
 # ── Chamfer distance parallel helpers ────────────────────────────────────────
 
 _CD_CLOUDS_A: dict[str, np.ndarray] = {}
 _CD_CLOUDS_B: dict[str, np.ndarray] = {}
+_CD_TREE_A: dict[str, cKDTree] = {}   # worker-local: id → cKDTree over clouds_a
+_CD_TREE_B: dict[str, cKDTree] = {}   # worker-local: id → cKDTree over clouds_b
 
 
 def _cd_worker(task: tuple[str, str]) -> float:
@@ -115,27 +124,57 @@ def _cd_worker(task: tuple[str, str]) -> float:
     return chamfer_distance(_CD_CLOUDS_A[id_a], _CD_CLOUDS_B[id_b])
 
 
+def _cd_worker_cached(task: tuple[str, str]) -> float:
+    """Like _cd_worker but memoises the per-cloud KD-trees in each worker.
+
+    In a dense matrix every cloud recurs in many pairs (up to one row/column
+    of the matrix), so building its tree once and reusing it removes the
+    dominant cost. The cache is worker-local and dies with the pool.
+    """
+    id_a, id_b = task
+    ta = _CD_TREE_A.get(id_a)
+    if ta is None:
+        ta = cKDTree(_CD_CLOUDS_A[id_a]); _CD_TREE_A[id_a] = ta
+    tb = _CD_TREE_B.get(id_b)
+    if tb is None:
+        tb = cKDTree(_CD_CLOUDS_B[id_b]); _CD_TREE_B[id_b] = tb
+    d_ab, _ = tb.query(_CD_CLOUDS_A[id_a])
+    d_ba, _ = ta.query(_CD_CLOUDS_B[id_b])
+    return float((d_ab.mean() + d_ba.mean()) / 2)
+
+
 def _compute_cd_parallel(
     clouds_a: dict[str, np.ndarray],
     clouds_b: dict[str, np.ndarray],
     pairs: list[tuple[str, str]],
     num_workers: int,
     desc: str,
+    cached: bool = False,
 ) -> list[float]:
-    """Compute Chamfer distances for a list of (id_a, id_b) pairs in parallel."""
-    global _CD_CLOUDS_A, _CD_CLOUDS_B
+    """Compute Chamfer distances for a list of (id_a, id_b) pairs in parallel.
+
+    `cached=True` reuses per-cloud KD-trees across pairs (worth it for dense
+    matrices, where each cloud appears in many pairs); the default rebuilds
+    per pair (fine for the pair table, where each cloud appears ~once).
+    """
+    global _CD_CLOUDS_A, _CD_CLOUDS_B, _CD_TREE_A, _CD_TREE_B
     _CD_CLOUDS_A = clouds_a
     _CD_CLOUDS_B = clouds_b
+    _CD_TREE_A = {}
+    _CD_TREE_B = {}
+    worker = _cd_worker_cached if cached else _cd_worker
     if num_workers <= 1:
-        results = [_cd_worker(p) for p in tqdm(pairs, desc=desc)]
+        results = [worker(p) for p in tqdm(pairs, desc=desc)]
     else:
         with ProcessPoolExecutor(max_workers=num_workers) as pool:
             results = list(tqdm(
-                pool.map(_cd_worker, pairs, chunksize=64),
+                pool.map(worker, pairs, chunksize=64),
                 total=len(pairs), desc=desc,
             ))
     _CD_CLOUDS_A = {}
     _CD_CLOUDS_B = {}
+    _CD_TREE_A = {}
+    _CD_TREE_B = {}
     return results
 
 
@@ -606,7 +645,8 @@ def one_nn_accuracy(rr: np.ndarray, gg: np.ndarray, rg: np.ndarray) -> float:
 def _cd_matrix(clouds_a, ids_a, clouds_b, ids_b, num_workers, desc):
     """Dense pairwise Chamfer matrix (len(ids_a) × len(ids_b))."""
     pairs = [(a, b) for a in ids_a for b in ids_b]
-    vals = _compute_cd_parallel(clouds_a, clouds_b, pairs, num_workers, desc)
+    vals = _compute_cd_parallel(clouds_a, clouds_b, pairs, num_workers, desc,
+                                cached=True)
     return np.asarray(vals, dtype=np.float64).reshape(len(ids_a), len(ids_b))
 
 
