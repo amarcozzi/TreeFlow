@@ -407,7 +407,12 @@ def build_pair_dataframe(
     df_gen_feats = pd.DataFrame([
         {"gen_id": gid, "real_id": gen_id_to_meta[gid]["source_tree_id"],
          "h_max_cr": r["h_max_cr"],
-         "max_crown_r": r["max_crown_r"], "hcb": r["hcb"]}
+         "max_crown_r": r["max_crown_r"], "hcb": r["hcb"],
+         # Identity of the underlying object, used to deduplicate the generated
+         # set in the population metrics. Retrieval samples carry the id of the
+         # retrieved real tree (so repeats of the same tree collapse); model
+         # samples are all unique, so they fall back to their own gen_id.
+         "dedup_key": str(gen_id_to_meta[gid].get("retrieved_tree_id", gid))}
         for gid, r in gen_feats.items()
         if gid in gen_id_to_meta
     ]).set_index("gen_id")
@@ -653,6 +658,17 @@ def compute_population_cov_mmd(
             continue
         genus, hb = key
         real_ids = list(grp_r.index)
+        # Deduplicate the generated set by underlying object identity so that
+        # methods which re-emit the same tree (e.g. retrieval reusing a training
+        # exemplar for many targets) are scored as a set of distinct samples.
+        # Without this, exact-duplicate clouds give 1-NNA self-matches at
+        # distance 0 and inflate it away from the ideal 0.5.
+        if "dedup_key" in grp_g.columns:
+            n_before = len(grp_g)
+            grp_g = grp_g.drop_duplicates(subset="dedup_key")
+            n_dropped = n_before - len(grp_g)
+        else:
+            n_dropped = 0
         gen_ids = list(grp_g.index)
         if len(real_ids) < min_per_stratum or len(gen_ids) < min_per_stratum:
             continue
@@ -666,22 +682,24 @@ def compute_population_cov_mmd(
         cov = coverage(cross)
         mmd_v = mmd(cross)
 
-        # 1-NNA on a (possibly) smaller balanced subset — needs rr + gg + rg.
-        nr = min(len(real_ids), max_per_nna)
-        ng = min(len(gen_ids), max_per_nna)
-        nna_r = real_ids if nr == len(real_ids) else sorted(rng.choice(real_ids, nr, replace=False).tolist())
-        nna_g = gen_ids if ng == len(gen_ids) else sorted(rng.choice(gen_ids, ng, replace=False).tolist())
+        # 1-NNA on a size-balanced subset (equal real/gen counts avoid biasing
+        # the leave-one-out classification) — needs rr + gg + rg matrices.
+        n_bal = min(len(real_ids), len(gen_ids), max_per_nna)
+        nna_r = real_ids if n_bal == len(real_ids) else sorted(rng.choice(real_ids, n_bal, replace=False).tolist())
+        nna_g = gen_ids if n_bal == len(gen_ids) else sorted(rng.choice(gen_ids, n_bal, replace=False).tolist())
         rr = _cd_matrix(real_sub, nna_r, real_sub, nna_r, num_workers, f"1-NNA rr {genus}/{hb}")
         gg = _cd_matrix(gen_sub, nna_g, gen_sub, nna_g, num_workers, f"1-NNA gg {genus}/{hb}")
         rg = _cd_matrix(real_sub, nna_r, gen_sub, nna_g, num_workers, f"1-NNA rg {genus}/{hb}")
         nna = one_nn_accuracy(rr, gg, rg)
 
         print(f"    [{genus}, {hb}] COV={cov:.3f} MMD={mmd_v:.4f} 1-NNA={nna:.3f} "
-              f"(n_real={len(real_ids)}, n_gen={len(gen_ids)})")
+              f"(n_real={len(real_ids)}, n_gen={len(gen_ids)}, "
+              f"dup_dropped={n_dropped}, nna_n={n_bal})")
         rows.append({
             "genus": genus, "height_bin": hb,
             "coverage": cov, "mmd": mmd_v, "one_nna": nna,
             "n_real": len(real_ids), "n_gen": len(gen_ids),
+            "n_gen_dropped_dup": n_dropped,
         })
 
     return pd.DataFrame(rows)
